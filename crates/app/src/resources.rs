@@ -38,6 +38,95 @@ pub struct Lock {
     pub essay: Group,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePatch {
+    pub id: String,
+    pub path: String,
+    pub source_sha256: String,
+    pub patched_sha256: String,
+}
+
+const CALCULATOR_PATH: &str = "lua/calculator_translator.lua";
+const CALCULATOR_BEFORE: &str = concat!(
+    "  -- return語句保證了只有合法的Lua表達式才可執行\n",
+    "  local result = load(\"return \"..expe)()\n",
+    "  if result == nil then return end\n",
+    "  \n",
+    "  result = serialize(result)\n",
+    "  yield(Candidate(\"number\", seg.start, seg._end, exp..\"=\"..result, \"\"))\n",
+);
+const CALCULATOR_AFTER: &str = include_str!("../../../resources/patches/calculator-evaluation.lua");
+
+fn calculator_patch() -> Result<RuntimePatch> {
+    let patch: RuntimePatch =
+        serde_json::from_str(include_str!("../../../resources/patches/calculator.json"))?;
+    if patch.path != CALCULATOR_PATH {
+        return Err("计算器补丁目标不符".into());
+    }
+    Ok(patch)
+}
+
+fn rewrite_calculator(source: &str) -> Result<String> {
+    // 只替换一个锁定区段，保留原文件的 CRLF/LF 以及其余资源内容。
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let before = CALCULATOR_BEFORE.replace('\n', newline);
+    let after = CALCULATOR_AFTER
+        .replace("\r\n", "\n")
+        .replace('\n', newline);
+    if source.matches(&before).count() != 1 {
+        return Err("计算器补丁原区段缺失或重复".into());
+    }
+    Ok(source.replacen(&before, &after, 1))
+}
+
+/// 仅用于未启用的空运行目录；vendor 快照和源文件始终保持原样。
+/// 本补丁只隔离计算器异常，表达式权限与计算预算仍需在生产开放前单独限制。
+pub(crate) fn stage_tiger(root: &Path, target: &Path) -> Result<RuntimePatch> {
+    reject_links(target)?;
+    if fs::read_dir(target)?.next().is_some() {
+        return Err("运行资源只能写入空暂存目录".into());
+    }
+    let mut tiger: Group = read_json(&root.join("resources/tiger.lock.json"))?;
+    let patch = calculator_patch()?;
+    let original = tiger
+        .files
+        .iter()
+        .find(|entry| entry.path == CALCULATOR_PATH)
+        .ok_or("缺少原计算器清单")?;
+    if original.sha256 != patch.source_sha256 {
+        return Err("补丁与原资源锁不匹配".into());
+    }
+    tiger.files.retain(|entry| !entry.path.starts_with("01 "));
+    copy_entries(&root.join("vendor/tiger"), target, &tiger.files)?;
+    let path = target.join(CALCULATOR_PATH);
+    let source = fs::read(&path)?;
+    if format!("{:x}", Sha256::digest(&source)) != patch.source_sha256 {
+        return Err("计算器补丁输入校验失败".into());
+    }
+    let patched = rewrite_calculator(std::str::from_utf8(&source)?)?;
+    if format!("{:x}", Sha256::digest(patched.as_bytes())) != patch.patched_sha256 {
+        return Err("计算器补丁输出校验失败".into());
+    }
+    // 此目录尚未发布工作区标记；写入失败不会启用半成品，更不会覆盖现用配置。
+    fs::write(path, patched)?;
+    verify_runtime_tiger(target)?;
+    Ok(patch)
+}
+
+pub(crate) fn verify_runtime_tiger(target: &Path) -> Result<()> {
+    let path = target.join(CALCULATOR_PATH);
+    reject_links(&path)?;
+    if sha256(&path)? != calculator_patch()?.patched_sha256 {
+        return Err("计算器补丁版本不符，请重新创建运行目录".into());
+    }
+    Ok(())
+}
+
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
 }
@@ -433,5 +522,57 @@ mod tests {
             lock["librime"]["runtime"]["dll_sha256"],
             tigerrime_engine::DLL_SHA256
         );
+    }
+
+    #[test]
+    fn calculator_patch_preserves_surroundings_and_line_endings() {
+        for newline in ["\n", "\r\n"] {
+            let source = format!(
+                "prefix{newline}{}suffix{newline}",
+                CALCULATOR_BEFORE.replace('\n', newline)
+            );
+            let expected = format!(
+                "prefix{newline}{}suffix{newline}",
+                CALCULATOR_AFTER
+                    .replace("\r\n", "\n")
+                    .replace('\n', newline)
+            );
+            assert_eq!(rewrite_calculator(&source).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn calculator_patch_rejects_changed_or_duplicate_input() {
+        assert!(rewrite_calculator("different source").is_err());
+        assert!(rewrite_calculator(&CALCULATOR_BEFORE.repeat(2)).is_err());
+    }
+
+    #[test]
+    fn runtime_staging_will_not_overwrite_existing_data() {
+        let (root, _) = fixture();
+        assert!(stage_tiger(&root, &root).is_err());
+        assert_eq!(fs::read(root.join("schema.yaml")).unwrap(), b"test");
+    }
+
+    #[test]
+    fn patch_source_pin_matches_tiger_lock() {
+        let tiger: Group =
+            serde_json::from_str(include_str!("../../../resources/tiger.lock.json")).unwrap();
+        let original = tiger
+            .files
+            .iter()
+            .find(|entry| entry.path == CALCULATOR_PATH)
+            .unwrap();
+        assert_eq!(calculator_patch().unwrap().source_sha256, original.sha256);
+    }
+
+    #[test]
+    fn altered_runtime_calculator_is_rejected_without_rewriting_it() {
+        let (root, _) = fixture();
+        fs::create_dir(root.join("lua")).unwrap();
+        let path = root.join(CALCULATOR_PATH);
+        fs::write(&path, "manual edit").unwrap();
+        assert!(verify_runtime_tiger(&root).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"manual edit");
     }
 }

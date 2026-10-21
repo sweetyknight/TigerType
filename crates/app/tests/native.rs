@@ -24,9 +24,14 @@ fn run_child(
 
 #[test]
 #[ignore = "需要锁定的 vendor 资源；命令见 README"]
-fn native_engine_outputs_and_known_lua_failure() -> Result<()> {
+fn native_engine_outputs_without_errors() -> Result<()> {
     let root = project_root()?;
     let work = probe::new_workspace(&root)?;
+    let paths = probe::runtime_paths(&root, &work)?;
+    assert!(
+        !paths.user.starts_with(&root),
+        "活动数据库不能在源码工作区内"
+    );
     assert!(
         // SAFETY: 仅查询已加载模块，不加载 DLL；资源准备必须保持父进程无引擎。
         unsafe {
@@ -35,12 +40,13 @@ fn native_engine_outputs_and_known_lua_failure() -> Result<()> {
         .is_null()
     );
     eprintln!("Rust 原生测试目录: {}", work.display());
+    eprintln!("隔离运行数据: {}", paths.user.display());
     let binary = env!("CARGO_BIN_EXE_tigerrime");
     let deploy = run_child(
         Command::new(binary)
             .arg("probe-deploy")
             .arg(&work)
-            .current_dir(work.join("user")),
+            .current_dir(&paths.user),
         &work,
         "deploy",
         Duration::from_secs(300),
@@ -50,28 +56,23 @@ fn native_engine_outputs_and_known_lua_failure() -> Result<()> {
         Command::new(binary)
             .arg("probe-engine")
             .arg(&work)
-            .current_dir(work.join("user")),
+            .current_dir(&paths.user),
         &work,
         "engine",
         Duration::from_secs(120),
     )?;
     let report: serde_json::Value = resources::read_json(&work.join("engine.json"))?;
-    assert_eq!(report["cases"].as_array().unwrap().len(), 20);
+    assert_eq!(report["cases"].as_array().unwrap().len(), 40);
     assert_eq!(report["failed_cases"], serde_json::json!([]));
-    assert_eq!(report["session_cycles"], 100);
+    assert_eq!(report["session_cycles"], 1000);
     assert_eq!(report["commit_once"], true);
     assert_eq!(report["ascii_passthrough"], true);
-    // 这是已知缺陷回归，不是干净诊断验收：必须准确复现，不能隐藏或忽略其他错误。
-    assert_eq!(status.code(), Some(1), "原计算器应产生诊断失败");
-    let errors = report["native_errors"].as_array().unwrap();
-    assert_eq!(errors.len(), 1, "出现新的原生错误: {errors:?}");
-    let error = errors[0].as_str().unwrap();
-    assert!(
-        error.contains("LuaTranslation::Next error(2)")
-            && error.contains("calculator_translator.lua:400: attempt to call a nil value")
-    );
+    assert_eq!(report["calculator_recovery"], true);
+    // 已知缺陷修复后不再保留白名单；任何原生错误都必须使验收失败。
+    assert!(status.success(), "引擎子进程失败: {report}");
+    assert_eq!(report["native_errors"], serde_json::json!([]));
     eprintln!(
-        "20 个输出断言及会话/提交测试通过；原计算器错误仍存在。{}",
+        "40 个输出断言及会话/提交/计算器恢复测试通过，原生诊断为零。{}",
         report["latency_ms"]
     );
     Ok(())

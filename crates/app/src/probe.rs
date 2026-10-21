@@ -2,7 +2,7 @@
 
 use crate::{
     Result,
-    resources::{self, Entry, Group, Lock},
+    resources::{self, Entry, Lock},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,6 +14,61 @@ use std::{
 };
 use tigerrime_contracts::InputState;
 use tigerrime_engine::{Engine, EnginePaths};
+
+const WORKSPACE_MARKER: &[u8] = b"TigerRime isolated synthetic workspace v2\n";
+const SESSION_CYCLES: usize = 1_000;
+
+fn runtime_name(work: &Path) -> Result<&str> {
+    let name = work
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("缺少测试目录名")?;
+    let (process, nonce) = name
+        .strip_prefix("rust-engine-")
+        .and_then(|suffix| suffix.split_once('-'))
+        .ok_or("不是生成的引擎测试目录")?;
+    process.parse::<u32>()?;
+    nonce.parse::<u128>()?;
+    Ok(name)
+}
+
+fn runtime_base(root: &Path) -> Result<PathBuf> {
+    let base = std::env::temp_dir().join("TigerRime-tests");
+    resources::reject_links(&base)?;
+    let base = base.canonicalize()?;
+    // 活动数据库必须离开被观察的源码工作区；TMP/TEMP 被改到工作区内时明确拒绝。
+    if base.starts_with(root.canonicalize()?) {
+        return Err("测试临时目录不能位于项目工作区内".into());
+    }
+    Ok(base)
+}
+
+/// 根据受限报告目录派生临时运行数据，不接受任意数据库路径。
+pub fn runtime_paths(root: &Path, work: &Path) -> Result<EnginePaths> {
+    resources::reject_links(work)?;
+    let work = work.canonicalize()?;
+    if work.parent() != Some(root.join("artifacts").canonicalize()?.as_path())
+        || fs::read(work.join("test-workspace"))? != WORKSPACE_MARKER
+    {
+        return Err("探针只允许新建的隔离测试报告目录".into());
+    }
+    let name = runtime_name(&work)?;
+    let data = runtime_base(root)?.join(name);
+    resources::reject_links(&data)?;
+    if fs::read(data.join("test-workspace"))? != name.as_bytes() {
+        return Err("测试数据与报告目录不匹配".into());
+    }
+    let paths = EnginePaths {
+        shared: data.join("shared"),
+        user: data.join("user"),
+        logs: data.join("logs"),
+    };
+    for path in [&paths.shared, &paths.user, &paths.logs] {
+        resources::reject_links(path)?;
+    }
+    resources::verify_runtime_tiger(&paths.user)?;
+    Ok(paths)
+}
 
 #[derive(Deserialize)]
 struct Fixtures {
@@ -33,6 +88,7 @@ struct Case {
     commit: Option<String>,
     page_size: Option<usize>,
     min_candidates: Option<usize>,
+    max_candidates: Option<usize>,
     comment_contains: Option<String>,
     comment_nonempty: Option<bool>,
 }
@@ -40,17 +96,25 @@ struct Case {
 pub fn new_workspace(root: &Path) -> Result<PathBuf> {
     resources::verify(root)?;
     let work = resources::new_directory(&root.join("artifacts"), "rust-engine")?;
+    let base = std::env::temp_dir().join("TigerRime-tests");
+    resources::reject_links(&base)?;
+    fs::create_dir_all(&base)?;
+    let data = runtime_base(root)?.join(runtime_name(&work)?);
+    // create_dir 拒绝复用已有目录；不复制、共享或删除任何现用用户数据库。
+    fs::create_dir(&data)?;
     for directory in ["shared", "user", "logs"] {
-        fs::create_dir(work.join(directory))?;
+        fs::create_dir(data.join(directory))?;
     }
-    let mut tiger: Group = resources::read_json(&root.join("resources/tiger.lock.json"))?;
-    tiger.files.retain(|entry| !entry.path.starts_with("01 "));
-    resources::copy_entries(&root.join("vendor/tiger"), &work.join("user"), &tiger.files)?;
+    let patch = resources::stage_tiger(root, &data.join("user"))?;
+    fs::write(
+        work.join("runtime-patches.json"),
+        serde_json::to_vec_pretty(&[patch])?,
+    )?;
     let lock: Lock = resources::read_json(&root.join("dependencies.lock.json"))?;
     for (name, group) in [("prelude", lock.prelude), ("essay", lock.essay)] {
         resources::copy_entries(
             &root.join("vendor").join(name),
-            &work.join("shared"),
+            &data.join("shared"),
             &group.files,
         )?;
     }
@@ -64,11 +128,11 @@ pub fn new_workspace(root: &Path) -> Result<PathBuf> {
             .path
             .strip_prefix("deps/share/")
             .ok_or("OpenCC 路径不符")?;
-        let target = work.join("shared").join(relative);
+        let target = data.join("shared").join(relative);
         fs::create_dir_all(target.parent().ok_or("缺少父目录")?)?;
         fs::copy(source, target)?;
         resources::verify_entry(
-            &work.join("shared"),
+            &data.join("shared"),
             &Entry {
                 path: relative.to_owned(),
                 size: entry.size,
@@ -85,10 +149,8 @@ pub fn new_workspace(root: &Path) -> Result<PathBuf> {
     ] {
         fs::copy(root.join(source), work.join(target))?;
     }
-    fs::write(
-        work.join("test-workspace"),
-        b"TigerRime synthetic data only\n",
-    )?;
+    fs::write(data.join("test-workspace"), runtime_name(&work)?.as_bytes())?;
+    fs::write(work.join("test-workspace"), WORKSPACE_MARKER)?;
     Ok(work)
 }
 
@@ -119,6 +181,12 @@ fn check(case: &Case, state: &InputState, commit: &str) -> Vec<&'static str> {
         .is_some_and(|v| state.candidates.len() < v)
     {
         failures.push("候选数量不足");
+    }
+    if case
+        .max_candidates
+        .is_some_and(|v| state.candidates.len() > v)
+    {
+        failures.push("意外产生候选");
     }
     if case
         .comment_contains
@@ -202,7 +270,13 @@ fn measure(engine: &Engine, fixtures: Fixtures) -> Result<Value> {
             "candidates": state.candidates.iter().map(|candidate| json!({"text": candidate.text, "comment": candidate.comment, "label": candidate.label})).collect::<Vec<_>>() }));
         session.close()?;
     }
-    for (schema, expected) in [("tiger", false), ("tigress", false), ("PY_c", true)] {
+    // 英文用户词典必须保持启用，防止用关闭学习来绕过 I/O 回归。
+    for (schema, expected) in [
+        ("tiger", false),
+        ("tigress", false),
+        ("PY_c", true),
+        ("easy_english", true),
+    ] {
         if engine.config_bool(schema, "translator/enable_user_dict")? != expected {
             return Err(format!("学习开关变化: {schema}").into());
         }
@@ -222,8 +296,31 @@ fn measure(engine: &Engine, fixtures: Fixtures) -> Result<Value> {
         return Err("英文透传按键被吞掉".into());
     }
     session.close()?;
+    // 同一会话在错误表达式之后仍可正常计算，避免只验证新建会话而遗漏残留状态。
+    for schema in ["tiger", "tigress", "PY_c"] {
+        let mut session = engine.create_session(schema)?;
+        reset_options(&mut session)?;
+        for key in "=sin()".chars() {
+            if session.process_key(key as i32, 0)?.commit.is_some() {
+                return Err("错误表达式意外提交".into());
+            }
+        }
+        session.clear();
+        let mut state = session.snapshot()?;
+        for key in "=1+2".chars() {
+            state = session.process_key(key as i32, 0)?.state;
+        }
+        if !state
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text == "1+2=3")
+        {
+            return Err(format!("计算器错误后未恢复: {schema}").into());
+        }
+        session.close()?;
+    }
     // 所有路径都走同一个会话 guard；主动 close 校验销毁返回值。
-    for _ in 0..100 {
+    for _ in 0..SESSION_CYCLES {
         let mut session = engine.create_session("tiger")?;
         reset_options(&mut session)?;
         session.process_key('u' as i32, 0)?;
@@ -250,8 +347,8 @@ fn measure(engine: &Engine, fixtures: Fixtures) -> Result<Value> {
     }
     samples.sort_by(f64::total_cmp);
     Ok(
-        json!({"cases": results, "failed_cases": failed_cases, "session_cycles": 100,
-        "commit_once": true, "ascii_passthrough": true,
+        json!({"cases": results, "failed_cases": failed_cases, "session_cycles": SESSION_CYCLES,
+        "commit_once": true, "ascii_passthrough": true, "calculator_recovery": true,
         "latency_ms": {"scope": "Rust process_key + owned context/status/commit; no IPC/TSF/UI", "samples": samples.len(),
             "p50": samples[(samples.len() * 50).div_ceil(100) - 1],
             "p95": samples[(samples.len() * 95).div_ceil(100) - 1],
@@ -260,21 +357,8 @@ fn measure(engine: &Engine, fixtures: Fixtures) -> Result<Value> {
 }
 
 pub fn run(root: &Path, work: &Path, deploy: bool) -> Result<()> {
-    resources::reject_links(work)?;
+    let paths = runtime_paths(root, work)?;
     let work = work.canonicalize()?;
-    if work.parent() != Some(root.join("artifacts").canonicalize()?.as_path())
-        || !work.join("test-workspace").is_file()
-    {
-        return Err("探针仅允许本项目新建的隔离测试目录".into());
-    }
-    let paths = EnginePaths {
-        shared: work.join("shared"),
-        user: work.join("user"),
-        logs: work.join("logs"),
-    };
-    for path in [&paths.shared, &paths.user, &paths.logs] {
-        resources::reject_links(path)?;
-    }
     let dll = root.join("vendor/librime/dist/lib/rime.dll");
     let start = Instant::now();
     let mut report = if deploy {
@@ -295,6 +379,8 @@ pub fn run(root: &Path, work: &Path, deploy: bool) -> Result<()> {
     };
     let errors = diagnostics(&paths.logs)?;
     report["native_errors"] = json!(errors);
+    report["user_data_dir"] = json!(paths.user);
+    report["native_log_dir"] = json!(paths.logs);
     fs::write(
         work.join(if deploy { "deploy.json" } else { "engine.json" }),
         serde_json::to_vec_pretty(&report)?,
@@ -319,8 +405,18 @@ mod tests {
     fn fixture_expectations_are_not_silently_ignored() {
         let fixtures: Fixtures =
             serde_json::from_str(include_str!("../../../fixtures/engine-smoke.json")).unwrap();
-        assert_eq!(fixtures.cases.len(), 20);
+        assert_eq!(fixtures.cases.len(), 40);
         for case in fixtures.cases {
+            if case.max_candidates == Some(0) {
+                assert!(check(&case, &InputState::default(), "").is_empty());
+                assert!(!check(&case, &InputState::default(), "unexpected commit").is_empty());
+                let mut state = InputState::default();
+                state
+                    .candidates
+                    .push(tigerrime_contracts::Candidate::default());
+                assert!(!check(&case, &state, "").is_empty());
+                continue;
+            }
             assert!(
                 !check(&case, &InputState::default(), "").is_empty(),
                 "{}",
@@ -342,6 +438,43 @@ mod tests {
         assert!(
             serde_json::from_str::<Case>(r#"{"id":"x","schema":"tiger","input":"u","frist":"的"}"#)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn runtime_name_cannot_choose_an_arbitrary_directory() {
+        assert_eq!(
+            runtime_name(Path::new("rust-engine-42-12345")).unwrap(),
+            "rust-engine-42-12345"
+        );
+        for value in [
+            "Rime",
+            "rust-engine-other-user",
+            "rust-engine-42-../Rime",
+            "rust-engine-42-123-extra",
+            "rust-engine-4294967296-1",
+        ] {
+            assert!(runtime_name(Path::new(value)).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn existing_or_legacy_workspace_is_not_adopted() {
+        let root = resources::new_directory(&std::env::temp_dir(), "tigerrime-path-tests").unwrap();
+        let work = resources::new_directory(&root.join("artifacts"), "rust-engine").unwrap();
+        fs::write(
+            work.join("test-workspace"),
+            b"TigerRime synthetic data only\n",
+        )
+        .unwrap();
+        assert!(runtime_paths(&root, &work).is_err());
+        let existing = root.join("existing-user-data");
+        fs::create_dir(&existing).unwrap();
+        fs::write(existing.join("test-workspace"), WORKSPACE_MARKER).unwrap();
+        assert!(runtime_paths(&root, &existing).is_err());
+        assert_eq!(
+            fs::read(existing.join("test-workspace")).unwrap(),
+            WORKSPACE_MARKER
         );
     }
 }

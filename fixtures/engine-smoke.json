@@ -20,6 +20,26 @@
     {"id": "decomposition", "schema": "tiger", "input": "u", "options": {"chaifen": true}, "comment_nonempty": true},
     {"id": "traditional", "schema": "tiger", "input": "kry", "options": {"simplification": true}, "first": "漢"},
     {"id": "emoji", "schema": "tiger", "input": "rtm", "options": {"emoji_cn": true}, "contains": "😀"},
-    {"id": "non-bmp", "schema": "tiger", "input": "fgfa", "options": {"extended_char": false}, "contains": "𠀀"}
+    {"id": "non-bmp", "schema": "tiger", "input": "fgfa", "options": {"extended_char": false}, "contains": "𠀀"},
+    {"id": "calculator-tigress", "schema": "tigress", "input": "=1+2", "contains": "1+2=3"},
+    {"id": "calculator-pinyin", "schema": "PY_c", "input": "=1+2", "contains": "1+2=3"},
+    {"id": "calculator-incomplete-operator", "schema": "tiger", "input": "=1+", "max_candidates": 0, "commit": ""},
+    {"id": "calculator-incomplete-parenthesis", "schema": "tiger", "input": "=(1+2", "max_candidates": 0, "commit": ""},
+    {"id": "calculator-invalid-syntax", "schema": "tiger", "input": "=1+)", "max_candidates": 0, "commit": ""},
+    {"id": "calculator-missing-argument", "schema": "tiger", "input": "=sin()", "max_candidates": 0, "commit": ""},
+    {"id": "calculator-unknown-function", "schema": "tiger", "input": "=missing(1)", "max_candidates": 0, "commit": ""},
+    {"id": "calculator-integer-division-zero", "schema": "tiger", "input": "=1//0", "max_candidates": 0, "commit": ""},
+    {"id": "calculator-unserializable-function", "schema": "tiger", "input": "=math.sin", "max_candidates": 0, "commit": ""},
+    {"id": "calculator-nil", "schema": "tiger", "input": "=nil", "max_candidates": 0, "commit": ""},
+    {"id": "calculator-zero", "schema": "tiger", "input": "=0", "contains": "0=0"},
+    {"id": "calculator-false", "schema": "tiger", "input": "=1>2", "contains": "1>2=false"},
+    {"id": "calculator-power", "schema": "tiger", "input": "=2^10", "contains": "2^10=1024"},
+    {"id": "calculator-trigonometry", "schema": "tiger", "input": "=sin(pi/2)", "contains": "sin(pi/2)=1"},
+    {"id": "calculator-list-maximum", "schema": "tiger", "input": "=max({1,7,2})", "contains": "max({1,7,2})=7"},
+    {"id": "calculator-range", "schema": "tiger", "input": "=range(3)", "contains": "range(3)={0, 1, 2}"},
+    {"id": "calculator-lambda", "schema": "tiger", "input": "=map({1,2,3},\\x.x^2|)", "contains": "map({1,2,3},\\x.x^2|)={1, 4, 9}"},
+    {"id": "calculator-sum", "schema": "tiger", "input": "=sum({1,2,3})", "contains": "sum({1,2,3})=6"},
+    {"id": "calculator-original-example", "schema": "tiger", "input": "=floor(9^(8/7)*cos(deg(6)))", "contains": "floor(9^(8/7)*cos(deg(6)))=-3"},
+    {"id": "calculator-string-result", "schema": "tiger", "input": "=type(1)", "contains": "type(1)=\"number\""}
   ]
 }
