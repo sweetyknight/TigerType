@@ -68,11 +68,13 @@ fn native_engine_outputs_without_errors() -> Result<()> {
     assert_eq!(report["commit_once"], true);
     assert_eq!(report["ascii_passthrough"], true);
     assert_eq!(report["calculator_recovery"], true);
+    assert_eq!(report["protocol_dispatch"], true);
+    assert_eq!(report["protocol_client_delivery"], true);
     // 已知缺陷修复后不再保留白名单；任何原生错误都必须使验收失败。
     assert!(status.success(), "引擎子进程失败: {report}");
     assert_eq!(report["native_errors"], serde_json::json!([]));
     eprintln!(
-        "40 个输出断言及会话/提交/计算器恢复测试通过，原生诊断为零。{}",
+        "40 个输出断言及会话/提交/计算器恢复/协议调度/分片交付测试通过，原生诊断为零。{}",
         report["latency_ms"]
     );
     Ok(())
@@ -137,5 +139,174 @@ fn cold_resource_preparation_from_locked_cache() -> Result<()> {
     resources::prepare(&work, &root.join("vendor/tiger"))?;
     resources::verify(&work)?;
     eprintln!("Rust 冷启动资源准备通过: {}", work.display());
+    Ok(())
+}
+
+#[test]
+#[ignore = "需要锁定资源；真实引擎管道及受控故障测试"]
+fn native_engine_pipe_faults_and_recovery() -> Result<()> {
+    use std::time::Instant;
+    use tigerrime_app::pipe_engine::{EngineProcess, Fault};
+    use tigerrime_contracts::protocol::{Command as Input, Reply};
+    use tigerrime_ipc::{Error as IpcError, pipe::Runtime};
+
+    let deadline = || Instant::now() + Duration::from_secs(5);
+    let key = |key: char| Input::Key {
+        keycode: key as i32,
+        modifiers: 0,
+    };
+    let root = project_root()?;
+    let work = probe::new_workspace(&root)?;
+    let paths = probe::runtime_paths(&root, &work)?;
+    let binary = Path::new(env!("CARGO_BIN_EXE_tigerrime"));
+    eprintln!("真实管道引擎报告: {}", work.display());
+    assert!(
+        run_child(
+            Command::new(binary)
+                .arg("probe-deploy")
+                .arg(&work)
+                .current_dir(&paths.user),
+            &work,
+            "deploy",
+            Duration::from_secs(300)
+        )?
+        .success()
+    );
+    let runtime = Runtime::new()?;
+    let mut summary = serde_json::json!({"scope": "actual isolated librime over named pipe; no TSF/UI",
+        "normal": false, "faults": [], "recovery": false});
+    let report = work.join("pipe-regression.json");
+    fs::write(&report, serde_json::to_vec_pretty(&summary)?)?;
+
+    let mut worker = EngineProcess::start(&runtime, binary, &root, &work, 1, Fault::None)?;
+    for (id, schema) in [(1, "tiger"), (2, "tigress")] {
+        assert!(
+            matches!(worker.request(id, Input::Open { schema: schema.into() }, deadline())?.reply,
+            Reply::Opened(state) if state.schema_id == schema)
+        );
+    }
+    assert!(matches!(worker.request(1, key('u'), deadline())?.reply,
+        Reply::Key(outcome) if outcome.commit.is_none() && outcome.state.candidates.first().is_some_and(|candidate| candidate.text == "的")));
+    assert!(matches!(worker.request(2, key('d'), deadline())?.reply,
+        Reply::Key(outcome) if outcome.handled && outcome.commit.is_none() && !outcome.state.composition.text.is_empty()));
+    assert!(
+        matches!(worker.request(1, key(' '), deadline())?.reply, Reply::Key(outcome) if outcome.commit.as_deref() == Some("的"))
+    );
+    assert!(
+        matches!(worker.request(1, key(' '), deadline())?.reply, Reply::Key(outcome) if outcome.commit.is_none())
+    );
+    assert!(
+        matches!(worker.request(2, Input::Clear, deadline())?.reply, Reply::Cleared(state) if state.composition.text.is_empty())
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            worker.request(id, Input::Close, deadline())?.reply,
+            Reply::Closed
+        );
+    }
+    for (id, schema) in [(3, "tiger"), (4, "tigress"), (5, "PY_c")] {
+        worker.request(
+            id,
+            Input::Open {
+                schema: schema.into(),
+            },
+            deadline(),
+        )?;
+        for input in "=sin()".chars() {
+            assert!(
+                matches!(worker.request(id, key(input), deadline())?.reply, Reply::Key(outcome) if outcome.commit.is_none())
+            );
+        }
+        worker.request(id, Input::Clear, deadline())?;
+        for input in "=1+".chars() {
+            worker.request(id, key(input), deadline())?;
+        }
+        assert!(matches!(worker.request(id, key('2'), deadline())?.reply,
+            Reply::Key(outcome) if outcome.state.candidates.iter().any(|candidate| candidate.text == "1+2=3")));
+        worker.request(id, Input::Close, deadline())?;
+    }
+    assert_eq!(worker.finish(deadline())?, 0);
+    let normal: serde_json::Value = resources::read_json(&work.join("pipe-1.json"))?;
+    assert_eq!(normal["native_errors"], serde_json::json!([]));
+    assert!(normal["error"].is_null());
+    summary["normal"] = true.into();
+    fs::write(&report, serde_json::to_vec_pretty(&summary)?)?;
+
+    for (generation, fault) in [(2, Fault::StallAfterCommit), (3, Fault::ExitAfterCommit)] {
+        let mut worker = EngineProcess::start(&runtime, binary, &root, &work, generation, fault)?;
+        worker.request(
+            1,
+            Input::Open {
+                schema: "tiger".into(),
+            },
+            deadline(),
+        )?;
+        worker.request(1, key('u'), deadline())?;
+        let error = worker
+            .request(1, key(' '), Instant::now() + Duration::from_millis(100))
+            .unwrap_err();
+        // 事件证明引擎已产生提交；没有命中注入点的普通故障不能冒充预期回归成功。
+        worker.wait_fault_point(deadline())?;
+        if fault == Fault::StallAfterCommit {
+            assert!(matches!(
+                error.downcast_ref::<IpcError>(),
+                Some(IpcError::TimedOut)
+            ));
+        }
+        if fault == Fault::ExitAfterCommit {
+            assert_eq!(worker.wait_exit(deadline())?, 23);
+        }
+        let closed = worker.request(1, key('u'), deadline()).unwrap_err();
+        assert!(matches!(
+            closed.downcast_ref::<IpcError>(),
+            Some(IpcError::Closed)
+        ));
+        let code = worker.terminate(deadline())?;
+        assert_eq!(
+            code,
+            if fault == Fault::ExitAfterCommit {
+                23
+            } else {
+                1
+            }
+        );
+        summary["faults"].as_array_mut().unwrap().push(serde_json::json!({"generation": generation,
+            "mode": format!("{fault:?}"), "fault_point_observed": true, "request_error": error.to_string(),
+            "exit_code": code, "reply_delivered": false, "follow_up_rejected": true}));
+        fs::write(&report, serde_json::to_vec_pretty(&summary)?)?;
+    }
+
+    // 使用新的进程和代次重开同一份合成数据库，不重放上一代状态不确定的请求。
+    let mut worker = EngineProcess::start(&runtime, binary, &root, &work, 4, Fault::None)?;
+    worker.request(
+        1,
+        Input::Open {
+            schema: "tiger".into(),
+        },
+        deadline(),
+    )?;
+    worker.request(1, key('u'), deadline())?;
+    assert!(
+        matches!(worker.request(1, key(' '), deadline())?.reply, Reply::Key(outcome) if outcome.commit.as_deref() == Some("的"))
+    );
+    worker.request(1, Input::Close, deadline())?;
+    assert_eq!(worker.finish(deadline())?, 0);
+    let recovery: serde_json::Value = resources::read_json(&work.join("pipe-4.json"))?;
+    assert_eq!(recovery["native_errors"], serde_json::json!([]));
+    assert!(recovery["error"].is_null());
+    summary["recovery"] = true.into();
+    fs::write(&report, serde_json::to_vec_pretty(&summary)?)?;
+    // 父进程只持有管道和 Job，任何阶段都不得把 librime 加载到父测试中。
+    assert!(
+        // SAFETY: 仅查询模块是否已经存在，不加载引擎。
+        unsafe {
+            windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(c"rime.dll".as_ptr().cast())
+        }
+        .is_null()
+    );
+    eprintln!(
+        "真实管道、双会话、Lua 恢复、提交后卡死/退出及新代次恢复通过: {}",
+        report.display()
+    );
     Ok(())
 }

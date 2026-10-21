@@ -18,6 +18,33 @@ fn run() -> Result<()> {
         (Some("verify-resources"), 1) => resources::verify(&root)?,
         (Some("probe-deploy"), 2) => probe::run(&root, std::path::Path::new(&args[1]), true)?,
         (Some("probe-engine"), 2) => probe::run(&root, std::path::Path::new(&args[1]), false)?,
+        #[cfg(windows)]
+        (Some("probe-idle-worker"), 3) => {
+            // SAFETY: 专用子进程入口只执行一次，启动句柄尚未被任何 Rust 所有者接管。
+            unsafe {
+                tigerrime_app::job::probe_idle(
+                    args[1].to_str().ok_or("父进程句柄格式不符")?.parse()?,
+                    args[2].to_str().ok_or("事件句柄格式不符")?.parse()?,
+                )?;
+            }
+        }
+        #[cfg(windows)]
+        (Some("probe-engine-pipe"), 7) => {
+            // SAFETY: 同上；子模式在创建事件/进程所有者之前由 Bootstrap 校验并接管句柄。
+            unsafe {
+                tigerrime_app::pipe_engine::run(
+                    &root,
+                    std::path::Path::new(&args[1]),
+                    args[2].to_str().ok_or("管道标签格式不符")?,
+                    args[3].to_str().ok_or("代次格式不符")?.parse()?,
+                    tigerrime_app::pipe_engine::Fault::parse(
+                        args[4].to_str().ok_or("故障模式格式不符")?,
+                    )?,
+                    args[5].to_str().ok_or("父进程句柄格式不符")?.parse()?,
+                    args[6].to_str().ok_or("事件句柄格式不符")?.parse()?,
+                )?;
+            }
+        }
         _ => return Err("无效参数；请运行 --help".into()),
     }
     Ok(())

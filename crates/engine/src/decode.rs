@@ -2,10 +2,7 @@
 
 use crate::{Error, Result, raw};
 use std::ffi::{CStr, c_char};
-use tigerrime_contracts::{Candidate, Composition, InputState};
-
-const MAX_TEXT_BYTES: usize = 64 * 1024;
-const MAX_CANDIDATES: usize = 100;
+use tigerrime_contracts::{Candidate, Composition, InputState, MAX_CANDIDATES, MAX_TEXT_BYTES};
 
 /// 指针必须为空或指向有效 NUL 字符串；长度限制防止大规模复制，不是损坏 DLL 的内存沙箱。
 pub unsafe fn text(pointer: *const c_char) -> Result<String> {

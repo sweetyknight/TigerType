@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tigerrime_contracts::InputState;
 use tigerrime_engine::{Engine, EnginePaths};
@@ -214,7 +214,7 @@ pub fn native_errors(log: &str) -> Vec<&str> {
         .collect()
 }
 
-fn diagnostics(logs: &Path) -> Result<Vec<String>> {
+pub(crate) fn diagnostics(logs: &Path) -> Result<Vec<String>> {
     let mut errors = BTreeSet::new();
     for file in fs::read_dir(logs)? {
         let path = file?.path();
@@ -243,7 +243,171 @@ fn reset_options(session: &mut tigerrime_engine::Session<'_>) -> Result<()> {
     Ok(())
 }
 
+fn check_dispatch(engine: &Engine) -> Result<()> {
+    use crate::dispatch::Dispatcher;
+    use tigerrime_contracts::protocol::{Command, Message, Rejection, Reply, Request, Route};
+
+    fn exchange(dispatcher: &mut Dispatcher<'_>, request: Request) -> Result<Reply> {
+        let frame = tigerrime_ipc::encode(&Message::Request(request.clone()))?;
+        let frame = dispatcher.dispatch(&frame)?;
+        Ok(tigerrime_ipc::decode_response(&frame, &request)?.reply)
+    }
+    let request = |request_id, session_id, command| Request {
+        route: Route {
+            generation: 7,
+            request_id,
+            session_id,
+        },
+        command,
+    };
+    let key = |keycode: char| Command::Key {
+        keycode: keycode as i32,
+        modifiers: 0,
+    };
+    let mut dispatcher = Dispatcher::new(engine, 7)?;
+    // 内存帧往返不包含任何管道等待，不并入下方原有的库内延迟统计。
+    for (id, schema) in [(1, "tiger"), (2, "tigress")] {
+        if !matches!(exchange(&mut dispatcher, request(id, id, Command::Open { schema: schema.into() }))?,
+            Reply::Opened(state) if state.schema_id == schema)
+        {
+            return Err("协议创建会话或方案不符".into());
+        }
+    }
+    if dispatcher.dispatch(&[0; tigerrime_ipc::HEADER_LEN]).is_ok() {
+        return Err("协议接受了无效帧".into());
+    }
+    if !matches!(exchange(&mut dispatcher, request(3, 1, key('u')))?,
+        Reply::Key(outcome) if outcome.handled && outcome.commit.is_none()
+            && outcome.state.candidates.first().is_some_and(|candidate| candidate.text == "的"))
+    {
+        return Err("协议按键快照不符".into());
+    }
+    if !matches!(exchange(&mut dispatcher, request(4, 2, key('d')))?, Reply::Key(outcome) if outcome.commit.is_none())
+    {
+        return Err("第二会话发生意外提交".into());
+    }
+    let mut stale = request(u64::MAX, 1, key(' '));
+    stale.route.generation = 6;
+    if exchange(&mut dispatcher, stale)? != Reply::Rejected(Rejection::StaleGeneration)
+        || exchange(&mut dispatcher, request(3, 1, key('u')))?
+            != Reply::Rejected(Rejection::OutOfOrder)
+    {
+        return Err("协议未拒绝旧代次或重复请求".into());
+    }
+    if !matches!(exchange(&mut dispatcher, request(5, 1, key(' ')))?,
+        Reply::Key(outcome) if outcome.commit.as_deref() == Some("的"))
+    {
+        return Err("会话之间相互污染或提交丢失".into());
+    }
+    if exchange(&mut dispatcher, request(5, 1, key(' ')))? != Reply::Rejected(Rejection::OutOfOrder)
+        || !matches!(exchange(&mut dispatcher, request(6, 1, key(' ')))?, Reply::Key(outcome) if outcome.commit.is_none())
+    {
+        return Err("协议重复接受提交或未消费上次提交".into());
+    }
+    if !matches!(exchange(&mut dispatcher, request(7, 2, Command::Clear))?,
+        Reply::Cleared(state) if state.composition.text.is_empty() && state.candidates.is_empty())
+    {
+        return Err("协议清屏失败".into());
+    }
+    for (sequence, session, command, expected) in [
+        (8, 1, Command::Close, Reply::Closed),
+        (9, 1, key('u'), Reply::Rejected(Rejection::UnknownSession)),
+        (
+            10,
+            1,
+            Command::Open {
+                schema: "tiger".into(),
+            },
+            Reply::Rejected(Rejection::SessionReused),
+        ),
+        (11, 2, Command::Close, Reply::Closed),
+    ] {
+        if exchange(&mut dispatcher, request(sequence, session, command))? != expected {
+            return Err("关闭会话的释放或身份校验失败".into());
+        }
+    }
+    Ok(())
+}
+
+fn check_client_delivery(engine: &Engine) -> Result<()> {
+    use crate::dispatch::Dispatcher;
+    use tigerrime_contracts::protocol::{Command, Reply, Request, Route};
+    use tigerrime_ipc::{ClientState, Error, FrameAssembler};
+
+    let request = |request_id, command| Request {
+        route: Route {
+            generation: 8,
+            request_id,
+            session_id: 1,
+        },
+        command,
+    };
+    let key = |keycode: char| Command::Key {
+        keycode: keycode as i32,
+        modifiers: 0,
+    };
+    let mut client = ClientState::new(8)?;
+    let mut dispatcher = Dispatcher::new(engine, 8)?;
+    for (sequence, command) in [
+        (
+            1,
+            Command::Open {
+                schema: "tiger".into(),
+            },
+        ),
+        (2, key('u')),
+        (3, key(' ')),
+        (4, key('u')),
+        (5, key(' ')),
+    ] {
+        // 此处只验证原生数据通路，5 秒诊断期限不冒充 TSF 的 50ms 验收。
+        let request = request(sequence, command);
+        let frame = client.begin(request.clone(), Instant::now() + Duration::from_secs(5))?;
+        let mut incoming = FrameAssembler::default();
+        let mut assembled = None;
+        for bytes in frame.chunks(3) {
+            if let Some(frame) = incoming.push(bytes)? {
+                assembled = Some(frame);
+            }
+        }
+        let response = dispatcher.dispatch(&assembled.ok_or("分片请求未完成")?)?;
+        if sequence == 5 {
+            // 引擎已消费第二次提交；取消后即使收到合法结果也不能再次交付给宿主。
+            if !matches!(tigerrime_ipc::decode_response(&response, &request)?.reply,
+                Reply::Key(outcome) if outcome.commit.as_deref() == Some("的"))
+            {
+                return Err("取消测试未产生预期的原生提交".into());
+            }
+            client.cancel();
+            if !matches!(client.receive(&response), Err(Error::Closed)) {
+                return Err("取消后仍接受了原生迟到提交".into());
+            }
+            continue;
+        }
+        let mut delivered = None;
+        for bytes in response.chunks(7) {
+            if let Some(response) = client.receive(bytes)?
+                && delivered.replace(response).is_some()
+            {
+                return Err("同一原生回复被交付两次".into());
+            }
+        }
+        match delivered.ok_or("分片原生回复未交付")?.reply {
+            Reply::Opened(state) if sequence == 1 && state.schema_id == "tiger" => {}
+            Reply::Key(outcome) if sequence == 3 && outcome.commit.as_deref() == Some("的") => {}
+            Reply::Key(outcome) if matches!(sequence, 2 | 4) && outcome.commit.is_none() => {}
+            _ => return Err("分片原生回复内容不符".into()),
+        }
+    }
+    // 模拟断连时结束该调度器，Session guard 释放未主动 close 的会话。
+    drop(dispatcher);
+    Ok(())
+}
+
 fn measure(engine: &Engine, fixtures: Fixtures) -> Result<Value> {
+    // 只记录阶段与批次汇总，不输出按键内容；超时未生成 JSON 时也保留推进位置。
+    let started = Instant::now();
+    eprintln!("native-probe: fixtures");
     let mut results = Vec::new();
     let mut failed_cases = Vec::new();
     for case in fixtures.cases {
@@ -270,6 +434,10 @@ fn measure(engine: &Engine, fixtures: Fixtures) -> Result<Value> {
             "candidates": state.candidates.iter().map(|candidate| json!({"text": candidate.text, "comment": candidate.comment, "label": candidate.label})).collect::<Vec<_>>() }));
         session.close()?;
     }
+    eprintln!(
+        "native-probe: options-commit-recovery elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     // 英文用户词典必须保持启用，防止用关闭学习来绕过 I/O 回归。
     for (schema, expected) in [
         ("tiger", false),
@@ -319,19 +487,48 @@ fn measure(engine: &Engine, fixtures: Fixtures) -> Result<Value> {
         }
         session.close()?;
     }
+    eprintln!(
+        "native-probe: session-cycles elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+    let mut cycle_times = [Duration::ZERO; 5];
+    eprintln!("native-probe: process-usage {}", process_usage()?);
     // 所有路径都走同一个会话 guard；主动 close 校验销毁返回值。
-    for _ in 0..SESSION_CYCLES {
+    for cycle in 1..=SESSION_CYCLES {
+        let step = Instant::now();
         let mut session = engine.create_session("tiger")?;
+        cycle_times[0] += step.elapsed();
+        let step = Instant::now();
         reset_options(&mut session)?;
+        cycle_times[1] += step.elapsed();
+        let step = Instant::now();
         session.process_key('u' as i32, 0)?;
+        cycle_times[2] += step.elapsed();
+        let step = Instant::now();
         session.clear();
         if !session.snapshot()?.composition.text.is_empty() {
             return Err("清屏后仍有组合文本".into());
         }
+        cycle_times[3] += step.elapsed();
+        let step = Instant::now();
         session.close()?;
+        cycle_times[4] += step.elapsed();
+        // 每百次已关闭会话才记一条诊断；不减少总次数，不为逐键路径增加日志。
+        if cycle % 100 == 0 {
+            eprintln!(
+                "native-probe: sessions_completed={cycle} elapsed_ms={} cycle_ms={} process={}",
+                started.elapsed().as_millis(),
+                cycle_timing(&cycle_times),
+                process_usage()?
+            );
+        }
     }
     let mut session = engine.create_session("tiger")?;
     reset_options(&mut session)?;
+    eprintln!(
+        "native-probe: latency elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     let mut samples = Vec::with_capacity(4000);
     for iteration in 0..520 {
         for input in ["u", "uni", "d", "kry"] {
@@ -346,9 +543,22 @@ fn measure(engine: &Engine, fixtures: Fixtures) -> Result<Value> {
         }
     }
     samples.sort_by(f64::total_cmp);
+    session.close()?;
+    eprintln!(
+        "native-probe: protocol elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+    check_dispatch(engine)?;
+    check_client_delivery(engine)?;
+    eprintln!(
+        "native-probe: measured elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     Ok(
         json!({"cases": results, "failed_cases": failed_cases, "session_cycles": SESSION_CYCLES,
-        "commit_once": true, "ascii_passthrough": true, "calculator_recovery": true,
+        "commit_once": true, "ascii_passthrough": true, "calculator_recovery": true, "protocol_dispatch": true,
+        "session_timing_ms": cycle_timing(&cycle_times), "process_usage": process_usage()?,
+        "protocol_client_delivery": true,
         "latency_ms": {"scope": "Rust process_key + owned context/status/commit; no IPC/TSF/UI", "samples": samples.len(),
             "p50": samples[(samples.len() * 50).div_ceil(100) - 1],
             "p95": samples[(samples.len() * 95).div_ceil(100) - 1],
@@ -356,8 +566,54 @@ fn measure(engine: &Engine, fixtures: Fixtures) -> Result<Value> {
     )
 }
 
+fn cycle_timing(times: &[Duration; 5]) -> Value {
+    json!({"create": times[0].as_millis(), "options": times[1].as_millis(),
+        "key": times[2].as_millis(), "clear_snapshot": times[3].as_millis(), "close": times[4].as_millis()})
+}
+
+#[cfg(windows)]
+fn process_usage() -> Result<Value> {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{
+            GetCurrentProcess, GetProcessIoCounters, GetProcessTimes, IO_COUNTERS,
+        },
+    };
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let mut io = IO_COUNTERS::default();
+    // SAFETY: 仅查询当前探针自己的计数，不打开其他进程；输出结构均在栈上有效。
+    unsafe {
+        if GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        ) == 0
+            || GetProcessIoCounters(GetCurrentProcess(), &mut io) == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    let millis = |time: FILETIME| {
+        ((u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)) / 10_000
+    };
+    Ok(json!({"user_ms": millis(user), "kernel_ms": millis(kernel),
+        "read_ops": io.ReadOperationCount, "write_ops": io.WriteOperationCount,
+        "read_bytes": io.ReadTransferCount, "write_bytes": io.WriteTransferCount}))
+}
+
+#[cfg(not(windows))]
+fn process_usage() -> Result<Value> {
+    Ok(Value::Null)
+}
+
 pub fn run(root: &Path, work: &Path, deploy: bool) -> Result<()> {
     let paths = runtime_paths(root, work)?;
+    eprintln!("native-probe: validated-workspace");
     let work = work.canonicalize()?;
     let dll = root.join("vendor/librime/dist/lib/rime.dll");
     let start = Instant::now();
@@ -365,6 +621,7 @@ pub fn run(root: &Path, work: &Path, deploy: bool) -> Result<()> {
         Engine::deploy(&dll, &paths)?;
         json!({"version": tigerrime_engine::VERSION, "deploy_seconds": start.elapsed().as_secs_f64()})
     } else {
+        eprintln!("native-probe: initializing-engine");
         let engine = Engine::start(&dll, &paths)?;
         if !matches!(
             Engine::start(&dll, &paths),
@@ -375,6 +632,7 @@ pub fn run(root: &Path, work: &Path, deploy: bool) -> Result<()> {
         let fixtures: Fixtures = resources::read_json(&work.join("engine-smoke.json"))?;
         let result = measure(&engine, fixtures)?;
         drop(engine);
+        eprintln!("native-probe: finalized");
         result
     };
     let errors = diagnostics(&paths.logs)?;
@@ -400,6 +658,29 @@ pub fn run(root: &Path, work: &Path, deploy: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cycle_diagnostics_keep_step_order_and_query_only_own_process() {
+        let times = [1, 2, 3, 4, 5].map(Duration::from_millis);
+        assert_eq!(
+            cycle_timing(&times),
+            json!({"create": 1, "options": 2, "key": 3, "clear_snapshot": 4, "close": 5})
+        );
+        #[cfg(windows)]
+        {
+            let usage = process_usage().unwrap();
+            for field in [
+                "user_ms",
+                "kernel_ms",
+                "read_ops",
+                "write_ops",
+                "read_bytes",
+                "write_bytes",
+            ] {
+                assert!(usage[field].as_u64().is_some(), "{field}");
+            }
+        }
+    }
 
     #[test]
     fn fixture_expectations_are_not_silently_ignored() {

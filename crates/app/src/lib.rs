@@ -1,5 +1,10 @@
-//! 当前只组装资源准备与独立引擎诊断；不提供安装、TSF 或后台常驻模式。
+//! 组装资源工具、引擎会话调度与诊断；尚不提供安装、TSF 或后台常驻模式。
 
+pub mod dispatch;
+#[cfg(windows)]
+pub mod job;
+#[cfg(windows)]
+pub mod pipe_engine;
 pub mod probe;
 pub mod process;
 pub mod resources;

@@ -1,0 +1,211 @@
+//! 真实本机管道与取消回归；测试线程模拟对端，不进入产品线程模型。
+
+use super::*;
+use std::os::windows::io::BorrowedHandle;
+use std::sync::mpsc;
+use tigerrime_contracts::{
+    InputState, KeyOutcome,
+    protocol::{Command, Message, Reply, Route},
+};
+
+fn label() -> String {
+    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+    format!(
+        "test-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn deadline() -> Instant {
+    Instant::now() + Duration::from_secs(5)
+}
+
+fn current_peer() -> Result<Peer> {
+    // SAFETY: 当前进程伪句柄始终有效，只借用；Peer 内部复制成拥有所有权的句柄。
+    Peer::from_process(unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) })
+}
+
+fn pair(runtime: &Runtime) -> Result<(Pipe, Pipe)> {
+    let name = label();
+    let listener = runtime.bind(&name)?;
+    // 特意先连接再 accept，覆盖 ERROR_PIPE_CONNECTED 的无完成包分支。
+    let client = runtime.connect(&name, current_peer()?, deadline())?;
+    let server = listener.accept(current_peer()?, deadline())?;
+    Ok((client, server))
+}
+
+fn request() -> Request {
+    Request {
+        route: Route {
+            generation: 1,
+            request_id: 1,
+            session_id: 1,
+        },
+        command: Command::Key {
+            keycode: 32,
+            modifiers: 0,
+        },
+    }
+}
+
+#[test]
+fn real_pipe_round_trip_copies_large_unicode_reply_and_matches_identity() -> Result<()> {
+    let runtime = Runtime::new()?;
+    let (mut client, mut server) = pair(&runtime)?;
+    std::thread::scope(|scope| -> Result<()> {
+        let worker = scope.spawn(move || -> Result<()> {
+            let message = decode(&server.receive_frame(deadline())?)?;
+            assert_eq!(message, Message::Request(request()));
+            server.send_frame(
+                &crate::encode(&Message::Response(Response {
+                    route: request().route,
+                    reply: Reply::Key(KeyOutcome {
+                        handled: true,
+                        commit: Some("𠀀😀".repeat(4096)),
+                        state: InputState::default(),
+                    }),
+                }))?,
+                deadline(),
+            )
+        });
+        let mut state = ClientState::new(1)?;
+        let reply = client.transact(&mut state, request(), deadline())?;
+        assert!(
+            matches!(reply.reply, Reply::Key(outcome) if outcome.commit == Some("𠀀😀".repeat(4096)))
+        );
+        worker.join().unwrap()?;
+        Ok(())
+    })
+}
+
+#[test]
+fn pending_accept_times_out_and_callback_releases_its_pipe() -> Result<()> {
+    let runtime = Runtime::new()?;
+    let mut listener = runtime.bind(&label())?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    Arc::get_mut(&mut listener.0.io).unwrap().on_drop = Some(sender);
+    let result = listener.accept(current_peer()?, Instant::now() + Duration::from_millis(30));
+    assert!(matches!(result, Err(Error::TimedOut)));
+    // 等完成回调，而不是忙轮询；调用方返回后，I/O 持有的资源仍必须最终释放。
+    receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    Ok(())
+}
+
+#[test]
+fn timed_out_read_and_partial_frame_are_closed_and_reclaimed() -> Result<()> {
+    let runtime = Runtime::new()?;
+    for partial in [false, true] {
+        let (mut client, mut server) = pair(&runtime)?;
+        if partial {
+            let frame = crate::encode(&Message::Request(request()))?;
+            client.operate(Kind::Write, frame[..5].to_vec(), deadline())?;
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        Arc::get_mut(&mut server.io).unwrap().on_drop = Some(sender);
+        assert!(matches!(
+            server.receive_frame(Instant::now() + Duration::from_millis(30)),
+            Err(Error::TimedOut)
+        ));
+        assert!(matches!(
+            server.receive_frame(deadline()),
+            Err(Error::Closed)
+        ));
+        drop(server);
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
+    Ok(())
+}
+
+#[test]
+fn external_cancel_wakes_a_pending_read_and_does_not_deliver_a_reply() -> Result<()> {
+    let runtime = Runtime::new()?;
+    let (_client, mut server) = pair(&runtime)?;
+    let cancellation = server.cancellation();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(move || server.receive_frame(deadline()));
+        cancellation.cancel();
+        cancellation.cancel();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(Error::Cancelled | Error::Closed)
+        ));
+    });
+    Ok(())
+}
+
+#[test]
+fn stalled_write_times_out_and_keeps_buffer_alive_until_completion() -> Result<()> {
+    let runtime = Runtime::new()?;
+    let (mut client, _server) = pair(&runtime)?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    Arc::get_mut(&mut client.io).unwrap().on_drop = Some(sender);
+    // 对端不读取，写入超过管道缓冲区的数据强制进入挂起路径。
+    assert!(matches!(
+        client.operate(
+            Kind::Write,
+            vec![0; CHUNK * 4],
+            Instant::now() + Duration::from_millis(30)
+        ),
+        Err(Error::TimedOut)
+    ));
+    drop(client);
+    receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    Ok(())
+}
+
+#[test]
+fn rejects_oversized_header_disconnect_and_cancelled_transact_without_retry() -> Result<()> {
+    let runtime = Runtime::new()?;
+    let (mut client, mut server) = pair(&runtime)?;
+    let mut invalid = crate::encode(&Message::Request(request()))?;
+    invalid[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    client.operate(Kind::Write, invalid[..12].to_vec(), deadline())?;
+    assert!(matches!(
+        server.receive_frame(deadline()),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        server.receive_frame(deadline()),
+        Err(Error::Closed)
+    ));
+    drop(server);
+    assert!(client.receive_frame(deadline()).is_err());
+
+    let (mut client, _server) = pair(&runtime)?;
+    let mut state = ClientState::new(1)?;
+    assert!(matches!(
+        client.transact(
+            &mut state,
+            request(),
+            Instant::now() + Duration::from_millis(30)
+        ),
+        Err(Error::TimedOut)
+    ));
+    assert!(matches!(state.receive(&[]), Err(Error::Closed)));
+    assert!(matches!(
+        client.receive_frame(deadline()),
+        Err(Error::Closed)
+    ));
+    Ok(())
+}
+
+#[test]
+fn names_instances_and_runtime_capacity_are_bounded() -> Result<()> {
+    let runtime = Runtime::new()?;
+    for name in ["", "../other", "a\\b", "a:b", "x\0y", &"a".repeat(65)] {
+        assert!(runtime.bind(name).is_err());
+    }
+    let name = label();
+    let first = runtime.bind(&name)?;
+    assert!(runtime.bind(&name).is_err());
+    drop(first);
+    let mut listeners = Vec::new();
+    for _ in 0..MAX_PIPES {
+        listeners.push(runtime.bind(&label())?);
+    }
+    assert!(matches!(runtime.bind(&label()), Err(Error::Busy)));
+    drop(listeners);
+    assert!(runtime.bind(&label()).is_ok());
+    Ok(())
+}

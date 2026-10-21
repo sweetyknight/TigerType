@@ -166,18 +166,31 @@ dependencies = [
  "sha2",
  "tigerrime-contracts",
  "tigerrime-engine",
+ "tigerrime-ipc",
  "windows-sys",
 ]
 
 [[package]]
 name = "tigerrime-contracts"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "tigerrime-engine"
 version = "0.1.0"
 dependencies = [
  "sha2",
+ "tigerrime-contracts",
+ "windows-sys",
+]
+
+[[package]]
+name = "tigerrime-ipc"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
  "tigerrime-contracts",
  "windows-sys",
 ]

@@ -227,10 +227,9 @@ impl Engine {
             engine: self,
             id: Some(id),
         };
-        // SAFETY: 失败时 Session 的 Drop 仍释放刚创建的会话。
-        if unsafe { self.api.select_schema.unwrap()(id.get(), schema.as_ptr()) } == 0 {
-            return Err(Error::Api("select_schema"));
-        }
+        // Rime 新会话已初始化默认方案；同方案再次选择会重建组件并保存用户配置。
+        // 查询或切换失败时仍由 Session 的 Drop 回收刚创建的会话。
+        select_schema_if_needed(&self.api, id.get(), &schema)?;
         Ok(session)
     }
 
@@ -267,6 +266,32 @@ impl Engine {
             Ok(value)
         }
     }
+}
+
+fn select_schema_if_needed(api: &raw::Api, id: raw::SessionId, schema: &CString) -> Result<()> {
+    let current = {
+        let mut status = raw::Status {
+            data_size: raw::data_size::<raw::Status>(),
+            ..Default::default()
+        };
+        // SAFETY: 会话存活且函数表已验证；成功取得后立即用 guard 配对释放。
+        if unsafe { api.get_status.unwrap()(id, &mut status) } == 0 {
+            return Err(Error::Api("get_status"));
+        }
+        let status = Allocation {
+            value: status,
+            release: api.free_status.unwrap(),
+        };
+        // SAFETY: 先复制方案 ID；离开作用域释放旧状态，再执行可能重建引擎组件的切换。
+        unsafe { decode::text(status.value.schema_id)? }
+    };
+    if current.as_bytes() != schema.as_bytes() {
+        // SAFETY: 只有方案确实不同才切换；不能把默认方案不同误当作创建成功。
+        if unsafe { api.select_schema.unwrap()(id, schema.as_ptr()) } == 0 {
+            return Err(Error::Api("select_schema"));
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Engine {
@@ -420,6 +445,77 @@ impl<T> Drop for Allocation<T> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn schema_selection_avoids_reinitialization_and_releases_status_on_failure() {
+        static FREED: AtomicUsize = AtomicUsize::new(0);
+        static SELECTED: AtomicUsize = AtomicUsize::new(0);
+        static STATUS_STILL_LIVE: AtomicBool = AtomicBool::new(false);
+        unsafe extern "C" fn get(id: raw::SessionId, status: *mut raw::Status) -> i32 {
+            if id == 0 {
+                return 0;
+            }
+            STATUS_STILL_LIVE.store(true, Ordering::SeqCst);
+            // SAFETY: 测试调用方传入可写的 Status；静态字符串在整个调用期间有效。
+            unsafe {
+                (*status).schema_id = if id == 3 {
+                    c"tiger-extra".as_ptr()
+                } else if id == 4 {
+                    c"\xff".as_ptr()
+                } else {
+                    c"tiger".as_ptr()
+                };
+            }
+            1
+        }
+        unsafe extern "C" fn free(_: *mut raw::Status) -> i32 {
+            FREED.fetch_add(1, Ordering::SeqCst);
+            STATUS_STILL_LIVE.store(false, Ordering::SeqCst);
+            1
+        }
+        unsafe extern "C" fn select(id: raw::SessionId, _: *const std::ffi::c_char) -> i32 {
+            SELECTED.fetch_add(1, Ordering::SeqCst);
+            // 不在 C 回调中 panic；通过失败返回检测旧快照是否仍然存活。
+            i32::from(id != 2 && !STATUS_STILL_LIVE.load(Ordering::SeqCst))
+        }
+        let api = raw::Api {
+            get_status: Some(get),
+            free_status: Some(free),
+            select_schema: Some(select),
+            ..Default::default()
+        };
+        let tiger = CString::new("tiger").unwrap();
+        select_schema_if_needed(&api, 1, &tiger).unwrap();
+        assert_eq!(SELECTED.load(Ordering::SeqCst), 0);
+        assert_eq!(FREED.load(Ordering::SeqCst), 1);
+        select_schema_if_needed(&api, 1, &CString::new("tigress").unwrap()).unwrap();
+        select_schema_if_needed(&api, 3, &tiger).unwrap();
+        assert_eq!(
+            SELECTED.load(Ordering::SeqCst),
+            2,
+            "不能将同前缀误判为同方案"
+        );
+        assert!(matches!(
+            select_schema_if_needed(&api, 0, &tiger),
+            Err(Error::Api("get_status"))
+        ));
+        assert_eq!(
+            FREED.load(Ordering::SeqCst),
+            3,
+            "查询失败不能释放未取得的状态"
+        );
+        assert!(matches!(
+            select_schema_if_needed(&api, 4, &tiger),
+            Err(Error::Utf8(_))
+        ));
+        assert_eq!(FREED.load(Ordering::SeqCst), 4, "解码失败也要释放状态");
+        assert!(matches!(
+            select_schema_if_needed(&api, 2, &CString::new("tigress").unwrap()),
+            Err(Error::Api("select_schema"))
+        ));
+        assert_eq!(FREED.load(Ordering::SeqCst), 5);
+        assert_eq!(SELECTED.load(Ordering::SeqCst), 3);
+    }
 
     #[test]
     fn allocations_release_on_error_and_unwind() {

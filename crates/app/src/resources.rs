@@ -10,6 +10,7 @@ use std::{
     fs, io,
     path::{Component, Path, PathBuf},
     process::Command,
+    sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -218,16 +219,28 @@ pub fn verify_files(root: &Path, entries: &[Entry], exact: bool) -> Result<()> {
 }
 
 pub fn new_directory(parent: &Path, prefix: &str) -> Result<PathBuf> {
+    // 系统时钟并不保证每次读取都不同；只保护名称生成，不持锁执行文件 I/O。
+    static LAST_NONCE: Mutex<u128> = Mutex::new(0);
     reject_links(parent)?;
     fs::create_dir_all(parent)?;
     let name = format!(
         "{prefix}-{}-{}",
         std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        directory_nonce(
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+            &LAST_NONCE
+        )?
     );
     let path = parent.join(name);
     fs::create_dir(&path)?;
     Ok(path)
+}
+
+fn directory_nonce(clock: u128, previous: &Mutex<u128>) -> Result<u128> {
+    let mut previous = previous.lock().map_err(|_| "目录编号锁已损坏")?;
+    let next = clock.max(previous.checked_add(1).ok_or("目录编号耗尽")?);
+    *previous = next;
+    Ok(next)
 }
 
 pub fn copy_entries(source: &Path, target: &Path, entries: &[Entry]) -> Result<()> {
@@ -426,6 +439,31 @@ pub fn prepare(root: &Path, tiger_source: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_nonces_are_unique_with_frozen_or_rewound_clock() {
+        let previous = Mutex::new(0);
+        let values = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..32)
+                            .map(|_| directory_nonce(1_000, &previous).unwrap())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap())
+                .collect::<BTreeSet<_>>()
+        });
+        assert_eq!(values.len(), 256);
+        assert_eq!(values.first(), Some(&1_000));
+        assert_eq!(directory_nonce(900, &previous).unwrap(), 1_256);
+        assert_eq!(directory_nonce(2_000, &previous).unwrap(), 2_000);
+        assert!(directory_nonce(1, &Mutex::new(u128::MAX)).is_err());
+    }
 
     fn fixture() -> (PathBuf, Vec<Entry>) {
         let root = new_directory(&std::env::temp_dir(), "tigerrime-resources").unwrap();
