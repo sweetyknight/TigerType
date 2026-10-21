@@ -1,0 +1,8 @@
+# 本地资源未确认整体分发授权；测试数据、二进制和个人词典不得入库。
+/.cache/
+/vendor/
+/target/
+/artifacts/
+*.userdb/
+*.userdb.txt
+*.log

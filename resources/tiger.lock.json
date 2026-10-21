@@ -1,0 +1,343 @@
+{
+  "format_version": 1,
+  "source_label": "虎码秃版 小狼毫（Win）",
+  "dictionary_version": "2026.08.14",
+  "license_status": "unconfirmed-personal-use-only",
+  "schemas": [
+    "tiger",
+    "tigress",
+    "PY_c"
+  ],
+  "files": [
+    {
+      "path": "01 双拼反查配置（自然码 小鹤 微软）/双拼反查配置 必看说明.txt",
+      "size": 376,
+      "sha256": "d2ec8143c1904c6f4d40d28a02519516d0975d9f91e22ac23d2bb2bebd47d442"
+    },
+    {
+      "path": "01 双拼反查配置（自然码 小鹤 微软）/小鹤双拼/PY_c.custom.yaml",
+      "size": 1904,
+      "sha256": "feee5b5d2461dd1ae5ffcee02888f17448ebc9f9ba4aaaf5aaa6843ebf6cbeec"
+    },
+    {
+      "path": "01 双拼反查配置（自然码 小鹤 微软）/微软双拼/PY_c.custom.yaml",
+      "size": 2029,
+      "sha256": "87324d09644571a06bc946bd2a166e4619002b8c1c3003a83d7c4b4363f62e92"
+    },
+    {
+      "path": "01 双拼反查配置（自然码 小鹤 微软）/自然码/PY_c.custom.yaml",
+      "size": 1908,
+      "sha256": "e50c72f416aca41388ea555110dc3f356b5a0cb4e2431a94e4b8e81da54b316e"
+    },
+    {
+      "path": "PY_c.dict.yaml",
+      "size": 22749557,
+      "sha256": "f57fb9e9d1a2ca0e30370e5620c126b2c840ca0d4d371e2d86380c9227d3641a"
+    },
+    {
+      "path": "PY_c.schema.yaml",
+      "size": 12604,
+      "sha256": "d9058db665443665e163726376ecf2fe50e815770e25d5ad7627ba0d1b649fa5"
+    },
+    {
+      "path": "core2022.dict.yaml",
+      "size": 69078,
+      "sha256": "4384483c85fa25943529634370483f348a741c92ec087764f7572237b5495e80"
+    },
+    {
+      "path": "core2022.schema.yaml",
+      "size": 167,
+      "sha256": "0ee5067194fbf91fe62110bb4378d33df1e9ec840a5932572366a9fe1ac9fc77"
+    },
+    {
+      "path": "default.custom.yaml",
+      "size": 1257,
+      "sha256": "0ea2bbc3a45168360fc69b89745c00096cb64d16bc12ee093e6a533964223dfd"
+    },
+    {
+      "path": "easy_english.dict.yaml",
+      "size": 15316535,
+      "sha256": "bf85a1e2cea0cc055263adb2f4094e3549d0084b006b7587c1d0301333db3082"
+    },
+    {
+      "path": "easy_english.schema.yaml",
+      "size": 1866,
+      "sha256": "5409225dc6f1d7db95fb65fb90434e373570d5a93e1623543fefe60424eb39a4"
+    },
+    {
+      "path": "lua/calculator_translator.lua",
+      "size": 8887,
+      "sha256": "34632691063927b61b34d29e81122de6e2c7edfe983803bdfc8f69b9b45181ec"
+    },
+    {
+      "path": "lua/charset_comment_filter.lua",
+      "size": 33896,
+      "sha256": "f5090a4c1474052605abefa15d4f9be7dac9f5e8d0ac8a3ffb50f3ca5492b39b"
+    },
+    {
+      "path": "lua/core2022_filter.lua",
+      "size": 3005,
+      "sha256": "2f22cdbefdc61ad5268ffcdad096d9d994ef2960da4edefbf65064449c575cd4"
+    },
+    {
+      "path": "lua/dz_ci_filter.lua",
+      "size": 308,
+      "sha256": "f5b04dd32e391b35ed0da3fcc6b1cc902a585dda5515e45d75014b2c0aa27131"
+    },
+    {
+      "path": "lua/exe.lua",
+      "size": 1987,
+      "sha256": "6b642238309408314e7bf67d12b22673fa3f6cd703bb64c322b9e24de730520a"
+    },
+    {
+      "path": "lua/number.lua",
+      "size": 5534,
+      "sha256": "abd925c05ea23997e9c475180031729fea75c6737c07b09c0ea4c9539933b1ca"
+    },
+    {
+      "path": "lua/shijian2.lua",
+      "size": 86126,
+      "sha256": "5b88560237fb49e5c8b28d773666bf8218cdc4ac4c315bd2ceea24ac27e121f3"
+    },
+    {
+      "path": "lua/unicode_display.lua",
+      "size": 1943,
+      "sha256": "9627e318574898affbaaaa2a2d8777d3457aef48b2ed2f0be8c9e38c6f3ec3ad"
+    },
+    {
+      "path": "opencc/HKVariants.txt",
+      "size": 560,
+      "sha256": "308f45c1649f949cb69ca89422a3cf741e44446afd0e359f929dc9bd4032c389"
+    },
+    {
+      "path": "opencc/HKVariantsPhrases.txt",
+      "size": 262,
+      "sha256": "4f9d33a61bb29e18086f5f492fe896735218045fca11e46c67b8cff3f15f0560"
+    },
+    {
+      "path": "opencc/HKVariantsRev.txt",
+      "size": 560,
+      "sha256": "06afab6c30603b05ad75a6cb9a0520774d18278358a128dee75cfb9a3e284f0e"
+    },
+    {
+      "path": "opencc/HKVariantsRevPhrases.txt",
+      "size": 2360,
+      "sha256": "01a4bf80e3f4d898c959fafe554170173842e0ae5c69fb8a6031864705b74f2c"
+    },
+    {
+      "path": "opencc/JPVariants.txt",
+      "size": 3104,
+      "sha256": "a8df8f68ac64af41b6634dce107d3abe85ce2bd778d7eb2f7a1fd15699849ae0"
+    },
+    {
+      "path": "opencc/PYCharacters.txt",
+      "size": 763940,
+      "sha256": "698a2e1ed34b25de3e4cdd002918e3d2553d56feed0d2e42ce322a63d5790d0a"
+    },
+    {
+      "path": "opencc/PYPhrases.txt",
+      "size": 1044903,
+      "sha256": "c4b68b9140a7cca0adb83beaae732dc780bc3f9eebd9dc05a9c53cc44871df70"
+    },
+    {
+      "path": "opencc/STCharacters_Tu.txt",
+      "size": 41871,
+      "sha256": "f472256a25976c9dd9ac48b395f6bef40723f9d78c3f61b6c2deb5655903132d"
+    },
+    {
+      "path": "opencc/STPhrases.txt",
+      "size": 1002641,
+      "sha256": "23a781cca80c62eb6efe294ff19ce4de0d5719252826f20f3d3f860928ca9f1f"
+    },
+    {
+      "path": "opencc/TSCharacters.txt",
+      "size": 35147,
+      "sha256": "c05bd622590489f9ca6101d3d22a898d37f2f5d1a0447257077e865ec022c005"
+    },
+    {
+      "path": "opencc/TSPhrases.txt",
+      "size": 5098,
+      "sha256": "e107872f3faecb37449f9ff0c95c2ea8ebdd235fc130d87d9bde69cd3e25e0ff"
+    },
+    {
+      "path": "opencc/TWPhrases.txt",
+      "size": 9679,
+      "sha256": "4d4c4b2342e74af51ab34c9b4f2bdec91d7de6647bf00e187f1b44f6fd5eb55c"
+    },
+    {
+      "path": "opencc/TWPhrasesRev.txt",
+      "size": 9724,
+      "sha256": "e7a9e1592febbe482389a4069a66338f121e48e60bb28f968e4ec229ee78fb58"
+    },
+    {
+      "path": "opencc/TWVariants.txt",
+      "size": 288,
+      "sha256": "ddccb7c7331d814ee2dead937f2c6ac5ea1da2c03c5290450142272671d31714"
+    },
+    {
+      "path": "opencc/TWVariantsRev.txt",
+      "size": 288,
+      "sha256": "601258d9db26fb77fd481b208596faa4e87989afa947de8f78325a2ced0d12c8"
+    },
+    {
+      "path": "opencc/TWVariantsRevPhrases.txt",
+      "size": 726,
+      "sha256": "baf97f6d60d15ff7315f2d277eba1ec1d18460337bbd2d266441e1e9e468dee7"
+    },
+    {
+      "path": "opencc/emoji.json",
+      "size": 252,
+      "sha256": "771a0a9b94496e475aec419d25be9169b2fd1d42581a7f504321c909f23c5388"
+    },
+    {
+      "path": "opencc/emoji.txt",
+      "size": 410651,
+      "sha256": "d0c27b74d5190b7b89f43add3c0bb49e9adb773e49939308e15b7a13cef21583"
+    },
+    {
+      "path": "opencc/hk2s.json",
+      "size": 668,
+      "sha256": "874d46d14195ff3027ac95cd7289ba9a2c9b71dab72f66e9eec66c3e728afe06"
+    },
+    {
+      "path": "opencc/hu_cf.json",
+      "size": 235,
+      "sha256": "93b4134df312e73b1373cac272fdce719a3253d9ee4bc7ecfc58a285695c4723"
+    },
+    {
+      "path": "opencc/hu_cf.txt",
+      "size": 4035735,
+      "sha256": "07f6699addf2470da1460480ea5bf88e384cdf2f98d61ea40f096a210da2b681"
+    },
+    {
+      "path": "opencc/pinyin.json",
+      "size": 368,
+      "sha256": "9e89b94ed6dc7eb391aee62dde8c73bbd08c3ad5350d33be3ec697fa2a1e3d26"
+    },
+    {
+      "path": "opencc/s2hk.json",
+      "size": 662,
+      "sha256": "7087dfae136e058263129887044ef759a85fd901fd27c6ea2ec1341947c9b804"
+    },
+    {
+      "path": "opencc/s2t.json",
+      "size": 422,
+      "sha256": "517005def280c211e46b2b1e0d0e32c90612e7733cdcf784fcb581c2ae3fcbb0"
+    },
+    {
+      "path": "opencc/s2tw.json",
+      "size": 524,
+      "sha256": "c81b1a0533c5edb2f082c319d8a52cd22be31078542b56456135996ff7a447ed"
+    },
+    {
+      "path": "opencc/s2twp.json",
+      "size": 621,
+      "sha256": "438178573ac1816d44f73df568be65b3598495952d0d88c5b0c386e715ee6cda"
+    },
+    {
+      "path": "opencc/st_tu.json",
+      "size": 446,
+      "sha256": "d1fad0c4068101d60106ddbfa443978658e9aa1831fb0f7b4b7d18c6411333b0"
+    },
+    {
+      "path": "opencc/t2hk.json",
+      "size": 317,
+      "sha256": "158084c7851955a3080e01e724ea6b91156f0f0595a4be63e64f0928bc0003a2"
+    },
+    {
+      "path": "opencc/t2s.json",
+      "size": 422,
+      "sha256": "46123754afd3d6c73d2161dee2ebbf76d829d23bc4c64edc9f3b7f76ad60a55b"
+    },
+    {
+      "path": "opencc/t2tw.json",
+      "size": 314,
+      "sha256": "a223c12250f044d27162d8fc7f20e71d90b4a6091f31ba2802d49aeae01747a6"
+    },
+    {
+      "path": "opencc/tw2s.json",
+      "size": 665,
+      "sha256": "fb3e3ec91bed143763cb319c3c1de8cee9e1b5670451033d90e95e64c68cbecf"
+    },
+    {
+      "path": "opencc/tw2sp.json",
+      "size": 766,
+      "sha256": "2516937584fd81a031c9c4f0c03374b66c6ee388ee11f653326810ad47cc21ee"
+    },
+    {
+      "path": "rime.lua",
+      "size": 550,
+      "sha256": "ee1b762157bbbd41feda41ba5cc105571164eae89639cc897d03db125a5c1915"
+    },
+    {
+      "path": "stroke.dict.yaml",
+      "size": 2402015,
+      "sha256": "72f74a2b8e7bc1b846820b51a625bf7a80c464401be0bbc537aaa483a3fe83ae"
+    },
+    {
+      "path": "stroke.schema.yaml",
+      "size": 1617,
+      "sha256": "0d6f9a5d488f054c1e91d7ab257ae599f86edebed74edaeb27877de227b47fb5"
+    },
+    {
+      "path": "symbols.yaml",
+      "size": 40288,
+      "sha256": "1056fa6fdd77eaa70ab0e4e79de48a88479c371042095084a3d266dc0b626020"
+    },
+    {
+      "path": "tiger.custom.yaml",
+      "size": 4497,
+      "sha256": "eb4db71db3f1b0644ece8b5a319140c75016e65eccdd593335e8c3d2e74462a9"
+    },
+    {
+      "path": "tiger.dict.yaml",
+      "size": 1500362,
+      "sha256": "154ca47606e0c1ec884af1832521635ebccc5e9c317df2649d6630f6a8fdc086"
+    },
+    {
+      "path": "tiger.extended.dict.yaml",
+      "size": 3734,
+      "sha256": "3621a404ade3b43e30f2e3203b748839795d2657629ea13de6b05acb4ab8ecb2"
+    },
+    {
+      "path": "tiger.schema.yaml",
+      "size": 9652,
+      "sha256": "a5fb1cf3550043dd86555056ee92d9229ea8eb3ff0d2e25bd1009d485432def8"
+    },
+    {
+      "path": "tigress.custom.yaml",
+      "size": 4500,
+      "sha256": "610efe1be78507be48c83099ecbd168c8942f02ab19da791ede21c1aeefdc36d"
+    },
+    {
+      "path": "tigress.dict.yaml",
+      "size": 1500268,
+      "sha256": "21126f7f64d4d0e7711620dd55437f365bf4d9d33166c825e5a5424496759ffa"
+    },
+    {
+      "path": "tigress.extended.dict.yaml",
+      "size": 3885,
+      "sha256": "2404ed623e175552fdbf6d409b5dd10bf936e62b75c99734b45df5b6797ebe0f"
+    },
+    {
+      "path": "tigress.schema.yaml",
+      "size": 9653,
+      "sha256": "09debab31928db12c176c08e2e257759fe4cf68d5d86a642d03ecbf5d09ca8e1"
+    },
+    {
+      "path": "tigress_ci.dict.yaml",
+      "size": 2444290,
+      "sha256": "852233c7963c1c63e49963ae21c7e44161d18943d4edf54c7dd802b027a43354"
+    },
+    {
+      "path": "tigress_simp_ci.dict.yaml",
+      "size": 58492,
+      "sha256": "cde0332ba5ed17c932ef822a4e36e2aebfca6985968ec539067f7381dee07a27"
+    },
+    {
+      "path": "weasel.custom.yaml",
+      "size": 9021,
+      "sha256": "26d0b058151bc8ed2bf6de559c79e4652205e32c6b9b59a81a55e1fadc53fbb0"
+    }
+  ]
+}

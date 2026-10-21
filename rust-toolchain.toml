@@ -1,0 +1,5 @@
+[toolchain]
+# 固定已验证工具链；i686 只用于后续 32 位宿主的 TSF，不再运行一套引擎。
+channel = "1.94.1"
+profile = "minimal"
+targets = ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc"]
