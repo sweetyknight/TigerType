@@ -1,9 +1,15 @@
 //! 纯 Rust 核心与安全数据工具的应用组装；不初始化或加载旧引擎。
 
 #[cfg(windows)]
+pub mod backend;
+#[cfg(windows)]
+pub mod candidate_preview;
+#[cfg(windows)]
 pub mod data;
 pub mod dispatch;
 pub mod import;
+#[cfg(windows)]
+pub mod lookup;
 pub mod process;
 pub mod resources;
 

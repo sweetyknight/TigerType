@@ -1,5 +1,5 @@
 //! 本机、单对端命名管道；一个 Runtime 共用最多一个完成线程，不按连接创建线程。
-//! 当前运行时显式拒绝可卸载 DLL；TSF 接入前必须先补齐完成回调的模块驻留保护。
+//! 默认入口拒绝 DLL；显式驻留入口锁定模块至宿主退出，关闭排空不宣称允许热卸载。
 
 mod io;
 mod security;
@@ -7,6 +7,7 @@ mod security;
 mod tests;
 
 pub use io::Cancellation;
+pub use io::Pending;
 pub use security::Peer;
 
 use self::{
@@ -16,7 +17,7 @@ use self::{
 use crate::{ClientState, Error, FrameAssembler, Result, decode};
 use std::{
     io as std_io,
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     ptr,
     sync::{
         Arc,
@@ -26,7 +27,7 @@ use std::{
 };
 use tigerrime_contracts::protocol::{Request, Response};
 use windows_sys::Win32::{
-    Foundation::INVALID_HANDLE_VALUE,
+    Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT},
     Security::SECURITY_ATTRIBUTES,
     Storage::FileSystem::{
         CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
@@ -38,19 +39,23 @@ use windows_sys::Win32::{
             PIPE_WAIT,
         },
         Threading::{
-            CloseThreadpool, CreateThreadpool, GetCurrentProcess, PTP_POOL,
-            SetThreadpoolThreadMaximum,
+            CloseThreadpool, CreateEventW, CreateThreadpool, GetCurrentProcess, PTP_POOL, SetEvent,
+            SetThreadpoolThreadMaximum, WaitForSingleObject,
         },
     },
 };
 
 const MAX_PIPES: usize = 64;
 const CHUNK: usize = 16 * 1024;
+const CLOSING: usize = 1 << (usize::BITS - 1);
 
 struct Pool {
     pool: PTP_POOL,
     identity: Identity,
-    pipes: AtomicUsize,
+    // 关闭位和数量用同一次 CAS 准入，输入路径不等待生命周期互斥锁。
+    lifecycle: AtomicUsize,
+    drained: OwnedHandle,
+    wake: OwnedHandle,
 }
 impl Drop for Pool {
     fn drop(&mut self) {
@@ -64,7 +69,13 @@ impl Drop for Pool {
 struct Slot(Arc<Pool>);
 impl Drop for Slot {
     fn drop(&mut self) {
-        self.0.pipes.fetch_sub(1, Ordering::AcqRel);
+        let previous = self.0.lifecycle.fetch_sub(1, Ordering::AcqRel);
+        if previous == (CLOSING | 1) {
+            // SAFETY: 只有关闭后的最后一个持有者通知；手动事件不重置，不会漏唤醒重复等候者。
+            unsafe {
+                SetEvent(self.0.drained.as_raw_handle());
+            }
+        }
     }
 }
 
@@ -73,8 +84,33 @@ impl Runtime {
     /// 每个产品进程在启动阶段创建一次，不能放在逐键或逐连接路径中。
     pub fn new() -> Result<Self> {
         io::require_executable()?;
+        Self::create()
+    }
+
+    /// 仅在 DLL 激活阶段调用：明确接受模块直到宿主进程退出都不可卸载。
+    /// 不允许从 DllMain 或逐键回调调用；shutdown 只排空资源，不解除系统 PIN。
+    pub fn new_process_resident() -> Result<Self> {
+        io::pin_callback_module()?;
+        Self::create()
+    }
+
+    fn create() -> Result<Self> {
         // SAFETY: 当前进程伪句柄只借用，不关闭。
         let identity = Identity::from_process(unsafe { GetCurrentProcess() })?;
+        // SAFETY: 非继承、未命名的手动复位事件，只有最后一个关闭引用释放时才置位。
+        let drained = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
+        if drained.is_null() {
+            return Err(std_io::Error::last_os_error().into());
+        }
+        // SAFETY: 成功创建的事件由唯一 RAII 所有者回收，覆盖线程池创建失败路径。
+        let drained = unsafe { OwnedHandle::from_raw_handle(drained) };
+        // SAFETY: 自动复位事件合并完成通知；反应器被唤醒后检查所有有界在途操作。
+        let wake = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
+        if wake.is_null() {
+            return Err(std_io::Error::last_os_error().into());
+        }
+        // SAFETY: 成功创建的事件由 Runtime 唯一持有。
+        let wake = unsafe { OwnedHandle::from_raw_handle(wake) };
         // SAFETY: 无保留参数；池由 Pool 的 Drop 独占回收。
         let pool = unsafe { CreateThreadpool(ptr::null()) };
         if pool == 0 {
@@ -87,18 +123,51 @@ impl Runtime {
         Ok(Self(Arc::new(Pool {
             pool,
             identity,
-            pipes: AtomicUsize::new(0),
+            lifecycle: AtomicUsize::new(0),
+            drained,
+            wake,
         })))
     }
 
     fn slot(&self) -> Result<Slot> {
         self.0
-            .pipes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < MAX_PIPES).then_some(count + 1)
+            .lifecycle
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                (state < MAX_PIPES).then_some(state + 1)
             })
-            .map_err(|_| Error::Busy)?;
+            .map_err(|state| {
+                if state & CLOSING != 0 {
+                    Error::Closed
+                } else {
+                    Error::Busy
+                }
+            })?;
         Ok(Slot(self.0.clone()))
+    }
+    /// 固定反应器可把此事件与停机、UI 和宿主进程句柄放入同一次内核等待。
+    pub fn completion_event(&self) -> BorrowedHandle<'_> {
+        self.0.wake.as_handle()
+    }
+
+    /// 拒绝后续连接，等待所有管道/取消令牌/在途操作释放；仅用于显式停止，不用于输入回调。
+    /// 调用者先取消并释放持有者。超时仍保持关闭状态，可继续等候；不会强杀或假装线程已退出。
+    pub fn shutdown(&self, deadline: Instant) -> Result<()> {
+        let previous = self.0.lifecycle.fetch_or(CLOSING, Ordering::AcqRel);
+        if previous & !CLOSING != 0 {
+            let budget = remaining(deadline)?;
+            let millis = budget
+                .as_nanos()
+                .div_ceil(1_000_000)
+                .min((u32::MAX - 1) as u128) as u32;
+            // SAFETY: Runtime 持有事件直到等候返回；仅停机路径等待，管道取消独立唤醒它。
+            match unsafe { WaitForSingleObject(self.0.drained.as_raw_handle(), millis) } {
+                WAIT_OBJECT_0 => {}
+                WAIT_TIMEOUT => return Err(Error::TimedOut),
+                _ => return Err(std_io::Error::last_os_error().into()),
+            }
+        }
+        // 成功只代表资源所有权已排空；完成线程仍可能处于返回尾部，由 EXE 或 DLL PIN 保护。
+        Ok(())
     }
 
     pub fn bind(&self, label: &str) -> Result<Listener> {
@@ -165,10 +234,53 @@ impl Runtime {
         pipe.check_open(deadline)?;
         Ok(pipe)
     }
+
+    /// 激活时发现后台：身份来自内核且映像必须匹配显式预期路径，不读取发现文件。
+    pub fn connect_image(
+        &self,
+        label: &str,
+        image: &std::path::Path,
+        deadline: Instant,
+    ) -> Result<Pipe> {
+        remaining(deadline)?;
+        let name = self.0.identity.name(label)?;
+        let slot = self.slot()?;
+        // SAFETY: 本机受限名称与 IDENTIFICATION，服务端不能获得客户端可模拟令牌。
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                CLIENT_ACCESS,
+                0,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std_io::Error::last_os_error().into());
+        }
+        // SAFETY: 成功打开的管道由 RAII 持有，认证失败也回收。
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let peer = Peer::from_pipe(handle.as_raw_handle(), &self.0.identity, false)?;
+        peer.verify_image(image)?;
+        remaining(deadline)?;
+        let pipe = Pipe {
+            io: Io::new(handle, slot)?,
+            _peer: Some(peer),
+        };
+        pipe.check_open(deadline)?;
+        Ok(pipe)
+    }
 }
 
 pub struct Listener(Pipe);
 impl Listener {
+    /// 一个完成线程可同时维护所有有界监听，不为连接创建线程。
+    pub fn start_accept(mut self) -> Result<(Pipe, Pending)> {
+        let pending = self.0.submit(Kind::Connect, Vec::new())?;
+        Ok((self.0, pending))
+    }
     pub fn cancellation(&self) -> Cancellation {
         self.0.cancellation()
     }
@@ -198,6 +310,17 @@ impl Drop for Pipe {
 }
 
 impl Pipe {
+    pub fn authenticate_client(&mut self) -> Result<&Peer> {
+        self._peer = Some(Peer::from_pipe(
+            self.io.handle.as_raw_handle(),
+            &self.io._slot.0.identity,
+            true,
+        )?);
+        Ok(self._peer.as_ref().unwrap())
+    }
+    pub fn peer(&self) -> Result<&Peer> {
+        self._peer.as_ref().ok_or(Error::Invalid("管道尚未认证"))
+    }
     fn check_open(&self, deadline: Instant) -> Result<()> {
         if self.io.closed.load(Ordering::Acquire) {
             return Err(Error::Cancelled);

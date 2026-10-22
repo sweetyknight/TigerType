@@ -16,7 +16,13 @@ const RULES: &[(&str, &[&str])] = &[
     ("tigerrime-ui", &["tigerrime-contracts", "windows-sys"]),
     (
         "tigerrime-tsf",
-        &["tigerrime-contracts", "tigerrime-ipc", "windows-sys"],
+        &[
+            "tigerrime-contracts",
+            "tigerrime-ipc",
+            "windows-sys",
+            "windows",
+            "windows-core",
+        ],
     ),
     (
         "tigerrime-app",

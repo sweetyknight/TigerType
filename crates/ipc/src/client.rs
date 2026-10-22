@@ -135,6 +135,7 @@ mod tests {
                 session_id: 1,
             },
             command: Command::Key {
+                epoch: 1,
                 key: tigerrime_contracts::Key::Space,
             },
         }

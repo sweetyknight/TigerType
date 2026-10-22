@@ -12,9 +12,9 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, SyncSender},
+        mpsc::{self, Receiver, SyncSender},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 use windows_sys::Win32::{
     Foundation::{ERROR_IO_PENDING, ERROR_PIPE_CONNECTED},
@@ -22,13 +22,14 @@ use windows_sys::Win32::{
     System::{
         IO::{CancelIoEx, OVERLAPPED},
         LibraryLoader::{
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            GetModuleHandleExW, GetModuleHandleW,
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleHandleExW, GetModuleHandleW,
         },
         Pipes::ConnectNamedPipe,
         Threading::{
             CancelThreadpoolIo, CloseThreadpoolIo, CreateThreadpoolIo, PTP_CALLBACK_INSTANCE,
-            PTP_IO, StartThreadpoolIo, TP_CALLBACK_ENVIRON_V3, TP_CALLBACK_PRIORITY_NORMAL,
+            PTP_IO, SetEvent, StartThreadpoolIo, TP_CALLBACK_ENVIRON_V3,
+            TP_CALLBACK_PRIORITY_NORMAL,
         },
     },
 };
@@ -46,7 +47,7 @@ pub(super) fn require_executable() -> Result<()> {
     {
         return Err(io::Error::last_os_error().into());
     }
-    // shortcut: 尚无可卸载 DLL 的回调驻留保护，接入 TSF DLL 前须先实现受控卸载。
+    // 默认入口继续拒绝 DLL；DLL 必须显式选择不可热卸载的进程期驻留策略。
     // SAFETY: NULL 查询进程主模块；EXE 在进程退出前不会卸载，取消回调可以安全收尾。
     if module != unsafe { GetModuleHandleW(ptr::null()) } {
         return Err(Error::Invalid(
@@ -56,10 +57,28 @@ pub(super) fn require_executable() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn pin_callback_module() -> Result<()> {
+    let mut module = ptr::null_mut();
+    // SAFETY: FROM_ADDRESS 使用实际完成回调地址定位本模块；PIN 让取消回调的尾部也保持可执行。
+    // PIN 由系统保持至宿主退出，不能用 FreeLibrary 抵消；本函数不得在 DllMain/逐键路径调用。
+    if unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            completed as *const () as *const u16,
+            &mut module,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
 pub(super) struct Io {
     pub handle: OwnedHandle,
     notification: PTP_IO,
     pub closed: AtomicBool,
+    in_flight: AtomicBool,
     // 完成回调和管道必须先于自定义线程池释放。
     pub(super) _slot: Slot,
     #[cfg(test)]
@@ -91,6 +110,7 @@ impl Io {
             handle,
             notification,
             closed: AtomicBool::new(false),
+            in_flight: AtomicBool::new(false),
             _slot: slot,
             #[cfg(test)]
             on_drop: None,
@@ -153,6 +173,7 @@ unsafe extern "system" fn completed(
 ) {
     // SAFETY: 每次 StartThreadpoolIo 前恰好交出一个 Arc 引用；首字段偏移为 0。
     let operation = unsafe { Arc::from_raw(overlapped.cast::<Operation>()) };
+    let pool = operation.io._slot.0.clone();
     // 系统回调不执行协议/业务代码；异常也不得穿过 Windows ABI。
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let result = if result == 0 {
@@ -163,6 +184,11 @@ unsafe extern "system" fn completed(
         // 每操作只有一个完成通知，容量为 1；超时接收端已丢弃时直接释放资源。
         let _ = operation.done.try_send(result);
     }));
+    drop(operation);
+    // SAFETY: 取消操作先释放回调持有的管道，再唤醒重建监听；Pool 单独保持事件存活。
+    unsafe {
+        SetEvent(pool.wake.as_raw_handle());
+    }
 }
 
 pub(super) enum Kind {
@@ -171,6 +197,70 @@ pub(super) enum Kind {
     Write,
 }
 
+/// 一个内核在途操作；只可在完成事件唤醒后非阻塞领取，提前丢弃会取消连接。
+pub struct Pending {
+    operation: Arc<Operation>,
+    receiver: Receiver<io::Result<usize>>,
+    finished: bool,
+}
+impl Pending {
+    fn finish(&mut self, result: io::Result<usize>) -> Result<(Vec<u8>, usize)> {
+        self.finished = true;
+        self.operation.io.in_flight.store(false, Ordering::Release);
+        if self.operation.io.closed.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        let count = match result {
+            Ok(count) => count,
+            Err(error) => {
+                self.operation.io.cancel();
+                return Err(error.into());
+            }
+        };
+        // SAFETY: channel 完成通知建立同步；内核已停止访问，回调从不读写 buffer。
+        let buffer = unsafe { std::mem::take(&mut *self.operation.buffer.get()) };
+        if count > buffer.len() {
+            self.operation.io.cancel();
+            return Err(Error::Invalid("内核完成长度越界"));
+        }
+        Ok((buffer, count))
+    }
+    pub fn try_complete(&mut self) -> Result<Option<(Vec<u8>, usize)>> {
+        if self.finished {
+            return Err(Error::Closed);
+        }
+        match self.receiver.try_recv() {
+            Ok(result) => self.finish(result).map(Some),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.operation.io.cancel();
+                Err(Error::Closed)
+            }
+        }
+    }
+    fn wait(mut self, deadline: Option<Instant>) -> Result<(Vec<u8>, usize)> {
+        let result =
+            match deadline {
+                Some(deadline) => self.receiver.recv_timeout(remaining(deadline)?).map_err(
+                    |error| match error {
+                        mpsc::RecvTimeoutError::Timeout => Error::TimedOut,
+                        mpsc::RecvTimeoutError::Disconnected => Error::Closed,
+                    },
+                )?,
+                None => self.receiver.recv().map_err(|_| Error::Closed)?,
+            };
+        // 超时边界仍不交付刚到达的迟到结果；Drop 保留内核所需内存直到取消完成。
+        check_deadline(deadline)?;
+        self.finish(result)
+    }
+}
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.operation.io.cancel();
+        }
+    }
+}
 impl Pipe {
     pub(super) fn operate(
         &mut self,
@@ -178,24 +268,29 @@ impl Pipe {
         buffer: Vec<u8>,
         deadline: Instant,
     ) -> Result<(Vec<u8>, usize)> {
-        self.operate_until(kind, buffer, Some(deadline))
+        check_deadline(Some(deadline))?;
+        self.submit(kind, buffer)?.wait(Some(deadline))
     }
-
-    /// 仅服务端等首字节可空闲；保留同一个 OVERLAPPED，不超时撤销再重读而丢失竞态数据。
     pub(super) fn idle_read(&mut self, size: usize) -> Result<(Vec<u8>, usize)> {
-        self.operate_until(Kind::Read, vec![0; size], None)
+        self.submit(Kind::Read, vec![0; size])?.wait(None)
     }
-
-    fn operate_until(
-        &mut self,
-        kind: Kind,
-        buffer: Vec<u8>,
-        deadline: Option<Instant>,
-    ) -> Result<(Vec<u8>, usize)> {
+    /// 服务端反应器每条连接仅保留一个操作；不能把 try_complete 放进忙轮询。
+    pub fn start_read(&mut self) -> Result<Pending> {
+        self.submit(Kind::Read, vec![0; super::CHUNK])
+    }
+    pub fn start_write(&mut self, bytes: Vec<u8>) -> Result<Pending> {
+        if bytes.is_empty() || bytes.len() > crate::MAX_BODY_LEN + crate::HEADER_LEN {
+            return Err(Error::Invalid("异步写入长度超限或为空"));
+        }
+        self.submit(Kind::Write, bytes)
+    }
+    pub(super) fn submit(&mut self, kind: Kind, buffer: Vec<u8>) -> Result<Pending> {
         if self.io.closed.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
-        check_deadline(deadline)?;
+        if self.io.in_flight.swap(true, Ordering::AcqRel) {
+            return Err(Error::Busy);
+        }
         let (sender, receiver) = mpsc::sync_channel(1);
         let operation = Arc::new(Operation {
             overlapped: UnsafeCell::new(OVERLAPPED::default()),
@@ -204,9 +299,14 @@ impl Pipe {
             io: self.io.clone(),
         });
         let callback_ref = Arc::into_raw(operation.clone());
-        // SAFETY: 提交前独占缓冲区元数据；内核只访问其分配，不改变 Vec 的指针/长度。
+        let pending = Pending {
+            operation: operation.clone(),
+            receiver,
+            finished: false,
+        };
+        // SAFETY: 提交者此时独占缓冲区元数据，Arc 保持内核访问的分配和 OVERLAPPED 稳定。
         let buffer = unsafe { &mut *operation.buffer.get() };
-        // SAFETY: 回调引用已建立；所有地址保持到回调完成，即使调用方提前超时返回。
+        // SAFETY: 每次 StartThreadpoolIo 已交出一份回调引用，所有退出路径配对收回。
         let success = unsafe {
             StartThreadpoolIo(self.io.notification);
             match kind {
@@ -232,7 +332,7 @@ impl Pipe {
         if success == 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-                // SAFETY: 未提交异步 I/O，不会收到完成回调；撤销通知并收回它的 Arc。
+                // SAFETY: 没有提交异步操作，不会有完成包，撤销注册并收回回调引用。
                 unsafe {
                     CancelThreadpoolIo(self.io.notification);
                     drop(Arc::from_raw(callback_ref));
@@ -240,62 +340,23 @@ impl Pipe {
                 if !matches!(kind, Kind::Connect)
                     || error.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32)
                 {
-                    self.io.cancel();
                     return Err(error.into());
                 }
-                // 客户端先于 ConnectNamedPipe 连上时没有完成包，按已连接处理。
-                check_deadline(deadline)?;
-                if self.io.closed.load(Ordering::Acquire) {
-                    return Err(Error::Cancelled);
+                // 先连上的客户端没有完成包，显式通知同一个完成通道和反应器。
+                let _ = operation.done.try_send(Ok(0));
+                // SAFETY: Pool 在操作存活期持有事件。
+                unsafe {
+                    SetEvent(self.io._slot.0.wake.as_raw_handle());
                 }
-                return Ok((Vec::new(), 0));
             }
         }
-        // 覆盖 cancel 在检查 closed 与提交 I/O 之间发生的竞态。
+        // 覆盖检查 closed 后、提交前发生取消的竞态。
         if self.io.closed.load(Ordering::Acquire) {
             self.io.cancel();
         }
-        let result = loop {
-            let budget = match deadline.map(remaining).transpose() {
-                Ok(budget) => budget.unwrap_or(Duration::from_secs(60)),
-                Err(error) => break Err(error),
-            };
-            match receiver.recv_timeout(budget) {
-                Ok(result) => break result.map_err(Error::Io),
-                // 空闲等待可被 CancelIoEx/断连唤醒；有限等待到期不重新提交 I/O 或分配缓冲区。
-                Err(mpsc::RecvTimeoutError::Timeout)
-                    if deadline.is_none() && !self.io.closed.load(Ordering::Acquire) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => break Err(Error::TimedOut),
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    break Err(Error::Invalid("管道完成回调未返回结果"));
-                }
-            }
-        };
-        let result = result.and_then(|count| {
-            check_deadline(deadline)?;
-            Ok(count)
-        });
-        let count = match result {
-            Ok(_) if self.io.closed.load(Ordering::Acquire) => return Err(Error::Cancelled),
-            Ok(count) => count,
-            Err(error) => {
-                if self.io.closed.load(Ordering::Acquire) {
-                    return Err(Error::Cancelled);
-                }
-                self.io.cancel();
-                return Err(error);
-            }
-        };
-        // SAFETY: 完成通知已通过 channel 同步；内核不再访问，回调始终不访问 buffer。
-        let buffer = unsafe { std::mem::take(&mut *operation.buffer.get()) };
-        if count > buffer.len() {
-            self.io.cancel();
-            return Err(Error::Invalid("内核完成长度越界"));
-        }
-        Ok((buffer, count))
+        Ok(pending)
     }
 }
-
 fn check_deadline(deadline: Option<Instant>) -> Result<()> {
     deadline.map(remaining).transpose().map(|_| ())
 }

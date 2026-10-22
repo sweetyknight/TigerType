@@ -34,13 +34,56 @@ fn raw(body: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn handshake_and_notifications_reject_zero_identity_and_cannot_be_input_replies() {
+    for message in [
+        Message::Welcome {
+            host: 0,
+            generation: 1,
+        },
+        Message::Welcome {
+            host: 1,
+            generation: 0,
+        },
+        Message::Notification {
+            token: tigerrime_contracts::candidate::CandidateToken {
+                host: 1,
+                generation: 1,
+                session: 1,
+                focus: 1,
+                revision: 0,
+            },
+            reset: true,
+        },
+    ] {
+        assert!(encode(&message).is_err());
+        assert!(decode(&raw(&serde_json::to_vec(&message).unwrap())).is_err());
+    }
+    let expected = request(Command::Clear);
+    for message in [
+        Message::Hello,
+        Message::Stopped,
+        Message::Welcome {
+            host: 1,
+            generation: 1,
+        },
+    ] {
+        assert!(decode_response(&encode(&message).unwrap(), &expected).is_err());
+    }
+}
+
+#[test]
 fn fixed_wire_bytes_do_not_depend_on_pointer_width() {
-    let body = br#"{"type":"request","value":{"route":{"generation":18446744073709551615,"request_id":2,"session_id":3},"command":{"type":"key","value":{"key":{"type":"character","value":"u"}}}}}"#;
+    let body = br#"{"type":"request","value":{"route":{"generation":18446744073709551615,"request_id":2,"session_id":3},"command":{"type":"key","value":{"key":{"type":"character","value":"u"},"epoch":1}}}}"#;
     let expected = Message::Request(request(Command::Key {
+        epoch: 1,
         key: tigerrime_contracts::Key::Character('u'),
     }));
     assert_eq!(encode(&expected).unwrap(), raw(body));
     assert_eq!(decode(&raw(body)).unwrap(), expected);
+    // 新焦点字段不向后兼容，旧 v2 即使正文形状正确也不得通过。
+    let mut old = raw(body);
+    old[4..6].copy_from_slice(&2u16.to_le_bytes());
+    assert!(decode(&old).is_err());
     let mut state = InputState {
         page_index: u32::MAX as usize,
         ..Default::default()
@@ -82,10 +125,28 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
         state: state.clone(),
     };
     let messages = [
+        Message::Hello,
+        Message::Stop,
+        Message::Stopped,
+        Message::Welcome {
+            generation: 7,
+            host: 8,
+        },
+        Message::Notification {
+            token: tigerrime_contracts::candidate::CandidateToken {
+                host: 8,
+                generation: 7,
+                session: 1,
+                focus: 2,
+                revision: 3,
+            },
+            reset: false,
+        },
         Message::Request(request(Command::Open {
             options: Default::default(),
         })),
         Message::Request(request(Command::Key {
+            epoch: 1,
             key: tigerrime_contracts::Key::Character('𠀀'),
         })),
         Message::Request(request(Command::Clear)),
@@ -93,12 +154,28 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
             options: Default::default(),
         })),
         Message::Request(request(Command::Select {
+            epoch: 1,
             revision: 1,
             index: 0,
         })),
         Message::Request(request(Command::Close)),
+        Message::Request(request(Command::Focus {
+            epoch: 1,
+            caret: Some(tigerrime_contracts::candidate::ScreenRect {
+                left: -10,
+                top: 20,
+                right: -9,
+                bottom: 40,
+            }),
+        })),
+        Message::Request(request(Command::Focus {
+            epoch: 2,
+            caret: None,
+        })),
+        Message::Request(request(Command::TakeSelection { epoch: 1 })),
         reply(Reply::Opened(state.clone())),
         reply(Reply::Configured(state.clone())),
+        reply(Reply::Focused(state.clone())),
         reply(Reply::Cleared(state)),
         reply(Reply::Key(outcome)),
         reply(Reply::Closed),
@@ -143,6 +220,7 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
         assert!(decode(&raw(body)).is_err());
     }
     let original = serde_json::to_string(&Message::Request(request(Command::Key {
+        epoch: 1,
         key: tigerrime_contracts::Key::Character('u'),
     })))
     .unwrap();
@@ -164,14 +242,44 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
         assert!(decode(&raw(changed.as_bytes())).is_err(), "{to}");
     }
     for command in [
+        Command::Focus {
+            epoch: 0,
+            caret: None,
+        },
+        Command::Focus {
+            epoch: 1,
+            caret: Some(tigerrime_contracts::candidate::ScreenRect {
+                left: i32::MIN,
+                top: 0,
+                right: 0,
+                bottom: 1,
+            }),
+        },
+        Command::Focus {
+            epoch: 1,
+            caret: Some(tigerrime_contracts::candidate::ScreenRect {
+                left: 1,
+                top: 0,
+                right: 0,
+                bottom: 1,
+            }),
+        },
+        Command::TakeSelection { epoch: 0 },
         Command::Key {
+            epoch: 0,
+            key: tigerrime_contracts::Key::Space,
+        },
+        Command::Key {
+            epoch: 1,
             key: tigerrime_contracts::Key::Character('\0'),
         },
         Command::Select {
+            epoch: 1,
             revision: 0,
             index: 0,
         },
         Command::Select {
+            epoch: 1,
             revision: 1,
             index: 9,
         },
@@ -265,6 +373,7 @@ fn limits_encoded_bytes_even_when_each_field_is_within_bounds() {
 #[test]
 fn only_the_expected_route_and_reply_type_can_be_delivered() {
     let request = request(Command::Key {
+        epoch: 1,
         key: tigerrime_contracts::Key::Space,
     });
     let response = Response {

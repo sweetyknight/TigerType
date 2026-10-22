@@ -2,6 +2,7 @@
 
 use super::*;
 use std::os::windows::io::BorrowedHandle;
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 use tigerrime_contracts::{
     InputState, KeyOutcome,
@@ -43,6 +44,7 @@ fn request() -> Request {
             session_id: 1,
         },
         command: Command::Key {
+            epoch: 1,
             key: tigerrime_contracts::Key::Space,
         },
     }
@@ -54,6 +56,107 @@ impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.cancel();
     }
+}
+
+#[test]
+fn asynchronous_read_rejects_overlap_and_drop_cancels_without_freeing_kernel_memory() -> Result<()>
+{
+    let runtime = Runtime::new()?;
+    let (mut client, server) = pair(&runtime)?;
+    let mut pending = client.start_read()?;
+    assert!(matches!(client.start_read(), Err(Error::Busy)));
+    assert!(pending.try_complete()?.is_none());
+    drop(pending);
+    assert!(matches!(client.start_read(), Err(Error::Closed)));
+    drop(client);
+    drop(server);
+    runtime.shutdown(deadline())?;
+    Ok(())
+}
+
+#[test]
+fn shutdown_timeout_is_not_drain_and_cannot_reopen_admission() -> Result<()> {
+    let runtime = Runtime::new()?;
+    let listener = runtime.bind(&label())?;
+    let cancellation = listener.cancellation();
+    assert!(matches!(
+        runtime.shutdown(Instant::now() + Duration::from_millis(5)),
+        Err(Error::TimedOut)
+    ));
+    assert!(matches!(runtime.bind(&label()), Err(Error::Closed)));
+    drop(listener);
+    // 取消令牌本身也持有管道，不能只看没有输入请求就声称资源释放。
+    assert!(matches!(
+        runtime.shutdown(Instant::now()),
+        Err(Error::TimedOut)
+    ));
+    drop(cancellation);
+    runtime.shutdown(deadline())?;
+    runtime.shutdown(Instant::now())?;
+    assert!(matches!(runtime.bind(&label()), Err(Error::Closed)));
+    Ok(())
+}
+
+#[test]
+fn shutdown_event_wakes_all_waiters_after_the_last_owner_drops() -> Result<()> {
+    let runtime = Runtime::new()?;
+    let listener = runtime.bind(&label())?;
+    std::thread::scope(|scope| -> Result<()> {
+        let (done, observed) = mpsc::sync_channel(2);
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let done = done.clone();
+            let runtime = &runtime;
+            workers.push(scope.spawn(move || {
+                let result = runtime.shutdown(deadline());
+                done.send(result).unwrap();
+            }));
+        }
+        assert!(matches!(
+            observed.recv_timeout(Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(listener);
+        // 两个等候者都被同一手动事件唤醒，后续 shutdown 不重置它或恢复准入。
+        for _ in 0..2 {
+            observed.recv_timeout(Duration::from_secs(2)).unwrap()?;
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        runtime.shutdown(Instant::now())
+    })
+}
+
+#[test]
+fn shutdown_drains_cancelled_accept_and_idle_read_without_polling() -> Result<()> {
+    let runtime = Runtime::new()?;
+    let listener = runtime.bind(&label())?;
+    let cancellation = listener.cancellation();
+    std::thread::scope(|scope| -> Result<()> {
+        let worker = scope.spawn(move || listener.accept(current_peer()?, deadline()));
+        cancellation.cancel();
+        drop(cancellation);
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(Error::Closed | Error::Cancelled)
+        ));
+        runtime.shutdown(deadline())
+    })?;
+    let runtime = Runtime::new()?;
+    let (client, mut server) = pair(&runtime)?;
+    let cancellation = server.cancellation();
+    std::thread::scope(|scope| -> Result<()> {
+        let worker = scope.spawn(move || server.receive_frame_idle(Duration::from_secs(1)));
+        cancellation.cancel();
+        drop(cancellation);
+        drop(client);
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(Error::Closed | Error::Cancelled)
+        ));
+        runtime.shutdown(deadline())
+    })
 }
 
 #[test]

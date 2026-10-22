@@ -3,7 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
+pub mod candidate;
 pub mod protocol;
+pub mod ui;
 
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_CANDIDATES: usize = 9;

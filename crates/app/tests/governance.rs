@@ -71,6 +71,21 @@ fn dependency_policy_detects_alias_platform_dev_build_transitive_cycles_and_unkn
     bad["packages"][1]["name"] = json!("tigerrime-engine");
     assert!(policy::architecture(&bad).is_err());
 }
+
+#[test]
+fn ui_cannot_call_engine_even_through_an_alias_or_transitive_dependency() {
+    // UI 已加入工作区，必须继续拒绝绕过应用组装层直接查词表。
+    let mut allowed = metadata();
+    allowed["packages"][0]["name"] = json!("tigerrime-ui");
+    allowed["packages"][0]["dependencies"][0]["name"] = json!("tigerrime-contracts");
+    allowed["packages"][1]["name"] = json!("tigerrime-contracts");
+    assert!(policy::architecture(&allowed).is_ok());
+    let mut direct = allowed.clone();
+    direct["packages"][0]["dependencies"][0]["name"] = json!("tigerrime-engine");
+    assert!(policy::architecture(&direct).is_err());
+    allowed["packages"][1]["name"] = json!("tigerrime-engine");
+    assert!(policy::architecture(&allowed).is_err());
+}
 #[test]
 fn documentation_policy_detects_broken_links_and_forbidden_artifacts() -> Result<()> {
     let root =

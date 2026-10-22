@@ -5,6 +5,8 @@ mod client;
 mod frame;
 #[cfg(windows)]
 pub mod pipe;
+#[cfg(windows)]
+pub mod service;
 
 pub use client::ClientState;
 pub use frame::FrameAssembler;
@@ -143,6 +145,8 @@ pub fn decode_response(frame: &[u8], expected: &Request) -> Result<Response> {
         (Command::Open { .. }, Reply::Opened(_))
             | (Command::Key { .. }, Reply::Key(_))
             | (Command::Select { .. }, Reply::Key(_))
+            | (Command::TakeSelection { .. }, Reply::Key(_))
+            | (Command::Focus { .. }, Reply::Focused(_))
             | (Command::Configure { .. }, Reply::Configured(_))
             | (Command::Clear, Reply::Cleared(_))
             | (Command::Close, Reply::Closed)
@@ -216,18 +220,49 @@ fn state(state: &InputState) -> Result<()> {
 
 fn validate(message: &Message) -> Result<()> {
     match message {
+        Message::Hello | Message::Stop | Message::Stopped => {}
+        Message::Welcome { generation, host } => {
+            if *generation == 0 || *host == 0 {
+                return Err(Error::Invalid("握手身份不能为零"));
+            }
+        }
+        Message::Notification { token, .. } => {
+            if [
+                token.host,
+                token.generation,
+                token.session,
+                token.focus,
+                token.revision,
+            ]
+            .contains(&0)
+            {
+                return Err(Error::Invalid("通知身份不能为零"));
+            }
+        }
         Message::Request(request) => {
             route(&request.route)?;
             match request.command {
                 Command::Key {
                     key: Key::Character(c),
+                    ..
                 } if c.is_control() => {
                     return Err(Error::Invalid("控制键必须使用逻辑按键而非字符"));
                 }
-                Command::Select { revision, index }
-                    if revision == 0 || index as usize >= PAGE_SIZE =>
-                {
+                Command::Select {
+                    revision, index, ..
+                } if revision == 0 || index as usize >= PAGE_SIZE => {
                     return Err(Error::Invalid("候选选择的快照或索引非法"));
+                }
+                Command::Key { epoch: 0, .. } | Command::Select { epoch: 0, .. } => {
+                    return Err(Error::Invalid("按键和选字必须绑定焦点代次"));
+                }
+                Command::Focus { epoch, caret }
+                    if epoch == 0 || caret.is_some_and(|rect| !rect.valid()) =>
+                {
+                    return Err(Error::Invalid("焦点代次或光标矩形非法"));
+                }
+                Command::TakeSelection { epoch: 0 } => {
+                    return Err(Error::Invalid("领取候选必须绑定焦点代次"));
                 }
                 _ => {}
             }
@@ -235,9 +270,10 @@ fn validate(message: &Message) -> Result<()> {
         Message::Response(response) => {
             route(&response.route)?;
             match &response.reply {
-                Reply::Opened(value) | Reply::Cleared(value) | Reply::Configured(value) => {
-                    state(value)?
-                }
+                Reply::Opened(value)
+                | Reply::Cleared(value)
+                | Reply::Configured(value)
+                | Reply::Focused(value) => state(value)?,
                 Reply::Key(outcome) => {
                     state(&outcome.state)?;
                     if let Some(commit) = &outcome.commit {

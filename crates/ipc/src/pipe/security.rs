@@ -4,7 +4,10 @@ use crate::{Error, Result};
 use std::{
     ffi::c_void,
     io,
-    os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
+    os::windows::{
+        ffi::OsStrExt,
+        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
+    },
     ptr,
 };
 use windows_sys::Win32::{
@@ -24,7 +27,11 @@ use windows_sys::Win32::{
             GetNamedPipeServerSessionId,
         },
         SystemServices::SE_GROUP_LOGON_ID,
-        Threading::{GetCurrentProcess, GetProcessId, OpenProcessToken, WaitForSingleObject},
+        Threading::{
+            GetCurrentProcess, GetProcessId, OpenProcess, OpenProcessToken,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
+            WaitForSingleObject,
+        },
     },
 };
 
@@ -197,6 +204,76 @@ impl AsHandle for Peer {
 }
 
 impl Peer {
+    pub fn same_process(&self, other: &Peer) -> Result<bool> {
+        Ok(self.id == other.id
+            && self.identity == other.identity
+            && self.is_alive()?
+            && other.is_alive()?)
+    }
+    pub fn verify_image(&self, expected: &std::path::Path) -> Result<()> {
+        if !expected.is_absolute() {
+            return Err(Error::Invalid("后台映像路径必须为绝对路径"));
+        }
+        let expected: Vec<_> = expected.as_os_str().encode_wide().collect();
+        let mut image = vec![0u16; 32768];
+        let mut length = image.len() as u32;
+        // SAFETY: 仅查询已固定进程对象的映像路径；不按输入内容打开文件或信任自报 PID。
+        if unsafe {
+            QueryFullProcessImageNameW(
+                self.process.as_raw_handle(),
+                0,
+                image.as_mut_ptr(),
+                &mut length,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: 两个 UTF-16 缓冲区和长度匹配；按 Windows 序号忽略大小写比较，不使用语言相关折叠。
+        if unsafe {
+            windows_sys::Win32::Globalization::CompareStringOrdinal(
+                image.as_ptr(),
+                length as i32,
+                expected.as_ptr(),
+                expected.len() as i32,
+                1,
+            )
+        } != windows_sys::Win32::Globalization::CSTR_EQUAL
+        {
+            return Err(Error::Invalid("后台进程映像不是预期程序"));
+        }
+        Ok(())
+    }
+    pub(super) fn from_pipe(pipe: HANDLE, local: &Identity, server: bool) -> Result<Self> {
+        let mut pid = 0;
+        // SAFETY: PID 只来自内核的管道对端查询，不来自消息或环境变量。
+        let ok = unsafe {
+            if server {
+                GetNamedPipeClientProcessId(pipe, &mut pid)
+            } else {
+                GetNamedPipeServerProcessId(pipe, &mut pid)
+            }
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: 立即固定内核报告的存活进程；随后再次核对管道、登录 SID 和会话。
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        if process.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: OpenProcess 的新句柄由唯一 RAII 所有者接管。
+        let process = unsafe { OwnedHandle::from_raw_handle(process) };
+        let peer = Self::from_process(process.as_handle())?;
+        peer.verify(pipe, local, server)?;
+        Ok(peer)
+    }
     /// app 的宿主表只接受已取得可信进程句柄的同登录进程；不接受消息自报 PID。
     pub fn require_local(&self) -> Result<()> {
         // SAFETY: 只查询当前进程令牌，伪句柄不转移所有权。
