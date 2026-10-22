@@ -1,5 +1,5 @@
 //! 视图状态独立于窗口句柄，单个在途动作避免查询换页或保存回复错配。
-use tigerrime_contracts::{
+use tigertype_contracts::{
     LookupPage, MAX_QUERY_CHARS, Options,
     ui::{Reply, Request},
 };
@@ -135,7 +135,7 @@ pub(crate) fn details(page: &LookupPage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tigerrime_contracts::{LearningInfo, LookupItem};
+    use tigertype_contracts::{LearningInfo, LookupItem};
     #[test]
     fn single_pending_action_and_page_binding() {
         let mut model = Model::new(Options::default());

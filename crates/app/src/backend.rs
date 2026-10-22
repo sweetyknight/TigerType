@@ -6,18 +6,18 @@ use std::{
     sync::mpsc::TryRecvError,
     time::{Duration, Instant},
 };
-use tigerrime_contracts::{
+use tigertype_contracts::{
     Options,
     candidate::{CandidateChoice, CandidateFrame},
     protocol::{Command, Message},
 };
-use tigerrime_engine::Dictionary;
-use tigerrime_ipc::{
+use tigertype_engine::Dictionary;
+use tigertype_ipc::{
     FrameAssembler,
     pipe::{Listener, Pending, Pipe, Runtime},
     service::HOST_SLOTS,
 };
-use tigerrime_ui::{Inbox, candidate::FrameSender};
+use tigertype_ui::{Inbox, candidate::FrameSender};
 use windows_sys::Win32::{
     Foundation::WAIT_FAILED,
     Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
@@ -155,11 +155,11 @@ impl Slot {
         if let Some(event) = self.request.tick()? {
             match event {
                 Event::Connected | Event::Written => self.request.read()?,
-                Event::Frame(frame) => match tigerrime_ipc::decode(&frame)? {
+                Event::Frame(frame) => match tigertype_ipc::decode(&frame)? {
                     Message::Stop if self.host.is_some() => {
                         self.request.pipe.peer()?.verify_image(image)?;
                         self.request.write(
-                            tigerrime_ipc::encode(&Message::Stopped)?,
+                            tigertype_ipc::encode(&Message::Stopped)?,
                             self.request.deadline.ok_or("停机缺少期限")?,
                         )?;
                         self.stopping = true;
@@ -171,7 +171,7 @@ impl Slot {
                         if matches!(request.command, Command::Open { .. }) {
                             request.command = Command::Open { options };
                         }
-                        let frame = tigerrime_ipc::encode(&Message::Request(request))?;
+                        let frame = tigertype_ipc::encode(&Message::Request(request))?;
                         let reply = dispatch.dispatch(host, &frame)?;
                         self.request
                             .write(reply, self.request.deadline.ok_or("请求缺少期限")?)?;
@@ -195,7 +195,7 @@ impl Slot {
                 self.host = Some(host);
                 self.notice.deadline = None;
                 self.request.write(
-                    tigerrime_ipc::encode(&Message::Welcome { generation, host })?,
+                    tigertype_ipc::encode(&Message::Welcome { generation, host })?,
                     self.request.deadline.ok_or("握手缺少期限")?,
                 )?;
             }
@@ -267,7 +267,7 @@ impl<'a> Server<'a> {
             .iter()
             .position(|s| s.as_ref().is_some_and(|s| s.host == Some(host)))
         {
-            let result = tigerrime_ipc::encode(&message)
+            let result = tigertype_ipc::encode(&message)
                 .map_err(Into::into)
                 .and_then(|frame| {
                     self.slots[index]
@@ -400,8 +400,8 @@ pub fn run(package: &Path, directory: &Path) -> Result<()> {
         .map(serde_json::from_slice)
         .transpose()?
         .unwrap_or_default();
-    let (frames, inbox) = tigerrime_ui::candidate::mailbox()?;
-    let (choices, received) = tigerrime_ui::mailbox()?;
+    let (frames, inbox) = tigertype_ui::candidate::mailbox()?;
+    let (choices, received) = tigertype_ui::mailbox()?;
     let worker = std::thread::Builder::new()
         .name("tiger-backend".into())
         .spawn(move || -> std::result::Result<(), String> {
@@ -411,7 +411,7 @@ pub fn run(package: &Path, directory: &Path) -> Result<()> {
             };
             work().map_err(|e| e.to_string())
         })?;
-    let result = tigerrime_ui::candidate::run(inbox, choices, "停止后台");
+    let result = tigertype_ui::candidate::run(inbox, choices, "停止后台");
     worker.join().map_err(|_| "后台线程异常退出")??;
     result.map_err(Into::into)
 }

@@ -5,7 +5,7 @@ use std::{
     panic::catch_unwind,
     time::{Duration, Instant},
 };
-use tigerrime_ipc::{
+use tigertype_ipc::{
     Error,
     pipe::{Peer, Runtime},
 };
@@ -37,7 +37,7 @@ fn probe() -> Result<(), Box<dyn std::error::Error>> {
 
 // SAFETY: 无参数、无跨 ABI 分配；错误和 panic 都转换为有限状态码，不在 DllMain 执行。
 #[unsafe(no_mangle)]
-pub extern "system" fn TigerRimeResidentProbe() -> u32 {
+pub extern "system" fn TigerTypeResidentProbe() -> u32 {
     match catch_unwind(probe) {
         Ok(Ok(())) => 0,
         Ok(Err(_)) => 1,

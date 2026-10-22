@@ -15,14 +15,15 @@ use std::{
     fmt,
     io::{self, Write},
 };
-use tigerrime_contracts::{
+use tigertype_contracts::{
     InputState, Key, MAX_CANDIDATES, MAX_LEARNING_ITEMS, MAX_TEXT_BYTES, PAGE_SIZE,
     protocol::{Command, Message, Reply, Request, Response, Route, VERSION},
 };
 
 pub const HEADER_LEN: usize = 12;
 pub const MAX_BODY_LEN: usize = 1024 * 1024;
-const MAGIC: &[u8; 4] = b"TRIM";
+// 产品标识与管道命名空间同步更名，直接拒绝旧程序的帧，不保留兼容分支。
+const MAGIC: &[u8; 4] = b"TTYP";
 
 #[derive(Debug)]
 pub enum Error {

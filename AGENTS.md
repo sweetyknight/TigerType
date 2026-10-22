@@ -1,4 +1,4 @@
-# TigerRime 开发约束
+# TigerType 开发约束
 
 范围以 [实施方案](docs/implementation-plan.md) 为准，实际状态只维护在 [项目状态](docs/project-status.md)。开发期不向后兼容；旧路线代码和文档直接删除，不保留归档或兼容层。
 
@@ -17,7 +17,7 @@
 - 校验协议版本、长度、会话、序号、代次和快照。故障取消未上屏组合、放行原键；不修改已上屏文字、重放不确定按键或接受迟到提交。
 - 单后台故障由用户重新启动；线程超时不等于线程已终止。当前 IPC 的 EXE 限制不得在 DLL 驻留/关闭验证前移除。
 - `D:\虎码秃版 小狼毫（Win）`、`D:\Projects\weasel` 只读。不读取个人词库，不自动注册或切换输入法。
-- 正式数据独立存放 `%APPDATA%\TigerRime`；测试只用新建合成临时目录，不接管旧目录或共享现用数据库。
+- 正式数据独立存放 `%APPDATA%\TigerType`；测试只用新建合成临时目录，不接管旧目录或共享现用数据库。
 - 原件锁定只读；导入验证来源、大小/hash、格式、路径。失败不覆盖旧文件；拒绝越界、链接/目录联接。
 - Cargo/资源锁定；下载使用官方 HTTPS 并验证 hash。递归删除/移动先验证绝对目标；不得修改防护软件、全局 Git 配置或个人数据权限。
 - `vendor/`、`.cache/`、`artifacts/`、`target/`、日志和数据库不入 Git；整体资源授权未确认，仅限个人本地使用。
@@ -32,7 +32,7 @@
 
 ## 必跑检查
 ```powershell
-cargo run --locked --offline -p tigerrime-app --example check
+cargo run --locked --offline -p tigertype-app --example check
 ```
 统一执行架构/文档、fmt、Clippy、x64/x86 常规测试；每批结束必须实际运行，失败不得标记完成。架构/文档检查也纳入普通 cargo test。
 - 非平凡逻辑有测试，检查器包含反例。缺缓存按 README 准备，不跳过验证。

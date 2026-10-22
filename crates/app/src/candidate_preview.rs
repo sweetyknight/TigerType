@@ -1,12 +1,12 @@
 //! 可见候选联调入口：真实引擎/路由/窗口/点击领取闭环，只向控制台打印最终选择，不向宿主上屏。
 use crate::{Result, dispatch::Dispatcher, import};
 use std::path::Path;
-use tigerrime_contracts::{
+use tigertype_contracts::{
     Key, Options,
     candidate::ScreenRect,
     protocol::{Command, Message, Reply, Request, Route},
 };
-use tigerrime_engine::Dictionary;
+use tigertype_engine::Dictionary;
 
 fn exchange(
     dispatch: &mut Dispatcher<'_>,
@@ -25,9 +25,9 @@ fn exchange(
     };
     let response = dispatch.dispatch(
         host,
-        &tigerrime_ipc::encode(&Message::Request(request.clone()))?,
+        &tigertype_ipc::encode(&Message::Request(request.clone()))?,
     )?;
-    Ok(tigerrime_ipc::decode_response(&response, &request)?.reply)
+    Ok(tigertype_ipc::decode_response(&response, &request)?.reply)
 }
 pub fn run(package: &Path, code: &str) -> Result<()> {
     if code.is_empty() || code.len() > 4 || !code.bytes().all(|c| c.is_ascii_lowercase()) {
@@ -35,8 +35,8 @@ pub fn run(package: &Path, code: &str) -> Result<()> {
     }
     let dictionary = Dictionary::new(import::load(package)?.data)?;
     let code = code.to_owned();
-    let (frames, inbox) = tigerrime_ui::candidate::mailbox()?;
-    let (choices, received) = tigerrime_ui::mailbox()?;
+    let (frames, inbox) = tigertype_ui::candidate::mailbox()?;
+    let (choices, received) = tigertype_ui::mailbox()?;
     let worker = std::thread::Builder::new()
         .name("tiger-candidate-preview".into())
         .spawn(move || -> std::result::Result<(), String> {
@@ -111,7 +111,7 @@ pub fn run(package: &Path, code: &str) -> Result<()> {
             };
             work().map_err(|e| e.to_string())
         })?;
-    let result = tigerrime_ui::candidate::run(inbox, choices, "关闭预览");
+    let result = tigertype_ui::candidate::run(inbox, choices, "关闭预览");
     // 关闭候选窗先断开选择发送端，再等待固定工作线程真正退出。
     worker.join().map_err(|_| "候选预览线程异常退出")??;
     result.map_err(Into::into)

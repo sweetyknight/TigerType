@@ -162,7 +162,7 @@ impl Identity {
             return Err(Error::Invalid("管道标签只允许 1–64 字节字母、数字和连字符"));
         }
         Ok(
-            format!(r"\\.\pipe\TigerRime-{}-{}-{label}", self.session, self.sid)
+            format!(r"\\.\pipe\TigerType-{}-{}-{label}", self.session, self.sid)
                 .encode_utf16()
                 .chain(Some(0))
                 .collect(),

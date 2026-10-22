@@ -2,7 +2,7 @@
 
 use crate::{Error, FrameAssembler, Result, decode_response, encode};
 use std::time::{Duration, Instant};
-use tigerrime_contracts::protocol::{Message, Request, Response};
+use tigertype_contracts::protocol::{Message, Request, Response};
 
 struct Pending {
     request: Request,
@@ -122,7 +122,7 @@ impl ClientState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tigerrime_contracts::{
+    use tigertype_contracts::{
         InputState, KeyOutcome,
         protocol::{Command, Reply, Route},
     };
@@ -136,7 +136,7 @@ mod tests {
             },
             command: Command::Key {
                 epoch: 1,
-                key: tigerrime_contracts::Key::Space,
+                key: tigertype_contracts::Key::Space,
             },
         }
     }

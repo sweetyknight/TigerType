@@ -1,6 +1,6 @@
 //! 一次本地验收入口：固定命令、失败即停，不隐式下载资源或放宽测试。
 use std::{process::Command, time::Duration};
-use tigerrime_app::{Result, process, project_root};
+use tigertype_app::{Result, process, project_root};
 
 fn run() -> Result<()> {
     let root = project_root()?;
@@ -10,7 +10,7 @@ fn run() -> Result<()> {
             "--locked",
             "--offline",
             "-p",
-            "tigerrime-app",
+            "tigertype-app",
             "--test",
             "governance",
         ],

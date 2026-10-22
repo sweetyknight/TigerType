@@ -1,10 +1,10 @@
 //! 完整帧的边界回归不加载 DLL；同一组固定字节同时在 x64 和 x86 运行。
 
-use tigerrime_contracts::{
+use tigertype_contracts::{
     Candidate, Composition, InputState, KeyOutcome, MAX_CANDIDATES, MAX_TEXT_BYTES,
     protocol::{Command, Message, Rejection, Reply, Request, Response, Route, VERSION},
 };
-use tigerrime_ipc::{HEADER_LEN, MAX_BODY_LEN, decode, decode_response, encode, frame_len};
+use tigertype_ipc::{HEADER_LEN, MAX_BODY_LEN, decode, decode_response, encode, frame_len};
 
 fn request(command: Command) -> Request {
     Request {
@@ -25,7 +25,8 @@ fn reply(value: Reply) -> Message {
 }
 
 fn raw(body: &[u8]) -> Vec<u8> {
-    let mut frame = b"TRIM".to_vec();
+    // 固定字节独立于实现常量，防止编解码两端同时误用产品标识。
+    let mut frame = b"TTYP".to_vec();
     frame.extend_from_slice(&VERSION.to_le_bytes());
     frame.extend_from_slice(&[0, 0]);
     frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
@@ -45,7 +46,7 @@ fn handshake_and_notifications_reject_zero_identity_and_cannot_be_input_replies(
             generation: 0,
         },
         Message::Notification {
-            token: tigerrime_contracts::candidate::CandidateToken {
+            token: tigertype_contracts::candidate::CandidateToken {
                 host: 1,
                 generation: 1,
                 session: 1,
@@ -76,7 +77,7 @@ fn fixed_wire_bytes_do_not_depend_on_pointer_width() {
     let body = br#"{"type":"request","value":{"route":{"generation":18446744073709551615,"request_id":2,"session_id":3},"command":{"type":"key","value":{"key":{"type":"character","value":"u"},"epoch":1}}}}"#;
     let expected = Message::Request(request(Command::Key {
         epoch: 1,
-        key: tigerrime_contracts::Key::Character('u'),
+        key: tigertype_contracts::Key::Character('u'),
     }));
     assert_eq!(encode(&expected).unwrap(), raw(body));
     assert_eq!(decode(&raw(body)).unwrap(), expected);
@@ -133,7 +134,7 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
             host: 8,
         },
         Message::Notification {
-            token: tigerrime_contracts::candidate::CandidateToken {
+            token: tigertype_contracts::candidate::CandidateToken {
                 host: 8,
                 generation: 7,
                 session: 1,
@@ -147,7 +148,7 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
         })),
         Message::Request(request(Command::Key {
             epoch: 1,
-            key: tigerrime_contracts::Key::Character('𠀀'),
+            key: tigertype_contracts::Key::Character('𠀀'),
         })),
         Message::Request(request(Command::Clear)),
         Message::Request(request(Command::Configure {
@@ -161,7 +162,7 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
         Message::Request(request(Command::Close)),
         Message::Request(request(Command::Focus {
             epoch: 1,
-            caret: Some(tigerrime_contracts::candidate::ScreenRect {
+            caret: Some(tigertype_contracts::candidate::ScreenRect {
                 left: -10,
                 top: 20,
                 right: -9,
@@ -221,7 +222,7 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
     }
     let original = serde_json::to_string(&Message::Request(request(Command::Key {
         epoch: 1,
-        key: tigerrime_contracts::Key::Character('u'),
+        key: tigertype_contracts::Key::Character('u'),
     })))
     .unwrap();
     for (from, to) in [
@@ -248,7 +249,7 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
         },
         Command::Focus {
             epoch: 1,
-            caret: Some(tigerrime_contracts::candidate::ScreenRect {
+            caret: Some(tigertype_contracts::candidate::ScreenRect {
                 left: i32::MIN,
                 top: 0,
                 right: 0,
@@ -257,7 +258,7 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
         },
         Command::Focus {
             epoch: 1,
-            caret: Some(tigerrime_contracts::candidate::ScreenRect {
+            caret: Some(tigertype_contracts::candidate::ScreenRect {
                 left: 1,
                 top: 0,
                 right: 0,
@@ -267,11 +268,11 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
         Command::TakeSelection { epoch: 0 },
         Command::Key {
             epoch: 0,
-            key: tigerrime_contracts::Key::Space,
+            key: tigertype_contracts::Key::Space,
         },
         Command::Key {
             epoch: 1,
-            key: tigerrime_contracts::Key::Character('\0'),
+            key: tigertype_contracts::Key::Character('\0'),
         },
         Command::Select {
             epoch: 1,
@@ -374,7 +375,7 @@ fn limits_encoded_bytes_even_when_each_field_is_within_bounds() {
 fn only_the_expected_route_and_reply_type_can_be_delivered() {
     let request = request(Command::Key {
         epoch: 1,
-        key: tigerrime_contracts::Key::Space,
+        key: tigertype_contracts::Key::Space,
     });
     let response = Response {
         route: request.route,

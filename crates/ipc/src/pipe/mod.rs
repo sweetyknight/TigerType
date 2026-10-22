@@ -25,7 +25,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tigerrime_contracts::protocol::{Request, Response};
+use tigertype_contracts::protocol::{Request, Response};
 use windows_sys::Win32::{
     Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT},
     Security::SECURITY_ATTRIBUTES,

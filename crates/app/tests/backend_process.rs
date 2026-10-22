@@ -7,14 +7,14 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
-use tigerrime_app::{Result, backend::Server};
-use tigerrime_contracts::{
+use tigertype_app::{Result, backend::Server};
+use tigertype_contracts::{
     Key, Options,
     candidate::{CandidateChoice, ScreenRect},
     protocol::{Command, Message, Rejection, Reply},
 };
-use tigerrime_engine::{Data, Dictionary, Entry};
-use tigerrime_ipc::{pipe::Runtime, service::Client};
+use tigertype_engine::{Data, Dictionary, Entry};
+use tigertype_ipc::{pipe::Runtime, service::Client};
 use windows_sys::Win32::{
     Foundation::WAIT_OBJECT_0,
     System::Threading::{CREATE_NO_WINDOW, WaitForSingleObject},
@@ -50,7 +50,7 @@ fn real_backend_singleton_authenticated_hosts_notification_and_one_commit() -> R
     let mut worker = Worker(
         ProcessCommand::new(&image)
             .args(["--ignored", "--exact", "backend_worker", "--nocapture"])
-            .env("TIGERRIME_BACKEND_TEST", &namespace)
+            .env("TIGERTYPE_BACKEND_TEST", &namespace)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -168,11 +168,11 @@ fn real_backend_singleton_authenticated_hosts_notification_and_one_commit() -> R
 #[test]
 #[ignore = "只由限时父测试启动，使用合成词表和合成 UI 点击"]
 fn backend_worker() -> Result<()> {
-    let namespace = std::env::var("TIGERRIME_BACKEND_TEST")?;
+    let namespace = std::env::var("TIGERTYPE_BACKEND_TEST")?;
     let data = dictionary();
     let server = Server::new(&data, &namespace, Options::default())?;
-    let (frames, received) = tigerrime_ui::candidate::mailbox()?;
-    let (choices, clicks) = tigerrime_ui::mailbox()?;
+    let (frames, received) = tigertype_ui::candidate::mailbox()?;
+    let (choices, clicks) = tigertype_ui::mailbox()?;
     let ui = std::thread::spawn(move || {
         let mut clicked = false;
         while let Ok(frame) = received.receive() {

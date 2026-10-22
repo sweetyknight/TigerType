@@ -1,13 +1,13 @@
 [package]
-name = "tigerrime-tsf"
+name = "tigertype-tsf"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-tigerrime-contracts.workspace = true
-tigerrime-ipc.workspace = true
+tigertype-contracts.workspace = true
+tigertype-ipc.workspace = true
 windows-core.workspace = true
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_UI_TextServices"] }
 

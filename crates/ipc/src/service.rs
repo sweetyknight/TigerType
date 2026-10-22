@@ -8,7 +8,7 @@ use std::{
     path::Path,
     time::Instant,
 };
-use tigerrime_contracts::protocol::{Command, Message, Reply, Request, Route};
+use tigertype_contracts::protocol::{Command, Message, Reply, Request, Route};
 use windows_sys::Win32::{
     Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::WaitForSingleObject,
@@ -220,7 +220,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tigerrime_contracts::candidate::CandidateToken;
+    use tigertype_contracts::candidate::CandidateToken;
     #[test]
     fn notification_stream_handles_fragments_coalescing_and_rejects_wrong_identity_or_size() {
         let message = Message::Notification {

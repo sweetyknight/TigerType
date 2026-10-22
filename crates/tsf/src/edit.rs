@@ -6,7 +6,7 @@ use std::{
     rc::Rc,
     time::Instant,
 };
-use tigerrime_contracts::{KeyOutcome, MAX_TEXT_BYTES, candidate::ScreenRect};
+use tigertype_contracts::{KeyOutcome, MAX_TEXT_BYTES, candidate::ScreenRect};
 use windows::{
     Win32::{
         Foundation::{E_FAIL, E_INVALIDARG},

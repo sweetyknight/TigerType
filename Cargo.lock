@@ -158,58 +158,58 @@ dependencies = [
 ]
 
 [[package]]
-name = "tigerrime-app"
+name = "tigertype-app"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tigerrime-contracts",
- "tigerrime-engine",
- "tigerrime-ipc",
- "tigerrime-ui",
+ "tigertype-contracts",
+ "tigertype-engine",
+ "tigertype-ipc",
+ "tigertype-ui",
  "windows-sys",
 ]
 
 [[package]]
-name = "tigerrime-contracts"
+name = "tigertype-contracts"
 version = "0.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
-name = "tigerrime-engine"
+name = "tigertype-engine"
 version = "0.1.0"
 dependencies = [
  "serde",
- "tigerrime-contracts",
+ "tigertype-contracts",
 ]
 
 [[package]]
-name = "tigerrime-ipc"
+name = "tigertype-ipc"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "tigerrime-contracts",
+ "tigertype-contracts",
  "windows-sys",
 ]
 
 [[package]]
-name = "tigerrime-tsf"
+name = "tigertype-tsf"
 version = "0.1.0"
 dependencies = [
- "tigerrime-contracts",
- "tigerrime-ipc",
+ "tigertype-contracts",
+ "tigertype-ipc",
  "windows",
  "windows-core",
 ]
 
 [[package]]
-name = "tigerrime-ui"
+name = "tigertype-ui"
 version = "0.1.0"
 dependencies = [
- "tigerrime-contracts",
+ "tigertype-contracts",
  "windows-sys",
 ]
 

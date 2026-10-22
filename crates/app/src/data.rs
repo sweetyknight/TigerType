@@ -14,7 +14,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 
-const MARKER: &[u8] = b"TigerRime native data v2\n";
+// 所有权绑定当前产品；改名后不接管旧产品目录，也不改写旧标记。
+const MARKER: &[u8] = b"TigerType native data v2\n";
 const MAX_CONFIG: u64 = 1024 * 1024;
 
 /// 固定每一级目录对象，防止检查后被换成目录联接或重命名到工作区之外。
@@ -134,7 +135,7 @@ impl Data {
         if contents.len() as u64 > MAX_CONFIG || contents.contains(&0) {
             return Err("设置补丁长度或内容不符".into());
         }
-        let _: tigerrime_contracts::Options = serde_json::from_slice(contents)?;
+        let _: tigertype_contracts::Options = serde_json::from_slice(contents)?;
         let _config = Directories::pin(&self.root.join("config"))?;
         let _backups = Directories::pin(&self.root.join("backups"))?;
         let target = self.root.join("config/settings.json");
@@ -207,7 +208,7 @@ pub(crate) fn write_new(path: &Path, contents: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     fn root() -> Result<PathBuf> {
-        Ok(resources::new_directory(&std::env::temp_dir(), "tigerrime-data")?.join("TigerRime"))
+        Ok(resources::new_directory(&std::env::temp_dir(), "tigertype-data")?.join("TigerType"))
     }
 
     #[test]
@@ -217,6 +218,10 @@ mod tests {
         assert!(Data::create(&root).is_err());
         assert!(Data::open(&root).is_err());
         drop(data);
+        assert_eq!(
+            fs::read(root.join("ownership"))?,
+            b"TigerType native data v2\n"
+        );
         drop(Data::open(&root)?);
         fs::write(root.join("ownership"), b"another application")?;
         assert!(Data::open(&root).is_err());
@@ -229,8 +234,8 @@ mod tests {
         let root = root()?;
         let data = Data::create(&root)?;
         fs::write(root.join("user/personal.yaml"), b"untouched")?;
-        let first = serde_json::to_vec(&tigerrime_contracts::Options::default())?;
-        let second = serde_json::to_vec(&tigerrime_contracts::Options {
+        let first = serde_json::to_vec(&tigertype_contracts::Options::default())?;
+        let second = serde_json::to_vec(&tigertype_contracts::Options {
             auto_commit_four: true,
             ..Default::default()
         })?;

@@ -4,7 +4,7 @@ use std::{
     os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     sync::{Arc, Mutex, mpsc::TryRecvError},
 };
-use tigerrime_contracts::candidate::CandidateFrame;
+use tigertype_contracts::candidate::CandidateFrame;
 use windows_sys::Win32::{
     Foundation::WAIT_OBJECT_0,
     System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForSingleObject},

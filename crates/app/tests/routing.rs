@@ -1,11 +1,11 @@
 //! 多宿主序号/焦点隔离和候选回送联测；合成数据，不注册或向真实应用写字。
-use tigerrime_app::{Result, dispatch::Dispatcher};
-use tigerrime_contracts::{
+use tigertype_app::{Result, dispatch::Dispatcher};
+use tigertype_contracts::{
     Key, Options,
     candidate::{CandidateChoice, ScreenRect},
     protocol::{Command, Message, Rejection, Reply, Request, Route},
 };
-use tigerrime_engine::{Data, Dictionary, Entry};
+use tigertype_engine::{Data, Dictionary, Entry};
 fn dictionary() -> Dictionary {
     Dictionary::new(Data {
         entries: vec![Entry {
@@ -33,8 +33,8 @@ fn exchange(
         },
         command,
     };
-    let frame = tigerrime_ipc::encode(&Message::Request(request.clone()))?;
-    Ok(tigerrime_ipc::decode_response(&dispatch.dispatch(host, &frame)?, &request)?.reply)
+    let frame = tigertype_ipc::encode(&Message::Request(request.clone()))?;
+    Ok(tigertype_ipc::decode_response(&dispatch.dispatch(host, &frame)?, &request)?.reply)
 }
 fn focus(epoch: u64) -> Command {
     Command::Focus {
@@ -173,7 +173,7 @@ fn candidate_view_click_is_delivered_to_original_host_once_and_only_on_explicit_
         },
     )?;
     let frame = dispatch.frame().unwrap();
-    let mut view = tigerrime_ui::candidate::View::default();
+    let mut view = tigertype_ui::candidate::View::default();
     let serial = view.update(Some(frame.clone()))?;
     let choice = view.choose(serial, 0).unwrap();
     assert_eq!(dispatch.offer_selection(choice), Ok(host));
@@ -350,10 +350,10 @@ fn global_capacity_old_generations_and_session_reuse_are_rejected() -> Result<()
     };
     let frame = dispatch.dispatch(
         host,
-        &tigerrime_ipc::encode(&Message::Request(old.clone()))?,
+        &tigertype_ipc::encode(&Message::Request(old.clone()))?,
     )?;
     assert_eq!(
-        tigerrime_ipc::decode_response(&frame, &old)?.reply,
+        tigertype_ipc::decode_response(&frame, &old)?.reply,
         Reply::Rejected(Rejection::StaleGeneration)
     );
     dispatch.invalidate();

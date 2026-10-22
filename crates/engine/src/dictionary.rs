@@ -2,7 +2,7 @@
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use tigerrime_contracts::{
+use tigertype_contracts::{
     Candidate, InputMode, LearningInfo, LookupItem, LookupPage, MAX_LEARNING_ITEMS,
     MAX_PINYIN_BYTES, MAX_QUERY_CHARS, Options, OutputForm, PAGE_SIZE,
 };

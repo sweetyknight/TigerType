@@ -9,7 +9,7 @@ use std::{
     ptr::{null, null_mut},
     sync::mpsc::{SyncSender, TryRecvError},
 };
-use tigerrime_contracts::{
+use tigertype_contracts::{
     Options, OutputForm,
     ui::{Reply, Request},
 };
@@ -318,7 +318,7 @@ impl Drop for Window {
 struct Class(Vec<u16>);
 impl Class {
     fn register() -> Result<Self, String> {
-        let name = wide("TigerRime.Lookup.Native.v1");
+        let name = wide("TigerType.Lookup.Native.v1");
         // SAFETY: 仅注册无状态系统回调；系统画刷/光标为共享对象，不由本程序释放。
         let registered = unsafe {
             RegisterClassW(&WNDCLASSW {
@@ -366,7 +366,7 @@ impl Drop for DpiContext {
 }
 
 fn lookup_window(class: &Class) -> Result<Window, String> {
-    let mut window = Window::create(&class.0, "TigerRime 独立查字", null_mut())?;
+    let mut window = Window::create(&class.0, "TigerType 独立查字", null_mut())?;
     window.add(
         110,
         "STATIC",
@@ -412,7 +412,7 @@ fn lookup_window(class: &Class) -> Result<Window, String> {
     Ok(window)
 }
 fn settings_window(class: &Class, owner: HWND) -> Result<Window, String> {
-    let mut window = Window::create(&class.0, "TigerRime 设置", owner)?;
+    let mut window = Window::create(&class.0, "TigerType 设置", owner)?;
     for (id, title) in [
         (AUTO, "四码唯一时自动上屏(&A)"),
         (COMMON, "普通输入仅常用字(&C)"),
@@ -865,9 +865,9 @@ mod tests {
                     .unwrap();
                 assert!(matches!(request, Request::Lookup { query, page: 0 } if query == "𠀀"));
                 replies
-                    .send(tigerrime_contracts::ui::Reply::Lookup(Ok(
-                        tigerrime_contracts::LookupPage {
-                            items: vec![tigerrime_contracts::LookupItem {
+                    .send(tigertype_contracts::ui::Reply::Lookup(Ok(
+                        tigertype_contracts::LookupPage {
+                            items: vec![tigertype_contracts::LookupItem {
                                 character: '𠀀',
                                 learning: Default::default(),
                             }],
@@ -891,7 +891,7 @@ mod tests {
             let (replies, inbox) = crate::mailbox().unwrap();
             model.save(options).unwrap();
             replies
-                .send(tigerrime_contracts::ui::Reply::Saved(Ok(options)))
+                .send(tigertype_contracts::ui::Reply::Saved(Ok(options)))
                 .unwrap();
             drop(replies);
             assert!(event_loop(&mut main, &mut settings, &mut model, &requests, &inbox).is_err());
@@ -902,7 +902,7 @@ mod tests {
             assert_eq!(model.options, options);
             let (replies, inbox) = crate::mailbox().unwrap();
             replies
-                .send(tigerrime_contracts::ui::Reply::Saved(Ok(options)))
+                .send(tigertype_contracts::ui::Reply::Saved(Ok(options)))
                 .unwrap();
             drop(replies);
             assert!(

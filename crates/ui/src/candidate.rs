@@ -1,5 +1,5 @@
 //! 候选视图只生成带版本的选择意图；不查询引擎、不改宿主文字。
-use tigerrime_contracts::{
+use tigertype_contracts::{
     MAX_CANDIDATES,
     candidate::{CandidateChoice, CandidateFrame, ScreenRect},
 };
@@ -74,7 +74,7 @@ pub(crate) fn position(caret: ScreenRect, work: ScreenRect, width: i32, height: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tigerrime_contracts::{Candidate, InputState, candidate::CandidateToken};
+    use tigertype_contracts::{Candidate, InputState, candidate::CandidateToken};
     pub(super) fn frame() -> CandidateFrame {
         CandidateFrame {
             token: CandidateToken {

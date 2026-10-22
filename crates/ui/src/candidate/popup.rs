@@ -6,7 +6,7 @@ use std::{
     ptr::{null, null_mut},
     sync::mpsc::TryRecvError,
 };
-use tigerrime_contracts::candidate::{CandidateChoice, CandidateFrame, ScreenRect};
+use tigertype_contracts::candidate::{CandidateChoice, CandidateFrame, ScreenRect};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, RECT, WAIT_FAILED, WPARAM},
     Graphics::Gdi::{
@@ -70,7 +70,7 @@ struct Popup {
 }
 impl Popup {
     fn new(close_label: &str) -> Result<Self, String> {
-        let class = wide("TigerRime.Candidate.Preview.v1");
+        let class = wide("TigerType.Candidate.Preview.v1");
         // SAFETY: 注册无状态回调；画刷与光标为系统共享对象。
         if unsafe {
             RegisterClassW(&WNDCLASSW {
@@ -98,7 +98,7 @@ impl Popup {
             CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 popup.class.as_ptr(),
-                wide("TigerRime 候选").as_ptr(),
+                wide("TigerType 候选").as_ptr(),
                 WS_POPUP | WS_BORDER,
                 0,
                 0,

@@ -6,7 +6,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
-use tigerrime_engine::{Data, Detail, Dictionary, Mapping, Pronunciation};
+use tigertype_engine::{Data, Detail, Dictionary, Mapping, Pronunciation};
 
 const VERSION: u32 = 1;
 const LIMIT: u64 = 128 * 1024 * 1024;
@@ -123,7 +123,7 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
     let mut data = Data::default();
     for line in lines(dictionary_body(&files["tiger.dict.yaml"])?) {
         let row = fields(line, 3)?;
-        data.entries.push(tigerrime_engine::Entry {
+        data.entries.push(tigertype_engine::Entry {
             character: character(row[0])?,
             code: row[1].into(),
             weight: row[2].parse()?,
@@ -359,7 +359,7 @@ mod tests {
     }
     #[test]
     fn verified_bytes_reject_corruption_and_keep_original_file() -> Result<()> {
-        let root = resources::new_directory(&std::env::temp_dir(), "tigerrime-import")?;
+        let root = resources::new_directory(&std::env::temp_dir(), "tigertype-import")?;
         let path = root.join("source.txt");
         data::write_new(&path, b"original")?;
         let entry = Entry {

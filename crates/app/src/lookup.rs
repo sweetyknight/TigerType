@@ -2,11 +2,11 @@
 use crate::{Result, data::Data, import};
 use sha2::{Digest, Sha256};
 use std::{path::Path, sync::mpsc, thread};
-use tigerrime_contracts::{
+use tigertype_contracts::{
     Options,
     ui::{Reply, Request},
 };
-use tigerrime_engine::Dictionary;
+use tigertype_engine::Dictionary;
 
 /// 引擎和受管设置独占归工作线程；窗口只接收拥有所有权的 contracts 数据。
 struct Controller {
@@ -67,7 +67,7 @@ pub fn run(package: &Path, directory: &Path) -> Result<()> {
     let mut controller = Controller::new(dictionary, data)?;
     let options = controller.options();
     let (requests, receiver) = mpsc::sync_channel(1);
-    let (replies, inbox) = tigerrime_ui::mailbox()?;
+    let (replies, inbox) = tigertype_ui::mailbox()?;
     let worker = thread::Builder::new()
         .name("tiger-lookup-engine".into())
         .spawn(move || {
@@ -77,7 +77,7 @@ pub fn run(package: &Path, directory: &Path) -> Result<()> {
                 }
             }
         })?;
-    let result = tigerrime_ui::run(requests, inbox, options);
+    let result = tigertype_ui::run(requests, inbox, options);
     // UI 退出先断开有界请求通道；真正 join 后才确认线程/租约释放，不用超时冒充终止。
     worker.join().map_err(|_| "查字工作线程异常退出")?;
     result.map_err(Into::into)
@@ -87,8 +87,8 @@ pub fn run(package: &Path, directory: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::resources;
-    use tigerrime_contracts::OutputForm;
-    use tigerrime_engine::{Data as EngineData, Entry};
+    use tigertype_contracts::OutputForm;
+    use tigertype_engine::{Data as EngineData, Entry};
 
     fn dictionary() -> Result<Dictionary> {
         // 所有文件测试都使用一条合法合成码表，避免被空码表校验提前短路。

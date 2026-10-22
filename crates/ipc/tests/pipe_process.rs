@@ -10,11 +10,11 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
-use tigerrime_contracts::{
+use tigertype_contracts::{
     InputState, KeyOutcome,
     protocol::{Command, Message, Reply, Request, Response, Route},
 };
-use tigerrime_ipc::{
+use tigertype_ipc::{
     ClientState, Error, decode, encode,
     pipe::{Peer, Runtime},
 };
@@ -34,9 +34,9 @@ impl Worker {
         Ok(Self(
             ProcessCommand::new(std::env::current_exe()?)
                 .args(["--ignored", "--exact", "pipe_worker", "--nocapture"])
-                .env("TIGERRIME_PIPE_TEST_LABEL", label)
-                .env("TIGERRIME_PIPE_TEST_PARENT", std::process::id().to_string())
-                .env("TIGERRIME_PIPE_TEST_MODE", mode)
+                .env("TIGERTYPE_PIPE_TEST_LABEL", label)
+                .env("TIGERTYPE_PIPE_TEST_PARENT", std::process::id().to_string())
+                .env("TIGERTYPE_PIPE_TEST_MODE", mode)
                 .creation_flags(CREATE_NO_WINDOW)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -108,7 +108,7 @@ fn request() -> Request {
         },
         command: Command::Key {
             epoch: 1,
-            key: tigerrime_contracts::Key::Space,
+            key: tigertype_contracts::Key::Space,
         },
     }
 }
@@ -173,11 +173,11 @@ fn same_logon_but_wrong_client_process_is_rejected_before_reading() -> Result<()
 #[test]
 #[ignore = "只由有期限的父测试调用；手工运行不创建后台进程"]
 fn pipe_worker() -> Result<()> {
-    let Ok(label) = std::env::var("TIGERRIME_PIPE_TEST_LABEL") else {
+    let Ok(label) = std::env::var("TIGERTYPE_PIPE_TEST_LABEL") else {
         return Ok(());
     };
-    let mode = std::env::var("TIGERRIME_PIPE_TEST_MODE")?;
-    let parent = std::env::var("TIGERRIME_PIPE_TEST_PARENT")?.parse()?;
+    let mode = std::env::var("TIGERTYPE_PIPE_TEST_MODE")?;
+    let parent = std::env::var("TIGERTYPE_PIPE_TEST_PARENT")?.parse()?;
     let runtime = Runtime::new()?;
     if mode == "wrong-server" {
         assert!(matches!(

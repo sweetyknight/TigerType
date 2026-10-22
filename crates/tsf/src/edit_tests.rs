@@ -46,10 +46,10 @@ fn outcome(revision: u64, preedit: &str, commit: Option<&str>) -> KeyOutcome {
     KeyOutcome {
         handled: true,
         commit: commit.map(str::to_owned),
-        state: tigerrime_contracts::InputState {
+        state: tigertype_contracts::InputState {
             revision,
             composing: !preedit.is_empty(),
-            composition: tigerrime_contracts::Composition {
+            composition: tigertype_contracts::Composition {
                 text: preedit.into(),
                 cursor: preedit.len(),
                 selection: 0..preedit.len(),

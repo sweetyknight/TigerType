@@ -3,7 +3,7 @@
 mod policy;
 use serde_json::{Value, json};
 use std::process::Command;
-use tigerrime_app::{Result, project_root, resources};
+use tigertype_app::{Result, project_root, resources};
 
 #[test]
 fn workspace_architecture_and_documentation() -> Result<()> {
@@ -42,7 +42,7 @@ fn metadata() -> Value {
     json!({
         "workspace_members":["core"],
         "packages":[
-            {"id":"core","name":"tigerrime-engine","dependencies":[{"name":"serde","rename":"innocent","kind":null,"target":null}]},
+            {"id":"core","name":"tigertype-engine","dependencies":[{"name":"serde","rename":"innocent","kind":null,"target":null}]},
             {"id":"serde","name":"serde","dependencies":[]}
         ],
         "resolve":{"nodes":[{"id":"core","deps":[{"name":"innocent","pkg":"serde"}]},{"id":"serde","deps":[]}]}
@@ -63,12 +63,12 @@ fn dependency_policy_detects_alias_platform_dev_build_transitive_cycles_and_unkn
     bad["resolve"]["nodes"][1]["deps"] = json!([{"pkg":"core"}]);
     assert!(policy::architecture(&bad).is_err());
     let mut bad = metadata();
-    bad["packages"][0]["name"] = json!("tigerrime-unapproved");
+    bad["packages"][0]["name"] = json!("tigertype-unapproved");
     assert!(policy::architecture(&bad).is_err());
     let mut bad = metadata();
-    bad["packages"][0]["name"] = json!("tigerrime-tsf");
-    bad["packages"][0]["dependencies"][0]["name"] = json!("tigerrime-contracts");
-    bad["packages"][1]["name"] = json!("tigerrime-engine");
+    bad["packages"][0]["name"] = json!("tigertype-tsf");
+    bad["packages"][0]["dependencies"][0]["name"] = json!("tigertype-contracts");
+    bad["packages"][1]["name"] = json!("tigertype-engine");
     assert!(policy::architecture(&bad).is_err());
 }
 
@@ -76,20 +76,20 @@ fn dependency_policy_detects_alias_platform_dev_build_transitive_cycles_and_unkn
 fn ui_cannot_call_engine_even_through_an_alias_or_transitive_dependency() {
     // UI 已加入工作区，必须继续拒绝绕过应用组装层直接查词表。
     let mut allowed = metadata();
-    allowed["packages"][0]["name"] = json!("tigerrime-ui");
-    allowed["packages"][0]["dependencies"][0]["name"] = json!("tigerrime-contracts");
-    allowed["packages"][1]["name"] = json!("tigerrime-contracts");
+    allowed["packages"][0]["name"] = json!("tigertype-ui");
+    allowed["packages"][0]["dependencies"][0]["name"] = json!("tigertype-contracts");
+    allowed["packages"][1]["name"] = json!("tigertype-contracts");
     assert!(policy::architecture(&allowed).is_ok());
     let mut direct = allowed.clone();
-    direct["packages"][0]["dependencies"][0]["name"] = json!("tigerrime-engine");
+    direct["packages"][0]["dependencies"][0]["name"] = json!("tigertype-engine");
     assert!(policy::architecture(&direct).is_err());
-    allowed["packages"][1]["name"] = json!("tigerrime-engine");
+    allowed["packages"][1]["name"] = json!("tigertype-engine");
     assert!(policy::architecture(&allowed).is_err());
 }
 #[test]
 fn documentation_policy_detects_broken_links_and_forbidden_artifacts() -> Result<()> {
     let root =
-        resources::new_directory(&std::env::temp_dir(), "tigerrime-doc-check")?.canonicalize()?;
+        resources::new_directory(&std::env::temp_dir(), "tigertype-doc-check")?.canonicalize()?;
     std::fs::write(root.join("existing.md"), "测试目标")?;
     let file = root.join("source.md");
     assert!(policy::links(&root, &file, "[有效](existing.md)").is_ok());
@@ -114,7 +114,7 @@ fn documentation_policy_detects_broken_links_and_forbidden_artifacts() -> Result
 #[test]
 fn document_inventory_and_core_unsafe_policy_cannot_be_silently_removed() -> Result<()> {
     let root =
-        resources::new_directory(&std::env::temp_dir(), "tigerrime-doc-policy")?.canonicalize()?;
+        resources::new_directory(&std::env::temp_dir(), "tigertype-doc-policy")?.canonicalize()?;
     std::fs::create_dir(root.join("docs"))?;
     for name in [
         "README.md",

@@ -9,10 +9,10 @@ rust-version = "1.94"
 publish = false
 
 [workspace.dependencies]
-tigerrime-contracts = { path = "crates/contracts" }
-tigerrime-ipc = { path = "crates/ipc" }
-tigerrime-engine = { path = "crates/engine" }
-tigerrime-ui = { path = "crates/ui" }
+tigertype-contracts = { path = "crates/contracts" }
+tigertype-ipc = { path = "crates/ipc" }
+tigertype-engine = { path = "crates/engine" }
+tigertype-ui = { path = "crates/ui" }
 sha2 = "=0.10.9"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.154"

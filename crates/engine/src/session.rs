@@ -1,6 +1,6 @@
 //! 会话独占输入状态；设置变化只重算候选，不追溯修改或自动提交已有组合。
 use crate::{Dictionary, Error, Result};
-use tigerrime_contracts::{
+use tigertype_contracts::{
     Candidate, Composition, InputMode, InputState, Key, KeyOutcome, MAX_PINYIN_BYTES, Options,
     PAGE_SIZE,
 };

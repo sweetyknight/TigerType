@@ -7,30 +7,30 @@ use std::{
 };
 
 const RULES: &[(&str, &[&str])] = &[
-    ("tigerrime-contracts", &["serde"]),
-    ("tigerrime-engine", &["tigerrime-contracts", "serde"]),
+    ("tigertype-contracts", &["serde"]),
+    ("tigertype-engine", &["tigertype-contracts", "serde"]),
     (
-        "tigerrime-ipc",
-        &["tigerrime-contracts", "serde_json", "windows-sys"],
+        "tigertype-ipc",
+        &["tigertype-contracts", "serde_json", "windows-sys"],
     ),
-    ("tigerrime-ui", &["tigerrime-contracts", "windows-sys"]),
+    ("tigertype-ui", &["tigertype-contracts", "windows-sys"]),
     (
-        "tigerrime-tsf",
+        "tigertype-tsf",
         &[
-            "tigerrime-contracts",
-            "tigerrime-ipc",
+            "tigertype-contracts",
+            "tigertype-ipc",
             "windows-sys",
             "windows",
             "windows-core",
         ],
     ),
     (
-        "tigerrime-app",
+        "tigertype-app",
         &[
-            "tigerrime-contracts",
-            "tigerrime-engine",
-            "tigerrime-ipc",
-            "tigerrime-ui",
+            "tigertype-contracts",
+            "tigertype-engine",
+            "tigertype-ipc",
+            "tigertype-ui",
             "serde",
             "serde_json",
             "sha2",
@@ -101,13 +101,13 @@ pub fn architecture(metadata: &Value) -> Result<()> {
             let current_name = string(by_id.get(current).ok_or("解析图引用未知包")?, "name")?;
             let forbidden = matches!(
                 (name, current_name),
-                ("tigerrime-tsf", "tigerrime-engine" | "tigerrime-ui")
+                ("tigertype-tsf", "tigertype-engine" | "tigertype-ui")
                     | (
-                        "tigerrime-ui",
-                        "tigerrime-engine" | "tigerrime-tsf" | "tigerrime-ipc"
+                        "tigertype-ui",
+                        "tigertype-engine" | "tigertype-tsf" | "tigertype-ipc"
                     )
             );
-            let platform_core = matches!(name, "tigerrime-contracts" | "tigerrime-engine")
+            let platform_core = matches!(name, "tigertype-contracts" | "tigertype-engine")
                 && (current_name == "windows"
                     || current_name.starts_with("windows-")
                     || current_name == "winapi");

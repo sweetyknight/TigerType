@@ -41,7 +41,7 @@ fn dll_residence_survives_host_release_and_drains_repeated_io() -> Result<()> {
             "--locked",
             "--offline",
             "-p",
-            "tigerrime-ipc",
+            "tigertype-ipc",
             "--example",
             "resident_probe",
             "--target",
@@ -77,7 +77,7 @@ fn dll_residence_survives_host_release_and_drains_repeated_io() -> Result<()> {
     let path = paths.remove(0).canonicalize()?;
     let mut child = Command::new(std::env::current_exe()?)
         .args(["--ignored", "--exact", "dll_probe_host", "--nocapture"])
-        .env("TIGERRIME_PROBE_DLL", &path)
+        .env("TIGERTYPE_PROBE_DLL", &path)
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
@@ -96,7 +96,7 @@ fn dll_residence_survives_host_release_and_drains_repeated_io() -> Result<()> {
 #[test]
 #[ignore = "仅由限时父测试调用，不直接加载 DLL 到用户应用"]
 fn dll_probe_host() -> Result<()> {
-    let path = PathBuf::from(std::env::var_os("TIGERRIME_PROBE_DLL").ok_or("缺少探针路径")?);
+    let path = PathBuf::from(std::env::var_os("TIGERTYPE_PROBE_DLL").ok_or("缺少探针路径")?);
     assert!(path.is_absolute());
     let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: 仅加载父测试刚构建的绝对路径，依赖搜索限定到该目录和 System32。
@@ -112,7 +112,7 @@ fn dll_probe_host() -> Result<()> {
     }
     let library = Library(module);
     // SAFETY: 导出签名与本仓库探针一致，宿主持有加载引用。
-    let address = unsafe { GetProcAddress(module, c"TigerRimeResidentProbe".as_ptr().cast()) }
+    let address = unsafe { GetProcAddress(module, c"TigerTypeResidentProbe".as_ptr().cast()) }
         .ok_or("探针导出缺失")?;
     // SAFETY: 已核对导出名称，对应无参数 u32 system ABI，不能用于任意第三方 DLL。
     let probe: unsafe extern "system" fn() -> u32 = unsafe { std::mem::transmute(address) };

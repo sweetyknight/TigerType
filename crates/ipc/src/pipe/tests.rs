@@ -4,7 +4,7 @@ use super::*;
 use std::os::windows::io::BorrowedHandle;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
-use tigerrime_contracts::{
+use tigertype_contracts::{
     InputState, KeyOutcome,
     protocol::{Command, Message, Reply, Route},
 };
@@ -45,7 +45,7 @@ fn request() -> Request {
         },
         command: Command::Key {
             epoch: 1,
-            key: tigerrime_contracts::Key::Space,
+            key: tigertype_contracts::Key::Space,
         },
     }
 }

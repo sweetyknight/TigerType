@@ -1,5 +1,5 @@
 [package]
-name = "tigerrime-contracts"
+name = "tigertype-contracts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

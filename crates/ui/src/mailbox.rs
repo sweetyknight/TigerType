@@ -73,7 +73,7 @@ impl<T> Drop for ReplySender<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tigerrime_contracts::ui::Reply;
+    use tigertype_contracts::ui::Reply;
     use windows_sys::Win32::{Foundation::WAIT_OBJECT_0, System::Threading::WaitForSingleObject};
     #[test]
     fn bounded_mailbox_wakes_for_reply_and_worker_exit() {

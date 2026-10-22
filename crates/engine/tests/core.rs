@@ -1,6 +1,6 @@
 //! 合成词表覆盖状态机与学习契约，不读取真实资源、文件或个人输入。
-use tigerrime_contracts::{InputMode, Key, Options, OutputForm};
-use tigerrime_engine::{Data, Detail, Dictionary, Entry, Mapping, Pronunciation, Session};
+use tigertype_contracts::{InputMode, Key, Options, OutputForm};
+use tigertype_engine::{Data, Detail, Dictionary, Entry, Mapping, Pronunciation, Session};
 
 fn data() -> Data {
     Data {

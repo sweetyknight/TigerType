@@ -1,5 +1,5 @@
 [package]
-name = "tigerrime-ipc"
+name = "tigertype-ipc"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 test = false
 
 [dependencies]
-tigerrime-contracts.workspace = true
+tigertype-contracts.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]

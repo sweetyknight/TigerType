@@ -1,8 +1,8 @@
 //! 完整锁定文本资源验收单列；不加载 DLL，不运行脚本，不接触个人词库。
 use serde_json::json;
-use tigerrime_app::{Result, import, project_root, resources};
-use tigerrime_contracts::{Key, Options, OutputForm};
-use tigerrime_engine::{Dictionary, Session};
+use tigertype_app::{Result, import, project_root, resources};
+use tigertype_contracts::{Key, Options, OutputForm};
+use tigertype_engine::{Dictionary, Session};
 
 fn verify(root: &std::path::Path, work: &std::path::Path) -> Result<serde_json::Value> {
     let package = import::build(&root.join("vendor/tiger"))?;
@@ -85,7 +85,7 @@ fn locked_text_resources_build_and_regress_without_rime() -> Result<()> {
     let root = project_root()?;
     let report = resources::new_directory(&root.join("artifacts"), "rust-tiger")?;
     let work =
-        resources::new_directory(&std::env::temp_dir().join("TigerRime-tests"), "rust-tiger")?;
+        resources::new_directory(&std::env::temp_dir().join("TigerType-tests"), "rust-tiger")?;
     if work.canonicalize()?.starts_with(&root) {
         return Err("测试运行目录必须在源码之外".into());
     }

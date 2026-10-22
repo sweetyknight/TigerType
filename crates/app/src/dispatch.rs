@@ -1,11 +1,11 @@
 //! 固定引擎线程的多宿主路由；宿主标识来自连接所有者，不接受协议正文冒认宿主。
 use crate::Result;
 use std::collections::BTreeMap;
-use tigerrime_contracts::{
+use tigertype_contracts::{
     candidate::{CandidateChoice, CandidateFrame, CandidateToken, ScreenRect},
     protocol::{Command, Message, Rejection, Reply, Request, Response},
 };
-use tigerrime_engine::{Dictionary, Session};
+use tigertype_engine::{Dictionary, Session};
 const MAX_HOSTS: usize = 16;
 const MAX_SESSIONS: usize = 64;
 
@@ -71,7 +71,7 @@ impl<'a> Dispatcher<'a> {
         }
     }
     pub fn dispatch(&mut self, host: u64, frame: &[u8]) -> Result<Vec<u8>> {
-        let Message::Request(request) = tigerrime_ipc::decode(frame)? else {
+        let Message::Request(request) = tigertype_ipc::decode(frame)? else {
             return Err("需要请求帧".into());
         };
         let reply = if self.failed {
@@ -88,7 +88,7 @@ impl<'a> Dispatcher<'a> {
             }
         };
         // 编码失败后不能重放已改变状态的请求；整条调度失效，宿主应取消未上屏组合。
-        match tigerrime_ipc::encode(&Message::Response(Response {
+        match tigertype_ipc::encode(&Message::Response(Response {
             route: request.route,
             reply,
         })) {
