@@ -74,7 +74,29 @@ cargo run --locked --offline -p tigertype-app -- stop
 
 管道只授权本登录 SID 与 ALL APPLICATION PACKAGES，并带低完整性标签：AppContainer/低完整性宿主可连接，Untrusted 级被拒。后台只核对同会话，不打开宿主进程；宿主核对管道所有者、会话和后台映像，因此后台须以普通（非提升）权限运行，提升启动时管道所有者为 Administrators，宿主会拒绝连接。16 槽占满或合计会话达上限时，后台回收最久未用、无焦点且无组合的宿主，该宿主下次发送前发现断开并重连一次。`stop` 成功表示停止确认已送出，后台随后取消并排空资源，不承诺宿主 DLL 已卸载。
 
-`tigertype-tsf` 构建出 `tigertype_tsf.dll`：导出 `DllGetClassObject`/`DllCanUnloadNow`，含类工厂、按键与焦点 sink、组合编辑组件和宿主进程内候选窗（自绘、UIA、IME WinEvent，点击经异步编辑会话选字），按键在同步编辑会话内经管道连接与 DLL 同目录的 `tigertype.exe`。尚无注册入口，不安装、不注册，未经真实宿主验收，不能当作可用输入法；快捷键、焦点与候选窗规则见实施方案。普通测试用合成 COM 文本宿主/线程管理器、隐藏候选窗及进程内假后台，不激活系统 TSF，不在桌面显示窗口，不往现用应用上屏。
+`tigertype-tsf` 构建出 `tigertype_tsf.dll`：导出 `DllGetClassObject`/`DllCanUnloadNow`/`DllRegisterServer`/`DllUnregisterServer`，含类工厂、按键与焦点 sink、组合编辑组件和宿主进程内候选窗（自绘、UIA、IME WinEvent，点击经异步编辑会话选字），按键在同步编辑会话内经管道连接与 DLL 同目录的 `tigertype.exe`。未经真实宿主验收，不能当作可用输入法；快捷键、焦点与候选窗规则见实施方案。普通测试用合成 COM 文本宿主/线程管理器、隐藏候选窗、进程内假后台及临时私有注册表配置单元，不激活系统 TSF，不在桌面显示窗口，不写系统或用户注册表，不往现用应用上屏。
+
+## 真实宿主验收（C 批，须单独授权）
+
+以下步骤会修改系统（文件权限、HKLM 注册表与 TSF 配置），只在用户对每一步明确授权后由用户手动执行；开发流程不会自动执行。宿主只连接与 DLL 同目录的后台，因此 x64 与 x86 DLL 放在同一暂存目录，x86 DLL 改名，二者共用一个 `tigertype.exe`。
+
+```powershell
+# 1. 构建（不修改系统）。
+cargo build --locked --offline --release -p tigertype-app -p tigertype-tsf
+cargo build --locked --offline --release -p tigertype-tsf --target i686-pc-windows-msvc
+# 2. 新建独立暂存目录并复制产物；对 ALL APPLICATION PACKAGES（S-1-15-2-1）授予读取/执行，供 AppContainer 宿主加载。
+New-Item -ItemType Directory 'C:\TigerType-Staging'
+Copy-Item target\release\tigertype.exe, target\release\tigertype_tsf.dll 'C:\TigerType-Staging\'
+Copy-Item target\i686-pc-windows-msvc\release\tigertype_tsf.dll 'C:\TigerType-Staging\tigertype_tsf_x86.dll'
+icacls 'C:\TigerType-Staging' /grant '*S-1-15-2-1:(OI)(CI)(RX)'
+# 3. 以管理员身份注册两种位数（写 HKLM COM 类、简体中文语言配置与 TSF 类别）。
+C:\Windows\System32\regsvr32.exe 'C:\TigerType-Staging\tigertype_tsf.dll'
+C:\Windows\SysWOW64\regsvr32.exe 'C:\TigerType-Staging\tigertype_tsf_x86.dll'
+# 4. 以普通权限从暂存目录启动后台，再在系统设置中为简体中文添加 TigerType 键盘后试用。
+& 'C:\TigerType-Staging\tigertype.exe' serve 'D:\Projects\TigerType\.cache\tiger-v1.json' 'D:\Projects\TigerType\.cache\backend-data'
+```
+
+验收后注销：先在系统设置中移除该键盘，`& 'C:\TigerType-Staging\tigertype.exe' stop` 停止后台，再以管理员身份分别运行 `regsvr32 /u`（System32 对应 x64 DLL、SysWOW64 对应 x86 DLL）。DLL 在已加载它的进程退出前无法删除，退出后再删除暂存目录。注册时若同目录缺少 `tigertype.exe` 或路径不是绝对路径即拒绝；任一步失败回滚已写内容。语言配置暂无图标。
 
 AppContainer 宿主前提测试会创建并删除一个临时 AppContainer 配置（当前用户注册表与 `%LOCALAPPDATA%\Packages`），默认忽略，须经用户授权后单独运行：
 

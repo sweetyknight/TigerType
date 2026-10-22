@@ -8,8 +8,7 @@ use crate::{
 };
 use std::{
     cell::{Cell, RefCell},
-    ffi::{OsString, c_void},
-    os::windows::ffi::OsStringExt,
+    ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     ptr,
@@ -28,10 +27,7 @@ use windows::{
             CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_FAIL, E_INVALIDARG, E_POINTER,
             E_UNEXPECTED, LPARAM, S_FALSE, WPARAM,
         },
-        System::{
-            Com::{IClassFactory, IClassFactory_Impl},
-            LibraryLoader::GetModuleFileNameW,
-        },
+        System::Com::{IClassFactory, IClassFactory_Impl},
         UI::{
             Input::KeyboardAndMouse::{
                 GetKeyState, GetKeyboardLayout, GetKeyboardState, ToUnicodeEx, VIRTUAL_KEY,
@@ -60,15 +56,9 @@ fn runtime() -> std::result::Result<&'static Runtime, IpcError> {
 }
 
 /// 后台与 TIP 安装在同一目录；DLL 不读取配置或发现文件来定位后台。
+pub(crate) const BACKEND: &str = "tigertype.exe";
 fn backend_image() -> Result<PathBuf> {
-    let module = crate::module()?;
-    let mut path = vec![0u16; 32768];
-    // SAFETY: 缓冲区长度随切片传入，返回值为实际写入长度。
-    let length = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
-    if length == 0 || length >= path.len() {
-        return Err(E_FAIL.into());
-    }
-    Ok(PathBuf::from(OsString::from_wide(&path[..length])).with_file_name("tigertype.exe"))
+    Ok(crate::module_path()?.with_file_name(BACKEND))
 }
 
 fn modifiers() -> Modifiers {

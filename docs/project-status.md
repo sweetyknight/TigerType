@@ -3,7 +3,7 @@
 更新：2026-10-22。范围见 [实施方案](implementation-plan.md)。
 
 ## 当前迁移
-本批按实施方案第 4 步完成 B 批：B1 TIP DLL 类工厂、按键/焦点 sink、按键映射与本地判定、统一按键编辑会话（协议 v6）；B2 宿主进程内自绘候选窗、IME WinEvent 与 UIA、点击异步选字会话，并删除 `preview-candidates` 与 ui 候选窗。**尚无注册入口、未经任何真实宿主验收（C 批），仍不是可安装的输入法**。未注册、切换或安装输入法，未激活系统 TSF，测试不在桌面显示窗口，未读取个人词库；本批不提交、不推送。
+B 批（B1 最小 TIP 与统一按键会话、协议 v6；B2 宿主内候选窗、UIA/WinEvent、点击异步选字）已于提交 `3226587` 入库。本批进入 C 批第一步：实现 `DllRegisterServer`/`DllUnregisterServer` 注册入口与暂存目录流程文档。**注册入口从未在本机执行，未经任何真实宿主验收，仍不是可安装的输入法**。未注册、切换或安装输入法，未激活系统 TSF，测试不写系统或用户注册表、不在桌面显示窗口，未读取个人词库；本批不提交、不推送。
 
 | 阶段 | 状态 |
 |---|---|
@@ -14,8 +14,17 @@
 | 多宿主后台 | A 批已实现：AC/低完整性 DACL、双侧认证（后台不开宿主进程）、单请求管道、懒连接重连一次、16 槽 LRU 回收、serve/stop |
 | 沙箱宿主前提 | AppContainer/低完整性子进程可连接、Untrusted 被拒、均不能抢建实例，已实测；真实 UWP 宿主未验收 |
 | DLL 驻留/关闭 | 已实现显式进程期 PIN 与资源排空；默认 EXE 限制保留，不支持热卸载 |
-| TSF TIP | B 批已实现：DLL 导出与类工厂、`ITfTextInputProcessorEx`/按键/线程管理器 sink、会话内 IPC 的同步按键会话与异步点击会话、失焦取消；注册与真实宿主端到端未完成（C 批） |
+| TSF TIP | B 批已实现：DLL 导出与类工厂、`ITfTextInputProcessorEx`/按键/线程管理器 sink、会话内 IPC 的同步按键会话与异步点击会话、失焦取消；C 批注册入口已实现但未执行，真实宿主端到端未完成 |
 | 安装和长期使用 | 未开始，须另行授权 |
+
+## C 批第一步：注册入口（未执行）
+
+- `crates/tsf/src/register.rs`：DLL 新增导出 `DllRegisterServer`/`DllUnregisterServer`。注册先校验 DLL 为绝对路径且同目录有 `tigertype.exe`，再写 HKLM\SOFTWARE\Classes\CLSID\{79A65161-8689-43AC-A57C-574C6A74922A}（名称、`InprocServer32`、`ThreadingModel=Apartment`），然后在单线程套间内以 `ITfInputProcessorProfileMgr::RegisterProfile` 登记简体中文 0x0804 语言配置 `{2097C544-B7D6-4F5C-9F4D-6DB1BE3EE319}`（“TigerType 虎码”，默认启用，暂无图标），以 `ITfCategoryMgr` 登记键盘 TIP、沉浸式、托盘三类别；任一步失败执行注销回滚。注销依次撤销配置、类别并删除 CLSID 子树（不存在视为已删除），单项失败不阻止其余步骤，返回第一个错误。套间若已由调用方以其他模式初始化则不重复反初始化；导出截住 panic。
+- 暂存与位数：宿主只连接与 DLL 同目录的后台且核对映像路径，因此 x64/x86 DLL 放同一暂存目录（x86 改名 `tigertype_tsf_x86.dll`）共用一个后台，分别由 System32/SysWOW64 的 regsvr32 注册；README 记录构建、复制、对 `S-1-15-2-1` 授读/执行、注册、启动后台、注销与删除步骤，全部须用户逐步授权后手动执行。
+- 测试（tsf 共 31 项，新增 3 项）：注册内容（键路径、默认值、`InprocServer32`、线程模型、语言、类别、配置 GUID 不同于 CLSID）；校验拒绝相对路径、缺 DLL、缺后台；注册表写入/删除在 `RegLoadAppKeyW` 加载的临时私有配置单元中往返非 ASCII 路径，删除可重复。确认测试后临时目录无残留。TSF 配置/类别调用会写 HKLM，未在测试中执行。
+- DLL 现导出四个函数，x64/x86 均为未修饰导出名：`artifacts/tsf-c-register-dll-exports-20261022.log`、`artifacts/tsf-c-register-dll-exports-x86-20261022.log`。
+- 统一入口 `cargo run --locked --offline -p tigertype-app --example check` 于 2026-10-22 实际通过架构/文档、fmt、Clippy、x64/x86 单元/集成/文档测试，每个位数 **110 passed、6 ignored**（同前口径）；日志 `artifacts/tsf-c-register-check-final-20261022.log`。前一次运行期间仍在改代码，日志 `artifacts/tsf-c-register-check-20261022.log` 保留但不作结论。
+- 注册入口本身未在本机运行，HKLM、TSF 配置与系统设置中的键盘列表均未改动。
 
 ## B2：宿主内候选窗、UIA 与点击选字
 
@@ -139,7 +148,8 @@
 
 ## 风险与下一步
 - LevelDB/Lua/独立引擎问题随组件退役退出范围，不宣称本批修复。
-- 下一步：C 批——须先实现注册/注销入口（COM 类、TSF 语言配置与类别），再经用户单独授权在对 ALL APPLICATION PACKAGES 授读/执行的暂存目录注册，于真实宿主（含 x86、管理员、UWP 开始菜单/设置搜索）验收后注销。AppContainer 用例每次重跑仍须用户授权。独立窗口与候选窗的可见外观、字体/DPI、读屏器仍须验收；组件测试不是端到端输入法。
+- 下一步：C 批真实宿主验收——注册入口已就绪；须用户对 README 中暂存、授权 ACL、注册、启动后台、注销各步单独授权并手动执行，再于真实宿主（含 x86、管理员、UWP 开始菜单/设置搜索）验收，结束后注销并删除暂存目录。
+- 注册入口风险：从未执行，HKLM 写入、`RegisterProfile`/`RegisterCategory` 的实际效果、回滚与注销的完整性、默认启用后系统设置中键盘列表的表现均未验证；语言配置无图标；重复注销时系统对未登记项可能报错。AppContainer 用例每次重跑仍须用户授权。独立窗口与候选窗的可见外观、字体/DPI、读屏器仍须验收；组件测试不是端到端输入法。
 - B2 已知限制：候选窗用系统颜色与 Microsoft YaHei UI 15pt，未按 Win11Light 锁定配色、字体优先顺序、圆角或 PUA 字根字体；长注释以省略号截断。宿主无布局且无系统光标时不显示候选窗。点击排队会话若宿主始终不执行，同一展示的后续点击被挡住，直到下一次展示更新。UIA 未实现选择容器模式，`Select` 被拒；读屏器效果未实测。候选窗 owner 取自上下文视图或焦点窗口，跨线程 owner 的输入队列影响未验证。
 - B1 已知限制：后台未运行时 `OnTestKeyDown` 仍按默认状态吃字母/标点，`OnKeyDown` 连接失败后放行；宿主是否在此情形把原键交还应用须在 C 批实测，若不交还需改判定策略。单击 Shift 判定不感知鼠标，Shift+点击选择后松开会切换中英。后台回收或重启后新会话恢复中文模式，不保留宿主侧英文模式。组合中按 Home/End/Delete 等未映射键会交给应用，下一键按外部改写处理。
 - AppContainer 子进程测试已确认须创建并删除临时 AppContainer 配置（当前用户注册表与 `%LOCALAPPDATA%\Packages`）；C 批须对暂存目录授予 ALL APPLICATION PACKAGES 读取/执行，并由用户手动注册。两者都须在执行前单独授权。
