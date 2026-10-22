@@ -19,10 +19,10 @@ use windows::{
         System::Threading::GetCurrentThreadId,
         UI::{
             Accessibility::{
-                IRawElementProviderSimple, NotifyWinEvent, UIA_EVENT_ID, UIA_MenuClosedEventId,
-                UIA_MenuOpenedEventId, UIA_SelectionItem_ElementSelectedEventId,
-                UiaClientsAreListening, UiaRaiseAutomationEvent, UiaReturnRawElementProvider,
-                UiaRootObjectId,
+                HCF_HIGHCONTRASTON, HIGHCONTRASTW, IRawElementProviderSimple, NotifyWinEvent,
+                UIA_EVENT_ID, UIA_MenuClosedEventId, UIA_MenuOpenedEventId,
+                UIA_SelectionItem_ElementSelectedEventId, UiaClientsAreListening,
+                UiaRaiseAutomationEvent, UiaReturnRawElementProvider, UiaRootObjectId,
             },
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{GetCapture, GetFocus, ReleaseCapture, SetCapture},
@@ -123,6 +123,61 @@ pub(crate) fn fallback_caret() -> Option<RECT> {
         bottom: corners[1].y,
     };
     bounded(&rect).then_some(rect)
+}
+/// 候选窗配色。产品要求界面不得出现蓝色，所以不用系统强调色/选中色，固定为中性灰；
+/// 仅在用户自己开启高对比度时改用其系统颜色，保证可读性。
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Palette {
+    back: COLORREF,
+    border: COLORREF,
+    text: COLORREF,
+    hint: COLORREF,
+    chosen_back: COLORREF,
+    chosen_text: COLORREF,
+    chosen_hint: COLORREF,
+}
+const fn gray(level: u8) -> COLORREF {
+    COLORREF(level as u32 * 0x01_01_01)
+}
+const NEUTRAL: Palette = Palette {
+    back: gray(0xF9),
+    border: gray(0xD6),
+    text: gray(0x1A),
+    hint: gray(0x70),
+    chosen_back: gray(0xDC),
+    chosen_text: gray(0x1A),
+    chosen_hint: gray(0x4A),
+};
+fn palette() -> Palette {
+    let mut contrast = HIGHCONTRASTW {
+        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: 输出结构大小已填写，只读取系统设置。
+    let high = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            contrast.cbSize,
+            Some((&mut contrast as *mut HIGHCONTRASTW).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_ok()
+        && contrast.dwFlags.contains(HCF_HIGHCONTRASTON);
+    if !high {
+        return NEUTRAL;
+    }
+    // SAFETY: 只读系统颜色。
+    let system = |index| COLORREF(unsafe { GetSysColor(index) });
+    Palette {
+        back: system(COLOR_WINDOW),
+        border: system(COLOR_WINDOWTEXT),
+        text: system(COLOR_WINDOWTEXT),
+        hint: system(COLOR_GRAYTEXT),
+        chosen_back: system(COLOR_HIGHLIGHT),
+        chosen_text: system(COLOR_HIGHLIGHTTEXT),
+        chosen_hint: system(COLOR_HIGHLIGHTTEXT),
+    }
 }
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
@@ -315,19 +370,22 @@ impl Popup {
         }
     }
     fn paint(&self) {
+        let colors = palette();
         let mut paint = PAINTSTRUCT::default();
-        // SAFETY: WM_PAINT 内配对 BeginPaint/EndPaint；画刷为系统共享对象，字体由本窗口持有并在结束前还原。
+        // SAFETY: WM_PAINT 内配对 BeginPaint/EndPaint；本次新建的画刷在结束前删除，字体由本窗口持有并在结束前还原。
         unsafe {
             let dc = BeginPaint(self.hwnd, &mut paint);
+            let back = CreateSolidBrush(colors.back);
+            let border = CreateSolidBrush(colors.border);
+            let chosen_back = CreateSolidBrush(colors.chosen_back);
             let mut client = RECT::default();
             let _ = GetClientRect(self.hwnd, &mut client);
-            FillRect(dc, &client, GetSysColorBrush(COLOR_WINDOW));
-            FrameRect(dc, &client, GetSysColorBrush(COLOR_WINDOWFRAME));
+            FillRect(dc, &client, back);
+            FrameRect(dc, &client, border);
             let old = SelectObject(dc, self.font.get().0.into());
             SetBkMode(dc, TRANSPARENT);
             let pad = self.scale(PAD_X);
             let gap = self.scale(GAP);
-            let color = |index| COLORREF(GetSysColor(index));
             if let Ok(view) = self.view.try_borrow()
                 && let Some(state) = &view.state
             {
@@ -336,15 +394,15 @@ impl Popup {
                 {
                     let chosen = state.highlighted == Some(index);
                     if chosen {
-                        FillRect(dc, rect, GetSysColorBrush(COLOR_HIGHLIGHT));
+                        FillRect(dc, rect, chosen_back);
                     }
                     SetTextColor(
                         dc,
-                        color(if chosen {
-                            COLOR_HIGHLIGHTTEXT
+                        if chosen {
+                            colors.chosen_text
                         } else {
-                            COLOR_WINDOWTEXT
-                        }),
+                            colors.text
+                        },
                     );
                     let mut text = RECT {
                         left: rect.left + pad,
@@ -356,11 +414,11 @@ impl Popup {
                     if !candidate.comment.is_empty() {
                         SetTextColor(
                             dc,
-                            color(if chosen {
-                                COLOR_HIGHLIGHTTEXT
+                            if chosen {
+                                colors.chosen_hint
                             } else {
-                                COLOR_GRAYTEXT
-                            }),
+                                colors.hint
+                            },
                         );
                         text.left += width + gap;
                         DrawTextW(
@@ -372,7 +430,7 @@ impl Popup {
                     }
                 }
                 if let Some(rect) = view.notice {
-                    SetTextColor(dc, color(COLOR_GRAYTEXT));
+                    SetTextColor(dc, colors.hint);
                     let mut text = RECT {
                         left: rect.left + pad,
                         right: rect.right - pad,
@@ -387,6 +445,9 @@ impl Popup {
                 }
             }
             SelectObject(dc, old);
+            for brush in [back, border, chosen_back] {
+                let _ = DeleteObject(brush.into());
+            }
             let _ = EndPaint(self.hwnd, &paint);
         }
     }

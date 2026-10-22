@@ -19,7 +19,7 @@ fn state(count: usize, highlighted: usize) -> InputState {
             .map(|index| Candidate {
                 text: format!("字{index}"),
                 comment: format!("u{index}"),
-                label: ["㊀", "㊁", "㊂"][index].into(),
+                label: (index + 1).to_string(),
                 ..Default::default()
             })
             .collect(),
@@ -56,6 +56,30 @@ fn press(popup: &Popup, down: &RECT, up: &RECT) {
     }
     pump(popup);
 }
+
+#[test]
+fn default_palette_is_neutral_gray_without_any_blue_and_highlight_stays_readable() {
+    // 产品要求界面不得有蓝色：默认配色每个颜色的 R、G、B 必须相等。
+    let colors = [
+        NEUTRAL.back,
+        NEUTRAL.border,
+        NEUTRAL.text,
+        NEUTRAL.hint,
+        NEUTRAL.chosen_back,
+        NEUTRAL.chosen_text,
+        NEUTRAL.chosen_hint,
+    ];
+    for color in colors {
+        let [red, green, blue, _] = color.0.to_le_bytes();
+        assert!(red == green && green == blue, "{color:?}");
+    }
+}
+// 编译期核对：高亮行与普通行可区分，正文比注释更深、注释比背景更深。
+const _: () = assert!(
+    NEUTRAL.chosen_back.0 != NEUTRAL.back.0
+        && NEUTRAL.text.0 < NEUTRAL.hint.0
+        && NEUTRAL.hint.0 < NEUTRAL.back.0
+);
 
 #[test]
 fn position_stays_inside_a_negative_coordinate_monitor_and_flips_above_the_bottom_edge() {

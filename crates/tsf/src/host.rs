@@ -49,6 +49,24 @@ impl<C: Channel> Host<C> {
     pub fn state(&self) -> &InputState {
         &self.state
     }
+    /// 吃键前确认后台可用：已有连接直接复用，否则在期限内只做连接握手，不发输入请求。
+    /// 宿主未必把“预判吃下、处理时放行”的原键交还应用，所以连不上就不能吃键。
+    pub fn ready(&mut self, deadline: Instant) -> bool {
+        match self.channel.ensure(deadline) {
+            Ok(fresh) => {
+                if fresh {
+                    // 新连接上的会话尚未打开，判定按新会话的默认状态。
+                    self.session = 0;
+                    self.state = InputState::default();
+                }
+                true
+            }
+            Err(_) => {
+                self.fail();
+                false
+            }
+        }
+    }
     /// 文档焦点变化：下次按键先报告焦点，后台据此清除旧组合。
     pub fn blur(&mut self) {
         self.focused = false;
@@ -445,5 +463,37 @@ mod tests {
         assert!(host.select(9, 1, deadline()).is_err());
         assert_eq!(fake.0.borrow().cancelled, 1);
         assert_eq!(take_log(&fake).len(), 6);
+    }
+
+    #[test]
+    fn readiness_connects_without_requests_and_a_fresh_link_reopens_on_the_next_key() {
+        let fake = Fake::default();
+        let mut host = Host::new(fake.clone());
+        // 后台不在：判定不可吃键，也不发任何请求。
+        fake.0.borrow_mut().fresh.push_back(Err(Error::Busy));
+        assert!(!host.ready(deadline()));
+        assert!(take_log(&fake).is_empty());
+        fake.0.borrow_mut().fresh.push_back(Ok(true));
+        fake.0.borrow_mut().replies.extend([
+            ok(Reply::Opened),
+            ok(Reply::Focused),
+            Ok(outcome("u")),
+        ]);
+        assert!(host.ready(deadline()));
+        assert!(take_log(&fake).is_empty());
+        host.key(Key::Character('u'), deadline()).unwrap();
+        // 预判时建立的连接在按键时复用：先 Open/Focus 再发键。
+        assert_eq!(take_log(&fake), [(1, open()), (1, focus(1)), (1, key(1))]);
+        // 预判时发现连接被重建：旧会话作废，判定状态回到默认，下一键重新打开会话。
+        fake.0.borrow_mut().fresh.push_back(Ok(true));
+        assert!(host.ready(deadline()));
+        assert!(!host.state().composing);
+        fake.0.borrow_mut().replies.extend([
+            ok(Reply::Opened),
+            ok(Reply::Focused),
+            Ok(outcome("u")),
+        ]);
+        host.key(Key::Character('u'), deadline()).unwrap();
+        assert_eq!(take_log(&fake), [(2, open()), (2, focus(2)), (2, key(2))]);
     }
 }

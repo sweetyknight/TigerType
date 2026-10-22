@@ -112,7 +112,7 @@ pub(crate) fn document() -> (Rc<Document>, ITfContext) {
 }
 fn setup() -> (Rc<Document>, Editor) {
     let (doc, context) = document();
-    (doc, Editor::new(context, 1, 1).unwrap())
+    (doc, Editor::new(context, 1, 1, || {}).unwrap())
 }
 fn apply(editor: &Editor, outcome: KeyOutcome, deadline: Instant) -> EditReport {
     editor.key(deadline, move |_, _| Verdict::Apply(outcome))
@@ -599,7 +599,7 @@ fn old_composition_termination_cannot_invalidate_a_new_composition() {
 #[test]
 fn abandon_cancels_now_or_queues_one_verified_cancel_and_blocks_later_keys() {
     let (doc, context) = document();
-    let editor = Editor::new(context.clone(), 1, 1).unwrap();
+    let editor = Editor::new(context.clone(), 1, 1, || {}).unwrap();
     assert!(editor.is(&context) && !editor.is(&document().1));
     assert!(
         apply(&editor, outcome(1, "u", None), deadline())
@@ -774,4 +774,30 @@ fn queued_click_budget_starts_when_the_session_runs_and_invalidation_cancels_it(
             assert_eq!(text(&doc), "的");
         }
     }
+}
+
+#[test]
+fn host_termination_notifies_once_and_stale_composition_sinks_stay_silent() {
+    let (doc, context) = document();
+    let count = Rc::new(Cell::new(0));
+    let seen = count.clone();
+    let editor = Editor::new(context, 1, 1, move || seen.set(seen.get() + 1)).unwrap();
+    assert!(
+        apply(&editor, outcome(1, "u", None), deadline())
+            .error
+            .is_none()
+    );
+    assert_eq!(count.get(), 0);
+    let old = doc.sink.borrow().as_ref().unwrap().clone();
+    // SAFETY: 模拟宿主终止当前组合。
+    unsafe { old.OnCompositionTerminated(1, None::<&ITfComposition>) }.unwrap();
+    assert_eq!(count.get(), 1);
+    assert!(
+        apply(&editor, outcome(2, "a", None), deadline())
+            .error
+            .is_none()
+    );
+    // SAFETY: 旧组合的迟到通知按代次丢弃，不再收起新组合的候选窗。
+    unsafe { old.OnCompositionTerminated(1, None::<&ITfComposition>) }.unwrap();
+    assert_eq!(count.get(), 1);
 }

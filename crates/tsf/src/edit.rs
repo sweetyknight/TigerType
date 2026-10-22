@@ -65,6 +65,8 @@ pub struct Editor {
     state: Rc<RefCell<State>>,
     terminated: Rc<Cell<bool>>,
     composition_generation: Rc<Cell<u64>>,
+    /// 宿主终止当前组合时的通知（收起候选窗）；不在回调内访问编辑状态。
+    ended: Rc<dyn Fn()>,
     busy: Cell<bool>,
 }
 enum Action {
@@ -88,12 +90,14 @@ struct CompositionSink {
     terminated: Rc<Cell<bool>>,
     generation: Rc<Cell<u64>>,
     expected: u64,
+    ended: Rc<dyn Fn()>,
 }
 impl ITfCompositionSink_Impl for CompositionSink_Impl {
     fn OnCompositionTerminated(&self, _: u32, _: Ref<ITfComposition>) -> Result<()> {
-        // 此回调可能重入 SetText/EndComposition；只记原子于 STA 的标志，不借用编辑状态。
+        // 此回调可能重入 SetText/EndComposition；只记原子于 STA 的标志并通知收起候选窗，不借用编辑状态。
         if self.generation.get() == self.expected {
             self.terminated.set(true);
+            let _ = catch_unwind(AssertUnwindSafe(|| (self.ended)()));
         }
         Ok(())
     }
@@ -106,6 +110,7 @@ struct EditSession {
     expected_epoch: u64,
     terminated: Rc<Cell<bool>>,
     composition_generation: Rc<Cell<u64>>,
+    ended: Rc<dyn Fn()>,
     valid: Rc<Cell<bool>>,
     deadline: Cell<Instant>,
     /// 排队会话在开始时才计算后台预算。
@@ -444,6 +449,7 @@ impl EditSession_Impl {
                 terminated: self.terminated.clone(),
                 generation: self.composition_generation.clone(),
                 expected: generation,
+                ended: self.ended.clone(),
             }
             .into();
             let owner: ITfContextComposition = self.context.cast()?;
@@ -491,7 +497,13 @@ impl EditSession_Impl {
 #[path = "edit_tests.rs"]
 pub(crate) mod tests;
 impl Editor {
-    pub fn new(context: ITfContext, client: u32, epoch: u64) -> Result<Self> {
+    /// ended 在宿主终止本编辑器当前组合时调用。
+    pub fn new(
+        context: ITfContext,
+        client: u32,
+        epoch: u64,
+        ended: impl Fn() + 'static,
+    ) -> Result<Self> {
         if client == 0 || epoch == 0 {
             return Err(E_INVALIDARG.into());
         }
@@ -506,6 +518,7 @@ impl Editor {
             })),
             terminated: Rc::new(Cell::new(false)),
             composition_generation: Rc::new(Cell::new(0)),
+            ended: Rc::new(ended),
             busy: Cell::new(false),
         })
     }
@@ -609,6 +622,7 @@ impl Editor {
             expected_epoch: self.epoch.get(),
             terminated: self.terminated.clone(),
             composition_generation: self.composition_generation.clone(),
+            ended: self.ended.clone(),
             valid: valid.clone(),
             deadline: Cell::new(deadline),
             budget,

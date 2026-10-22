@@ -17,7 +17,7 @@ use windows::{
     Win32::{
         Foundation::{E_NOTIMPL, HWND, RECT, S_OK},
         UI::{
-            Input::KeyboardAndMouse::VK_SPACE,
+            Input::KeyboardAndMouse::{VK_OEM_COMMA, VK_SPACE, VK_U},
             WindowsAndMessaging::{
                 DispatchMessageW, GetWindowRect, MSG, PM_REMOVE, PeekMessageW, SendMessageW,
                 WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP,
@@ -184,7 +184,7 @@ fn state(buffer: &str, revision: u64) -> InputState {
     } else {
         WORDS
             .iter()
-            .zip(["㊀", "㊁"])
+            .zip(["1", "2"])
             .map(|(text, label)| Candidate {
                 text: (*text).into(),
                 label: label.into(),
@@ -368,6 +368,13 @@ fn unavailable_backend_or_inactive_service_passes_keys_without_touching_the_docu
     // SAFETY: 合成线程管理器；命名空间内没有后台，连接立即失败。
     unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
     let active = object.active().unwrap();
+    // 后台不在时预判不吃任何键：宿主未必把“预判吃下、处理时放行”的原键交还应用。
+    assert!(!active.ready(later()));
+    for vk in [VK_U, VK_OEM_COMMA, VK_SPACE] {
+        // SAFETY: 合成上下文，同步调用本对象的按键 sink。
+        let eaten = unsafe { keys.OnTestKeyDown(&context, WPARAM(vk.0 as usize), LPARAM(0)) };
+        assert!(!eaten.unwrap().as_bool(), "{vk:?}");
+    }
     assert!(
         !active
             .input(&context, Key::Character('u'), later())

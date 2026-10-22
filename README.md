@@ -89,11 +89,24 @@ New-Item -ItemType Directory 'C:\TigerType-Staging'
 Copy-Item target\release\tigertype.exe, target\release\tigertype_tsf.dll 'C:\TigerType-Staging\'
 Copy-Item target\i686-pc-windows-msvc\release\tigertype_tsf.dll 'C:\TigerType-Staging\tigertype_tsf_x86.dll'
 icacls 'C:\TigerType-Staging' /grant '*S-1-15-2-1:(OI)(CI)(RX)'
-# 3. 以管理员身份注册两种位数（写 HKLM COM 类、简体中文语言配置与 TSF 类别）。
-C:\Windows\System32\regsvr32.exe 'C:\TigerType-Staging\tigertype_tsf.dll'
-C:\Windows\SysWOW64\regsvr32.exe 'C:\TigerType-Staging\tigertype_tsf_x86.dll'
+# 注册前加固：C:\ 下新建目录继承 Authenticated Users 修改权，而注册后 DLL 会进入管理员进程；
+# 去掉继承，只留 Administrators/SYSTEM 完全控制与 Users、ALL APPLICATION PACKAGES 读/执行（之后删除需管理员）。
+icacls 'C:\TigerType-Staging' /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)(F)' '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-545:(OI)(CI)(RX)' '*S-1-15-2-1:(OI)(CI)(RX)'
+# 3. 以管理员身份注册两种位数（写 HKLM COM 类、简体中文语言配置与 TSF 类别）；用双引号，cmd 与 PowerShell 通用（cmd 不认单引号）。
+C:\Windows\System32\regsvr32.exe "C:\TigerType-Staging\tigertype_tsf.dll"
+C:\Windows\SysWOW64\regsvr32.exe "C:\TigerType-Staging\tigertype_tsf_x86.dll"
 # 4. 以普通权限从暂存目录启动后台，再在系统设置中为简体中文添加 TigerType 键盘后试用。
 & 'C:\TigerType-Staging\tigertype.exe' serve 'D:\Projects\TigerType\.cache\tiger-v1.json' 'D:\Projects\TigerType\.cache\backend-data'
+```
+
+更新已部署的 DLL：DLL 常驻在已加载它的进程中，无法覆盖或删除，只能以管理员先改名旧文件、再复制新文件（注册路径不变，无需重新注册）；已打开的程序重启后才用到新版本，旧文件在重启或注销后再删除。后台程序有改动时先以普通权限 `stop`，再以管理员 `copy "D:\Projects\TigerType\target\release\tigertype.exe" C:\TigerType-Staging\tigertype.exe`，然后以普通权限重新 `serve`。
+
+```bat
+cd /d C:\TigerType-Staging
+ren tigertype_tsf.dll tigertype_tsf.old1.dll
+ren tigertype_tsf_x86.dll tigertype_tsf_x86.old1.dll
+copy "D:\Projects\TigerType\target\release\tigertype_tsf.dll" tigertype_tsf.dll
+copy "D:\Projects\TigerType\target\i686-pc-windows-msvc\release\tigertype_tsf.dll" tigertype_tsf_x86.dll
 ```
 
 验收后注销：先在系统设置中移除该键盘，`& 'C:\TigerType-Staging\tigertype.exe' stop` 停止后台，再以管理员身份分别运行 `regsvr32 /u`（System32 对应 x64 DLL、SysWOW64 对应 x86 DLL）。DLL 在已加载它的进程退出前无法删除，退出后再删除暂存目录。注册时若同目录缺少 `tigertype.exe` 或路径不是绝对路径即拒绝；任一步失败回滚已写内容。语言配置暂无图标。

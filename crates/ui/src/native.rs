@@ -14,14 +14,23 @@ use tigertype_contracts::{
     ui::{Reply, Request},
 };
 use windows_sys::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, RECT, WAIT_FAILED, WPARAM},
+    Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WAIT_FAILED, WPARAM},
     Graphics::Gdi::{
-        CLEARTYPE_QUALITY, COLOR_WINDOW, CreateFontW, DEFAULT_CHARSET, DeleteObject,
-        GetSysColorBrush, HFONT,
+        CLEARTYPE_QUALITY, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
+        COLOR_WINDOWTEXT, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DT_NOPREFIX,
+        DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawFocusRect, DrawTextW, ETO_CLIPPED, ETO_OPAQUE,
+        ExtTextOutW, FillRect, GetDC, GetSysColor, GetSysColorBrush, GetTextExtentPoint32W,
+        GetTextMetricsW, HDC, HFONT, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
+        TEXTMETRICW, TRANSPARENT,
     },
     System::{LibraryLoader::GetModuleHandleW, Threading::INFINITE},
     UI::{
-        Controls::{BST_CHECKED, BST_UNCHECKED, EM_SETLIMITTEXT, EM_SETSEL},
+        Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
+        Controls::{
+            BST_CHECKED, BST_UNCHECKED, DRAWITEMSTRUCT, EM_GETLINE, EM_GETRECT, EM_GETSEL,
+            EM_LINEFROMCHAR, EM_LINEINDEX, EM_LINELENGTH, EM_POSFROMCHAR, EM_SETLIMITTEXT,
+            EM_SETSEL, MEASUREITEMSTRUCT, ODS_DISABLED, ODS_FOCUS, ODS_SELECTED, ODT_COMBOBOX,
+        },
         HiDpi::*,
         Input::{
             Ime::{GCS_COMPSTR, ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext},
@@ -67,11 +76,237 @@ fn post(hwnd: HWND, message: u32, value: WPARAM) {
     }
 }
 
+/// 选区与下拉选中项的中性灰：产品要求界面不得出现蓝色（与候选窗配色一致），
+/// 系统选中色多为蓝色，所以不用；只在用户自己开启高对比度时沿用系统颜色保证可读。
+const SELECTED_BACK: COLORREF = 0x00DC_DCDC;
+const SELECTED_TEXT: COLORREF = 0x001A_1A1A;
+/// 下拉框每项高度（96 DPI），容纳 15pt 字体。
+const ITEM_HEIGHT: u32 = 30;
+
+fn high_contrast() -> bool {
+    let mut contrast = HIGHCONTRASTW {
+        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        dwFlags: 0,
+        lpszDefaultScheme: null_mut(),
+    };
+    // SAFETY: 输出结构大小已填写，只读系统设置。
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            contrast.cbSize,
+            (&mut contrast as *mut HIGHCONTRASTW).cast(),
+            0,
+        ) != 0
+            && contrast.dwFlags & HCF_HIGHCONTRASTON != 0
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+fn class_procedure(hwnd: HWND) -> WNDPROC {
+    // SAFETY: 读取 EDIT 类登记的原窗口过程（不受本窗口子类化影响），与 WNDPROC 同宽。
+    unsafe { std::mem::transmute::<usize, WNDPROC>(GetClassLongPtrW(hwnd, GCLP_WNDPROC)) }
+}
+#[cfg(target_pointer_width = "32")]
+fn class_procedure(hwnd: HWND) -> WNDPROC {
+    // SAFETY: x86 没有 Ptr 版本，类长整数与函数指针同宽。
+    unsafe { std::mem::transmute::<usize, WNDPROC>(GetClassLongW(hwnd, GCLP_WNDPROC) as usize) }
+}
+
+// SAFETY: 系统在所属 UI 线程调用；先交 EDIT 原过程处理，再在本次回调内用灰色重画可见选区；
+// 不保存指针、不分配，选区相关以外的消息原样返回。
+unsafe extern "system" fn edit_procedure(
+    hwnd: HWND,
+    message: u32,
+    w: WPARAM,
+    l: LPARAM,
+) -> LRESULT {
+    // SAFETY: 参数原样交给 EDIT 类的原窗口过程。
+    let result = unsafe { CallWindowProcW(class_procedure(hwnd), hwnd, message, w, l) };
+    if matches!(
+        message,
+        WM_PAINT
+            | WM_SETFOCUS
+            | WM_KEYDOWN
+            | WM_CHAR
+            | WM_LBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_LBUTTONDBLCLK
+            | WM_MOUSEMOVE
+            | WM_MOUSEWHEEL
+            | WM_VSCROLL
+            | WM_HSCROLL
+            | WM_SIZE
+            | WM_IME_ENDCOMPOSITION
+            | EM_SETSEL
+    ) {
+        repaint_selection(hwnd);
+    }
+    result
+}
+
+/// EDIT 只能用系统选中色（蓝）画选区；原过程画完后，按字符位置用中性灰重画仍可见的选区，
+/// 选择与复制行为不变。选区只在拥有焦点时可见（未设 ES_NOHIDESEL）。
+fn repaint_selection(hwnd: HWND) {
+    // SAFETY: 只读本线程焦点。
+    if unsafe { GetFocus() } != hwnd || high_contrast() {
+        return;
+    }
+    // SAFETY: 取本窗口 DC 并在结束时归还；先隐藏插入符，避免异或插入符在灰色上留下残影。
+    unsafe {
+        let dc = GetDC(hwnd);
+        if dc.is_null() {
+            return;
+        }
+        HideCaret(hwnd);
+        paint_selection(hwnd, dc);
+        ShowCaret(hwnd);
+        ReleaseDC(hwnd, dc);
+    }
+}
+fn paint_selection(hwnd: HWND, dc: HDC) {
+    // SAFETY: 只向本 EDIT 同步发送查询消息，输出参数均为本栈上的值。
+    let send = |message, w: WPARAM, l: LPARAM| unsafe { SendMessageW(hwnd, message, w, l) };
+    let (mut start, mut end) = (0u32, 0u32);
+    send(
+        EM_GETSEL,
+        &mut start as *mut u32 as WPARAM,
+        &mut end as *mut u32 as LPARAM,
+    );
+    if start >= end {
+        return;
+    }
+    let mut format = RECT::default();
+    send(EM_GETRECT, 0, &mut format as *mut RECT as LPARAM);
+    let first = send(EM_LINEFROMCHAR, start as usize, 0).max(0) as usize;
+    let last = send(EM_LINEFROMCHAR, end as usize, 0).max(0) as usize;
+    // SAFETY: 选入本控件字体测量与绘制，结束前还原；文字缓冲区在调用期间存活。
+    unsafe {
+        let old = SelectObject(dc, send(WM_GETFONT, 0, 0) as HFONT);
+        let mut metrics: TEXTMETRICW = std::mem::zeroed();
+        GetTextMetricsW(dc, &mut metrics);
+        SetTextColor(dc, SELECTED_TEXT);
+        SetBkColor(dc, SELECTED_BACK);
+        // 资料框一页至多九字、数十行；上限只防异常输入拖慢绘制。
+        for line in first..=last.min(first + 4096) {
+            let line_start = send(EM_LINEINDEX, line, 0);
+            if line_start < 0 {
+                break;
+            }
+            let line_start = line_start as u32;
+            let length = send(EM_LINELENGTH, line_start as usize, 0).max(0) as u32;
+            let (from, to) = (start.max(line_start), end.min(line_start + length));
+            if from >= to {
+                continue;
+            }
+            let mut buffer = [0u16; 1024];
+            buffer[0] = buffer.len() as u16;
+            let copied = send(EM_GETLINE, line, buffer.as_mut_ptr() as LPARAM).max(0) as usize;
+            let range = (from - line_start) as usize..((to - line_start) as usize).min(copied);
+            let Some(segment) = buffer.get(range).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let position = send(EM_POSFROMCHAR, from as usize, 0);
+            if position == -1 {
+                continue;
+            }
+            let x = (position & 0xffff) as i16 as i32;
+            let y = ((position >> 16) & 0xffff) as i16 as i32;
+            let mut size = SIZE::default();
+            GetTextExtentPoint32W(dc, segment.as_ptr(), segment.len() as i32, &mut size);
+            let cell = RECT {
+                left: x.max(format.left),
+                top: y.max(format.top),
+                right: (x + size.cx).min(format.right),
+                bottom: (y + metrics.tmHeight).min(format.bottom),
+            };
+            if cell.left < cell.right && cell.top < cell.bottom {
+                ExtTextOutW(
+                    dc,
+                    x,
+                    y,
+                    ETO_OPAQUE | ETO_CLIPPED,
+                    &cell,
+                    segment.as_ptr(),
+                    segment.len() as u32,
+                    null(),
+                );
+            }
+        }
+        SelectObject(dc, old);
+    }
+}
+
+/// 自绘下拉框各项：选中项用中性灰而非系统选中色；文字取自控件自身字符串，无分配。
+fn draw_item(item: &DRAWITEMSTRUCT) {
+    let chosen = item.itemState & ODS_SELECTED != 0;
+    // SAFETY: 只读系统颜色。
+    let system = |index| unsafe { GetSysColor(index) };
+    let (back, mut text) = match (chosen, high_contrast()) {
+        (true, false) => (SELECTED_BACK, SELECTED_TEXT),
+        (true, true) => (system(COLOR_HIGHLIGHT), system(COLOR_HIGHLIGHTTEXT)),
+        (false, _) => (system(COLOR_WINDOW), system(COLOR_WINDOWTEXT)),
+    };
+    if item.itemState & ODS_DISABLED != 0 {
+        text = system(COLOR_GRAYTEXT);
+    }
+    // SAFETY: 在系统提供的 DC 与项目矩形内绘制；新建画刷用后即删，控件句柄来自本次通知。
+    unsafe {
+        let brush = CreateSolidBrush(back);
+        FillRect(item.hDC, &item.rcItem, brush);
+        DeleteObject(brush);
+        if item.itemID != u32::MAX {
+            let mut buffer = [0u16; 64];
+            let length = SendMessageW(item.hwndItem, CB_GETLBTEXTLEN, item.itemID as usize, 0);
+            if (0..buffer.len() as isize).contains(&length)
+                && SendMessageW(
+                    item.hwndItem,
+                    CB_GETLBTEXT,
+                    item.itemID as usize,
+                    buffer.as_mut_ptr() as LPARAM,
+                ) >= 0
+            {
+                let mut rect = RECT {
+                    left: item.rcItem.left + (item.rcItem.bottom - item.rcItem.top) / 4,
+                    ..item.rcItem
+                };
+                SetBkMode(item.hDC, TRANSPARENT as _);
+                SetTextColor(item.hDC, text);
+                DrawTextW(
+                    item.hDC,
+                    buffer.as_ptr(),
+                    length as i32,
+                    &mut rect,
+                    DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+                );
+            }
+        }
+        if item.itemState & ODS_FOCUS != 0 {
+            DrawFocusRect(item.hDC, &item.rcItem);
+        }
+    }
+}
+
 // SAFETY: Windows 在所属 UI 线程调用；不解引用业务指针、不使用全局状态，不执行可能 panic 的 Rust 操作。
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-    // SAFETY: 只转发值类型通知；WM_DPICHANGED 的 RECT 仅在本次系统回调内读取，绝不排队裸指针。
+    // SAFETY: 只转发值类型通知；WM_DPICHANGED 的 RECT、自绘结构仅在本次系统回调内读取，绝不排队裸指针。
     unsafe {
         match message {
+            WM_MEASUREITEM if l != 0 => {
+                let item = &mut *(l as *mut MEASUREITEMSTRUCT);
+                if item.CtlType != ODT_COMBOBOX {
+                    return DefWindowProcW(hwnd, message, w, l);
+                }
+                item.itemHeight = ITEM_HEIGHT * GetDpiForWindow(hwnd).max(96) / 96;
+                1
+            }
+            WM_DRAWITEM if l != 0 => {
+                let item = &*(l as *const DRAWITEMSTRUCT);
+                if item.CtlType != ODT_COMBOBOX {
+                    return DefWindowProcW(hwnd, message, w, l);
+                }
+                draw_item(item);
+                1
+            }
             WM_COMMAND => {
                 post(hwnd, ACTION, w);
                 0
@@ -214,6 +449,17 @@ impl Window {
             }
         }
     }
+    /// 文本框改用会以灰色重画选区的过程；控件随父窗口销毁，无需还原。
+    fn gray_selection(&self, id: usize) {
+        // SAFETY: 本线程拥有的 EDIT 控件，新过程以类登记的原过程处理一切消息。
+        unsafe {
+            SetWindowLongPtrW(
+                self.control(id),
+                GWLP_WNDPROC,
+                edit_procedure as *const () as usize as _,
+            );
+        }
+    }
     fn send(&self, id: usize, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         // SAFETY: 本模块只发送已匹配控件类型的同步消息；字符串参数在调用方保持存活。
         unsafe { SendMessageW(self.control(id), message, w, l) }
@@ -272,6 +518,20 @@ impl Window {
             }
             self.font = font;
             self.dpi = dpi;
+            // 自绘下拉框的选中框与列表项高度随 DPI 变化；-1 指选中框本身。
+            if let Some((_, combo)) = self.controls.iter().find(|(id, _)| *id == FORM) {
+                for index in [usize::MAX, 0] {
+                    // SAFETY: 本线程拥有的下拉框，值类型参数。
+                    unsafe {
+                        SendMessageW(
+                            *combo,
+                            CB_SETITEMHEIGHT,
+                            index,
+                            (ITEM_HEIGHT * dpi / 96) as LPARAM,
+                        );
+                    }
+                }
+            }
         }
         if settings {
             self.place(AUTO, 20, 20, 490, 36);
@@ -381,6 +641,7 @@ fn lookup_window(class: &Class) -> Result<Window, String> {
     )?;
     // 粘贴上限保留足够余量；超过业务上限明确报错，不把截断文本当成有效查询。
     window.send(QUERY, EM_SETLIMITTEXT, 4096, 0);
+    window.gray_selection(QUERY);
     window.add(
         SEARCH,
         "BUTTON",
@@ -399,6 +660,7 @@ fn lookup_window(class: &Class) -> Result<Window, String> {
             | ES_AUTOVSCROLL as u32
             | ES_READONLY as u32,
     )?;
+    window.gray_selection(OUTPUT);
     for (id, title) in [
         (PREVIOUS, "上页(&P)"),
         (NEXT, "下页(&N)"),
@@ -421,7 +683,13 @@ fn settings_window(class: &Class, owner: HWND) -> Result<Window, String> {
         window.add(id, "BUTTON", title, WS_TABSTOP | BS_AUTOCHECKBOX as u32)?;
     }
     window.add(210, "STATIC", "输出字形(&O)", 0)?;
-    window.add(FORM, "COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST as u32)?;
+    // 自绘选中项以避开系统蓝色；保留字符串供键盘导航与读屏器使用。
+    window.add(
+        FORM,
+        "COMBOBOX",
+        "",
+        WS_TABSTOP | (CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS) as u32,
+    )?;
     for text in ["原字", "简体", "繁体"] {
         if window.send(FORM, CB_ADDSTRING, 0, wide(text).as_ptr() as isize) < 0 {
             return Err("无法创建字形选项".into());
@@ -780,6 +1048,125 @@ fn event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::{
+        Graphics::Gdi::{CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, GetPixel},
+        UI::Controls::ODA_DRAWENTIRE,
+    };
+
+    // 产品要求界面不得有蓝色：选区配色必须是 R=G=B 的中性灰，且文字比背景深。
+    const _: () = {
+        let [r, g, b, _] = SELECTED_BACK.to_le_bytes();
+        let [tr, tg, tb, _] = SELECTED_TEXT.to_le_bytes();
+        assert!(r == g && g == b && tr == tg && tg == tb && tr < r);
+    };
+
+    /// 在内存位图上作画并读像素，不显示窗口、不碰桌面。
+    struct Canvas(HDC, *mut core::ffi::c_void, *mut core::ffi::c_void);
+    impl Canvas {
+        fn new(width: i32, height: i32) -> Self {
+            // SAFETY: 创建与屏幕兼容的内存 DC 和位图，Drop 时配对释放；先铺白底。
+            unsafe {
+                let screen = GetDC(null_mut());
+                let dc = CreateCompatibleDC(screen);
+                let bitmap = CreateCompatibleBitmap(screen, width, height);
+                ReleaseDC(null_mut(), screen);
+                let old = SelectObject(dc, bitmap);
+                let white = CreateSolidBrush(0x00FF_FFFF);
+                FillRect(
+                    dc,
+                    &RECT {
+                        left: 0,
+                        top: 0,
+                        right: width,
+                        bottom: height,
+                    },
+                    white,
+                );
+                DeleteObject(white);
+                Self(dc, bitmap, old)
+            }
+        }
+        fn pixel(&self, x: i32, y: i32) -> COLORREF {
+            // SAFETY: 读本内存 DC 的像素。
+            unsafe { GetPixel(self.0, x, y) }
+        }
+    }
+    impl Drop for Canvas {
+        fn drop(&mut self) {
+            // SAFETY: 还原原位图后删除自建位图与 DC。
+            unsafe {
+                SelectObject(self.0, self.2);
+                DeleteObject(self.1);
+                DeleteDC(self.0);
+            }
+        }
+    }
+
+    /// 由隐藏窗口测试调用（窗口类同名，不能与之并行注册）：选区与下拉选中项为中性灰而非系统蓝。
+    fn assert_neutral_highlights(main: &Window, settings: &Window) {
+        for id in [QUERY, OUTPUT] {
+            // SAFETY: 只读本测试窗口的窗口过程。
+            let current = unsafe { GetWindowLongPtrW(main.control(id), GWLP_WNDPROC) };
+            assert_eq!(current as usize, edit_procedure as *const () as usize);
+        }
+        let contrast = high_contrast();
+        // SAFETY: 只读系统颜色。
+        let system = |index| unsafe { GetSysColor(index) };
+
+        // 跨行选区“乙丙 / 丁戊”：选中处为灰，未选中的“甲”与“己”保持原样。
+        main.text(OUTPUT, "甲乙丙\r\n丁戊己");
+        main.send(OUTPUT, EM_SETSEL, 1, 7);
+        let canvas = Canvas::new(800, 400);
+        paint_selection(main.control(OUTPUT), canvas.0);
+        let at = |index: usize| {
+            let position = main.send(OUTPUT, EM_POSFROMCHAR, index, 0);
+            (
+                (position & 0xffff) as i16 as i32,
+                ((position >> 16) & 0xffff) as i16 as i32,
+            )
+        };
+        for index in [1, 2, 5, 6] {
+            let (x, y) = at(index);
+            assert_eq!(canvas.pixel(x + 1, y), SELECTED_BACK, "第 {index} 字");
+        }
+        for index in [0, 7] {
+            let (x, y) = at(index);
+            assert_eq!(canvas.pixel(x + 1, y), 0x00FF_FFFF, "第 {index} 字");
+        }
+
+        // 下拉框选中项为灰，未选中项为窗口底色；高对比度时沿用系统颜色。
+        for (state, expected) in [
+            (
+                ODS_SELECTED,
+                if contrast {
+                    system(COLOR_HIGHLIGHT)
+                } else {
+                    SELECTED_BACK
+                },
+            ),
+            (0, system(COLOR_WINDOW)),
+        ] {
+            let canvas = Canvas::new(200, 30);
+            draw_item(&DRAWITEMSTRUCT {
+                CtlType: ODT_COMBOBOX,
+                CtlID: FORM as u32,
+                itemID: 1,
+                itemAction: ODA_DRAWENTIRE,
+                itemState: state,
+                hwndItem: settings.control(FORM),
+                hDC: canvas.0,
+                rcItem: RECT {
+                    left: 0,
+                    top: 0,
+                    right: 200,
+                    bottom: 30,
+                },
+                itemData: 0,
+            });
+            assert_eq!(canvas.pixel(1, 1), expected);
+        }
+    }
+
     #[test]
     fn keyboard_commands_preserve_native_dropdown_and_ime_handling() {
         assert_eq!(
@@ -823,6 +1210,7 @@ mod tests {
             let class = Class::register().unwrap();
             let mut main = lookup_window(&class).unwrap();
             let mut settings = settings_window(&class, main.handle).unwrap();
+            assert_neutral_highlights(&main, &settings);
             // 隐藏窗收到迟到回复也不能从用户桌面抢走焦点。
             // SAFETY: 仅观察本测试线程焦点，测试不激活或显示窗口。
             let original_focus = unsafe { GetFocus() };

@@ -178,24 +178,48 @@ impl Active {
             popup.hide();
         }
     }
-    /// 映射本键并按上次状态判断是否吃键；只读本地状态，不发 IPC。
-    fn judge(&self, context: &ITfContext, wparam: WPARAM, lparam: LPARAM) -> Option<Key> {
+    /// 后台可用（必要时在期限内只做连接握手）；连不上则原键一律放行。
+    fn ready(&self, deadline: Instant) -> bool {
+        self.host
+            .try_borrow_mut()
+            .is_ok_and(|mut host| host.ready(deadline))
+    }
+    /// 映射本键并按上次状态判断是否吃键；不发输入请求，后台连不上则不吃。
+    fn judge(
+        &self,
+        context: &ITfContext,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        deadline: Instant,
+    ) -> Option<Key> {
         let vk = wparam.0 as u16;
-        let mut state = self.host.try_borrow().ok()?.state().clone();
         // 换了上下文或宿主已终止组合时，下一键会先让后台清空，按非组合判定。
-        state.composing &= self
+        let composing = self
             .current_editor()
             .is_some_and(|editor| editor.is(context) && editor.composing());
-        let key = key::map(vk, modifiers(), typed(vk, lparam), state.composing)?;
+        let previous = self.host.try_borrow().ok()?.state().composing;
+        let key = key::map(vk, modifiers(), typed(vk, lparam), composing && previous)?;
+        if !self.ready(deadline) {
+            return None;
+        }
+        let mut state = self.host.try_borrow().ok()?.state().clone();
+        state.composing &= composing;
         state.consumes(key).then_some(key)
     }
     /// 取得该上下文的编辑器；换上下文时旧编辑器先失效并取消其自有组合，后台下次按键先报告焦点。
-    fn focus(&self, context: &ITfContext) -> Result<Rc<Editor>> {
+    fn focus(self: &Rc<Self>, context: &ITfContext) -> Result<Rc<Editor>> {
         if let Some(editor) = self.current_editor().filter(|editor| editor.is(context)) {
             return Ok(editor);
         }
         let epoch = self.epoch.get().checked_add(1).ok_or(E_FAIL)?;
-        let editor = Rc::new(Editor::new(context.clone(), self.client, epoch)?);
+        let owner = Rc::downgrade(self);
+        // 宿主终止组合（如点击别处）时立即收起候选窗，后台清空留给下一键。
+        let ended = move || {
+            if let Some(active) = owner.upgrade() {
+                active.hide();
+            }
+        };
+        let editor = Rc::new(Editor::new(context.clone(), self.client, epoch, ended)?);
         self.host.try_borrow_mut().map_err(busy)?.blur();
         self.epoch.set(epoch);
         let old = self
@@ -430,9 +454,10 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     }
     fn OnTestKeyDown(&self, pic: Ref<ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         Ok(shielded(|| {
+            let deadline = Instant::now() + BUDGET;
             self.press(wparam);
             let active = self.active().ok_or(E_UNEXPECTED)?;
-            Ok(active.judge(pic.ok()?, wparam, lparam).is_some())
+            Ok(active.judge(pic.ok()?, wparam, lparam, deadline).is_some())
         }))
     }
     fn OnKeyDown(&self, pic: Ref<ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
@@ -441,14 +466,17 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             self.press(wparam);
             let active = self.active().ok_or(E_UNEXPECTED)?;
             let context = pic.ok()?;
-            match active.judge(context, wparam, lparam) {
+            match active.judge(context, wparam, lparam, deadline) {
                 Some(key) => active.input(context, key, deadline),
                 None => Ok(false),
             }
         }))
     }
     fn OnTestKeyUp(&self, _: Ref<ITfContext>, wparam: WPARAM, _: LPARAM) -> Result<BOOL> {
-        Ok(shielded(|| Ok(self.released(wparam))))
+        Ok(shielded(|| {
+            let deadline = Instant::now() + BUDGET;
+            Ok(self.released(wparam) && self.active().is_some_and(|active| active.ready(deadline)))
+        }))
     }
     fn OnKeyUp(&self, pic: Ref<ITfContext>, wparam: WPARAM, _: LPARAM) -> Result<BOOL> {
         Ok(shielded(|| {

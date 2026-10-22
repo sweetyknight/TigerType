@@ -346,8 +346,12 @@ fn pagination_selection_and_stale_snapshots_are_checked() {
     let mut session = Session::new(&dictionary, Options::default());
     type_code(&mut session, "a");
     let old = session.snapshot();
+    // 每页标号都从阿拉伯数字 1 起，与数字键选重对应。
+    let labels: Vec<_> = old.candidates.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, ["1", "2", "3", "4", "5", "6", "7", "8", "9"]);
     session.process(Key::PageDown).unwrap();
     assert_eq!(session.snapshot().page_index, 1);
+    assert_eq!(session.snapshot().candidates[0].label, "1");
     assert!(session.select(old.revision, 0).is_err());
     let state = session.snapshot();
     assert!(session.select(state.revision, 9).is_err());

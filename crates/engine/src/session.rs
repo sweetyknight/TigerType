@@ -92,8 +92,8 @@ impl<'a> Session<'a> {
             .enumerate()
             .map(|(index, candidate)| {
                 let mut candidate = candidate.clone();
-                candidate.label =
-                    ["㊀", "㊁", "㊂", "㊃", "㊄", "㊅", "㊆", "㊇", "㊈"][index].into();
+                // 选字标号用阿拉伯数字，与数字键选重一一对应。
+                candidate.label = (index + 1).to_string();
                 if show {
                     let info = self
                         .dictionary
