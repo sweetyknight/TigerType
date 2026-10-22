@@ -135,8 +135,7 @@ mod tests {
                 session_id: 1,
             },
             command: Command::Key {
-                keycode: 32,
-                modifiers: 0,
+                key: tigerrime_contracts::Key::Space,
             },
         }
     }

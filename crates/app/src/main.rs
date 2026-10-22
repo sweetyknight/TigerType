@@ -1,55 +1,60 @@
-//! 开发期诊断命令；未实现的安装/常驻模式不暴露空壳入口。
-
-use tigerrime_app::{Result, probe, project_root, resources};
+//! 离线资源与核心诊断入口；不注册输入法、不启动旧引擎或探测个人词库。
+use std::path::Path;
+use tigerrime_app::{Result, import, project_root};
+use tigerrime_contracts::{Key, Options};
+use tigerrime_engine::{Dictionary, Session};
 
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.is_empty() || args == ["--help"] {
         println!(
-            "TigerRime 开发工具\n  prepare-resources <虎码原目录>\n  verify-resources\n  probe-deploy <隔离测试目录>\n  probe-engine <隔离测试目录>\n不注册输入法，不探测 APPDATA，不需要 Python。"
+            "TigerRime Rust 核心工具\n  import-resources <新数据包绝对路径>\n  verify-package <数据包绝对路径>\n  lookup <数据包绝对路径> <拼音或汉字>\n  demo-input <数据包绝对路径> <编码>\n尚不安装或注册输入法。"
         );
         return Ok(());
     }
-    let root = project_root()?;
     match (args[0].to_str(), args.len()) {
-        (Some("prepare-resources"), 2) => {
-            resources::prepare(&root, std::path::Path::new(&args[1]))?
+        (Some("import-resources"), 2) => {
+            let package = import::build(&project_root()?.join("vendor/tiger"))?;
+            import::save(&package, Path::new(&args[1]))?;
+            println!(
+                "已校验并写入 {} 条单字编码；未修改原资源。",
+                package.data.entries.len()
+            );
         }
-        (Some("verify-resources"), 1) => resources::verify(&root)?,
-        (Some("probe-deploy"), 2) => probe::run(&root, std::path::Path::new(&args[1]), true)?,
-        (Some("probe-engine"), 2) => probe::run(&root, std::path::Path::new(&args[1]), false)?,
-        #[cfg(windows)]
-        (Some("probe-idle-worker"), 3) => {
-            // SAFETY: 专用子进程入口只执行一次，启动句柄尚未被任何 Rust 所有者接管。
-            unsafe {
-                tigerrime_app::job::probe_idle(
-                    args[1].to_str().ok_or("父进程句柄格式不符")?.parse()?,
-                    args[2].to_str().ok_or("事件句柄格式不符")?.parse()?,
-                )?;
-            }
+        (Some("verify-package"), 2) => {
+            let package = import::load(Path::new(&args[1]))?;
+            println!(
+                "数据包校验通过：{} 条编码，{} 条单字拼音，{} 条学习资料。",
+                package.data.entries.len(),
+                package.data.pinyin.len(),
+                package.data.details.len()
+            );
         }
-        #[cfg(windows)]
-        (Some("probe-engine-pipe"), 7) => {
-            // SAFETY: 同上；子模式在创建事件/进程所有者之前由 Bootstrap 校验并接管句柄。
-            unsafe {
-                tigerrime_app::pipe_engine::run(
-                    &root,
-                    std::path::Path::new(&args[1]),
-                    args[2].to_str().ok_or("管道标签格式不符")?,
-                    args[3].to_str().ok_or("代次格式不符")?.parse()?,
-                    tigerrime_app::pipe_engine::Fault::parse(
-                        args[4].to_str().ok_or("故障模式格式不符")?,
-                    )?,
-                    args[5].to_str().ok_or("父进程句柄格式不符")?.parse()?,
-                    args[6].to_str().ok_or("事件句柄格式不符")?.parse()?,
-                )?;
+        (Some("lookup" | "demo-input"), 3) => {
+            let package = import::load(Path::new(&args[1]))?;
+            let dictionary = Dictionary::new(package.data)?;
+            let query = args[2].to_str().ok_or("查询不是有效 Unicode")?;
+            if args[0] == "lookup" {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&dictionary.lookup(query, 0)?)?
+                );
+            } else {
+                let mut session = Session::new(&dictionary, Options::default());
+                for c in query.chars() {
+                    let outcome = session.process(if c == ' ' {
+                        Key::Space
+                    } else {
+                        Key::Character(c)
+                    })?;
+                    println!("{}", serde_json::to_string(&outcome)?);
+                }
             }
         }
         _ => return Err("无效参数；请运行 --help".into()),
     }
     Ok(())
 }
-
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,

@@ -181,9 +181,8 @@ dependencies = [
 name = "tigerrime-engine"
 version = "0.1.0"
 dependencies = [
- "sha2",
+ "serde",
  "tigerrime-contracts",
- "windows-sys",
 ]
 
 [[package]]

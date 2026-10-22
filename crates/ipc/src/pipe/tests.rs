@@ -43,10 +43,91 @@ fn request() -> Request {
             session_id: 1,
         },
         command: Command::Key {
-            keycode: 32,
-            modifiers: 0,
+            key: tigerrime_contracts::Key::Space,
         },
     }
+}
+
+// 新的空闲读没有请求期限，测试异常也必须取消，避免 scope 在 panic 时等待永不结束的读。
+struct CancelOnDrop(Cancellation);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+#[test]
+fn idle_receive_does_not_spend_frame_budget_before_first_bytes() -> Result<()> {
+    let runtime = Runtime::new()?;
+    let (mut client, mut server) = pair(&runtime)?;
+    std::thread::scope(|scope| -> Result<()> {
+        let _cancel = CancelOnDrop(server.cancellation());
+        let (done, observed) = mpsc::sync_channel(1);
+        let worker = scope.spawn(move || {
+            let result = server.receive_frame_idle(Duration::from_millis(30));
+            let _ = done.send(());
+            result
+        });
+        assert!(matches!(
+            observed.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        client.send_frame(&crate::encode(&Message::Request(request()))?, deadline())?;
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (frame, _) = worker.join().unwrap()?;
+        assert_eq!(decode(&frame)?, Message::Request(request()));
+        Ok(())
+    })
+}
+
+#[test]
+fn idle_receive_cancels_before_or_during_wait_and_observes_eof() -> Result<()> {
+    let runtime = Runtime::new()?;
+    for before in [true, false] {
+        let (_client, mut server) = pair(&runtime)?;
+        std::thread::scope(|scope| {
+            let cancel = CancelOnDrop(server.cancellation());
+            if before {
+                cancel.0.cancel();
+            }
+            let worker = scope.spawn(move || server.receive_frame_idle(Duration::from_secs(1)));
+            drop(cancel);
+            assert!(matches!(
+                worker.join().unwrap(),
+                Err(Error::Closed | Error::Cancelled)
+            ));
+        });
+    }
+    let (client, mut server) = pair(&runtime)?;
+    drop(client);
+    assert!(matches!(
+        server.receive_frame_idle(Duration::from_secs(1)),
+        Err(Error::Io(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn idle_receive_partial_frame_has_one_deadline_and_invalid_budgets_are_rejected() -> Result<()> {
+    let runtime = Runtime::new()?;
+    let (mut client, mut server) = pair(&runtime)?;
+    for budget in [Duration::ZERO, Duration::from_secs(6)] {
+        assert!(matches!(
+            server.receive_frame_idle(budget),
+            Err(Error::Invalid(_))
+        ));
+    }
+    let frame = crate::encode(&Message::Request(request()))?;
+    client.operate(Kind::Write, frame[..5].to_vec(), deadline())?;
+    assert!(matches!(
+        server.receive_frame_idle(Duration::from_millis(30)),
+        Err(Error::TimedOut)
+    ));
+    assert!(matches!(
+        server.receive_frame_idle(Duration::from_secs(1)),
+        Err(Error::Closed)
+    ));
+    Ok(())
 }
 
 #[test]

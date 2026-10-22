@@ -1,6 +1,0 @@
-{
-  "id": "calculator-evaluation-guard-v1",
-  "path": "lua/calculator_translator.lua",
-  "source_sha256": "34632691063927b61b34d29e81122de6e2c7edfe983803bdfc8f69b9b45181ec",
-  "patched_sha256": "5a00734be83120ef5d5be8034ab7f8b6f0eea5e17e3ef65558a2135727230467"
-}

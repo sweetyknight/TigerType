@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use windows_sys::Win32::{
     Foundation::{ERROR_IO_PENDING, ERROR_PIPE_CONNECTED},
@@ -178,10 +178,24 @@ impl Pipe {
         buffer: Vec<u8>,
         deadline: Instant,
     ) -> Result<(Vec<u8>, usize)> {
+        self.operate_until(kind, buffer, Some(deadline))
+    }
+
+    /// 仅服务端等首字节可空闲；保留同一个 OVERLAPPED，不超时撤销再重读而丢失竞态数据。
+    pub(super) fn idle_read(&mut self, size: usize) -> Result<(Vec<u8>, usize)> {
+        self.operate_until(Kind::Read, vec![0; size], None)
+    }
+
+    fn operate_until(
+        &mut self,
+        kind: Kind,
+        buffer: Vec<u8>,
+        deadline: Option<Instant>,
+    ) -> Result<(Vec<u8>, usize)> {
         if self.io.closed.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
-        remaining(deadline)?;
+        check_deadline(deadline)?;
         let (sender, receiver) = mpsc::sync_channel(1);
         let operation = Arc::new(Operation {
             overlapped: UnsafeCell::new(OVERLAPPED::default()),
@@ -230,7 +244,7 @@ impl Pipe {
                     return Err(error.into());
                 }
                 // 客户端先于 ConnectNamedPipe 连上时没有完成包，按已连接处理。
-                remaining(deadline)?;
+                check_deadline(deadline)?;
                 if self.io.closed.load(Ordering::Acquire) {
                     return Err(Error::Cancelled);
                 }
@@ -241,19 +255,24 @@ impl Pipe {
         if self.io.closed.load(Ordering::Acquire) {
             self.io.cancel();
         }
-        let result = remaining(deadline).and_then(|budget| {
-            receiver
-                .recv_timeout(budget)
-                .map_err(|error| match error {
-                    mpsc::RecvTimeoutError::Timeout => Error::TimedOut,
-                    mpsc::RecvTimeoutError::Disconnected => {
-                        Error::Invalid("管道完成回调未返回结果")
-                    }
-                })?
-                .map_err(Error::Io)
-        });
+        let result = loop {
+            let budget = match deadline.map(remaining).transpose() {
+                Ok(budget) => budget.unwrap_or(Duration::from_secs(60)),
+                Err(error) => break Err(error),
+            };
+            match receiver.recv_timeout(budget) {
+                Ok(result) => break result.map_err(Error::Io),
+                // 空闲等待可被 CancelIoEx/断连唤醒；有限等待到期不重新提交 I/O 或分配缓冲区。
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if deadline.is_none() && !self.io.closed.load(Ordering::Acquire) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => break Err(Error::TimedOut),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err(Error::Invalid("管道完成回调未返回结果"));
+                }
+            }
+        };
         let result = result.and_then(|count| {
-            remaining(deadline)?;
+            check_deadline(deadline)?;
             Ok(count)
         });
         let count = match result {
@@ -275,4 +294,8 @@ impl Pipe {
         }
         Ok((buffer, count))
     }
+}
+
+fn check_deadline(deadline: Option<Instant>) -> Result<()> {
+    deadline.map(remaining).transpose().map(|_| ())
 }

@@ -1,137 +1,26 @@
-//! 锁定资源的校验、下载和副本管理；不会自动探测个人词典路径。
-
-use crate::{Result, process};
+//! 有界资源读取、hash 与安全新目录，离线导入不包含下载或脚本执行。
+use crate::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::{
-    collections::BTreeSet,
     fs, io,
     path::{Component, Path, PathBuf},
-    process::Command,
     sync::Mutex,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Entry {
-    #[serde(alias = "name")]
     pub path: String,
     pub size: u64,
     pub sha256: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
 }
-
 #[derive(Deserialize)]
 pub struct Group {
     pub files: Vec<Entry>,
 }
-#[derive(Deserialize)]
-pub struct Librime {
-    pub artifacts: Vec<Entry>,
-}
-#[derive(Deserialize)]
-pub struct Lock {
-    pub librime: Librime,
-    pub prelude: Group,
-    pub essay: Group,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimePatch {
-    pub id: String,
-    pub path: String,
-    pub source_sha256: String,
-    pub patched_sha256: String,
-}
-
-const CALCULATOR_PATH: &str = "lua/calculator_translator.lua";
-const CALCULATOR_BEFORE: &str = concat!(
-    "  -- return語句保證了只有合法的Lua表達式才可執行\n",
-    "  local result = load(\"return \"..expe)()\n",
-    "  if result == nil then return end\n",
-    "  \n",
-    "  result = serialize(result)\n",
-    "  yield(Candidate(\"number\", seg.start, seg._end, exp..\"=\"..result, \"\"))\n",
-);
-const CALCULATOR_AFTER: &str = include_str!("../../../resources/patches/calculator-evaluation.lua");
-
-fn calculator_patch() -> Result<RuntimePatch> {
-    let patch: RuntimePatch =
-        serde_json::from_str(include_str!("../../../resources/patches/calculator.json"))?;
-    if patch.path != CALCULATOR_PATH {
-        return Err("计算器补丁目标不符".into());
-    }
-    Ok(patch)
-}
-
-fn rewrite_calculator(source: &str) -> Result<String> {
-    // 只替换一个锁定区段，保留原文件的 CRLF/LF 以及其余资源内容。
-    let newline = if source.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
-    let before = CALCULATOR_BEFORE.replace('\n', newline);
-    let after = CALCULATOR_AFTER
-        .replace("\r\n", "\n")
-        .replace('\n', newline);
-    if source.matches(&before).count() != 1 {
-        return Err("计算器补丁原区段缺失或重复".into());
-    }
-    Ok(source.replacen(&before, &after, 1))
-}
-
-/// 仅用于未启用的空运行目录；vendor 快照和源文件始终保持原样。
-/// 本补丁只隔离计算器异常，表达式权限与计算预算仍需在生产开放前单独限制。
-pub(crate) fn stage_tiger(root: &Path, target: &Path) -> Result<RuntimePatch> {
-    reject_links(target)?;
-    if fs::read_dir(target)?.next().is_some() {
-        return Err("运行资源只能写入空暂存目录".into());
-    }
-    let mut tiger: Group = read_json(&root.join("resources/tiger.lock.json"))?;
-    let patch = calculator_patch()?;
-    let original = tiger
-        .files
-        .iter()
-        .find(|entry| entry.path == CALCULATOR_PATH)
-        .ok_or("缺少原计算器清单")?;
-    if original.sha256 != patch.source_sha256 {
-        return Err("补丁与原资源锁不匹配".into());
-    }
-    tiger.files.retain(|entry| !entry.path.starts_with("01 "));
-    copy_entries(&root.join("vendor/tiger"), target, &tiger.files)?;
-    let path = target.join(CALCULATOR_PATH);
-    let source = fs::read(&path)?;
-    if format!("{:x}", Sha256::digest(&source)) != patch.source_sha256 {
-        return Err("计算器补丁输入校验失败".into());
-    }
-    let patched = rewrite_calculator(std::str::from_utf8(&source)?)?;
-    if format!("{:x}", Sha256::digest(patched.as_bytes())) != patch.patched_sha256 {
-        return Err("计算器补丁输出校验失败".into());
-    }
-    // 此目录尚未发布工作区标记；写入失败不会启用半成品，更不会覆盖现用配置。
-    fs::write(path, patched)?;
-    verify_runtime_tiger(target)?;
-    Ok(patch)
-}
-
-pub(crate) fn verify_runtime_tiger(target: &Path) -> Result<()> {
-    let path = target.join(CALCULATOR_PATH);
-    reject_links(&path)?;
-    if sha256(&path)? != calculator_patch()?.patched_sha256 {
-        return Err("计算器补丁版本不符，请重新创建运行目录".into());
-    }
-    Ok(())
-}
-
-pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
-}
-
 pub fn relative(name: &str) -> Result<PathBuf> {
     let normalized = name.replace('\\', "/");
     let path = Path::new(&normalized);
@@ -168,57 +57,18 @@ pub fn reject_links(path: &Path) -> Result<()> {
 
 pub fn sha256(path: &Path) -> Result<String> {
     let mut hash = Sha256::new();
-    io::copy(&mut fs::File::open(path)?, &mut hash)?;
+    hash.update(crate::data::read_file(path, 128 * 1024 * 1024)?);
     Ok(format!("{:x}", hash.finalize()))
 }
 
-pub fn verify_entry(root: &Path, entry: &Entry) -> Result<()> {
-    let path = root.join(relative(&entry.path)?);
-    reject_links(&path)?;
-    let metadata = fs::metadata(&path)?;
-    if !metadata.is_file() || metadata.len() != entry.size || sha256(&path)? != entry.sha256 {
-        return Err(format!("资源校验失败: {}", path.display()).into());
-    }
-    Ok(())
-}
-
-fn file_names(root: &Path, directory: &Path, names: &mut BTreeSet<String>) -> Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let path = entry?.path();
-        reject_links(&path)?;
-        if path.is_dir() {
-            file_names(root, &path, names)?;
-        } else {
-            names.insert(
-                path.strip_prefix(root)?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            );
-        }
-    }
-    Ok(())
-}
-
-pub fn verify_files(root: &Path, entries: &[Entry], exact: bool) -> Result<()> {
-    let mut unique = BTreeSet::new();
-    for entry in entries {
-        if !unique.insert(entry.path.to_lowercase()) {
-            return Err("清单包含重复路径".into());
-        }
-        verify_entry(root, entry)?;
-    }
-    if exact {
-        // 额外文件仅枚举名称，不读取可能混入的个人数据内容。
-        let mut names = BTreeSet::new();
-        file_names(root, root, &mut names)?;
-        if names != entries.iter().map(|e| e.path.clone()).collect() {
-            return Err("目录含清单外文件".into());
-        }
-    }
-    Ok(())
-}
-
 pub fn new_directory(parent: &Path, prefix: &str) -> Result<PathBuf> {
+    if prefix.is_empty()
+        || !prefix
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err("目录前缀必须为字母、数字或连字符".into());
+    }
     // 系统时钟并不保证每次读取都不同；只保护名称生成，不持锁执行文件 I/O。
     static LAST_NONCE: Mutex<u128> = Mutex::new(0);
     reject_links(parent)?;
@@ -243,202 +93,10 @@ fn directory_nonce(clock: u128, previous: &Mutex<u128>) -> Result<u128> {
     Ok(next)
 }
 
-pub fn copy_entries(source: &Path, target: &Path, entries: &[Entry]) -> Result<()> {
-    for entry in entries {
-        verify_entry(source, entry)?;
-        let path = target.join(relative(&entry.path)?);
-        reject_links(&path)?;
-        fs::create_dir_all(path.parent().ok_or("缺少父目录")?)?;
-        // create_new 防止覆盖已修改文件；复制后复验以发现源文件在复制时发生变化。
-        let mut output = fs::File::options()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        io::copy(&mut fs::File::open(source.join(&entry.path))?, &mut output)?;
-        drop(output);
-        verify_entry(target, entry)?;
-    }
-    Ok(())
-}
-
-pub fn import_tiger(source: &Path, target: &Path, entries: &[Entry]) -> Result<()> {
-    reject_links(target)?;
-    verify_files(source, entries, false)?;
-    if target.exists() {
-        return verify_files(target, entries, true);
-    }
-    let staging = new_directory(target.parent().ok_or("缺少目标父目录")?, "tiger-staging")?;
-    copy_entries(source, &staging, entries)?;
-    verify_files(&staging, entries, true)?;
-    // 失败保留隔离暂存目录供诊断，不删除或覆盖旧副本。
-    fs::rename(staging, target)?;
-    Ok(())
-}
-
-fn download(entry: &Entry, cache: &Path) -> Result<PathBuf> {
-    let path = cache.join(relative(&entry.path)?);
-    reject_links(&path)?;
-    if path.exists() {
-        verify_entry(cache, entry)?;
-        return Ok(path);
-    }
-    let url = entry.url.as_deref().ok_or("缺少官方下载地址")?;
-    if !url.starts_with("https://github.com/rime/")
-        && !url.starts_with("https://raw.githubusercontent.com/rime/")
-    {
-        return Err("仅允许锁定的官方 Rime HTTPS 地址".into());
-    }
-    let staging = new_directory(cache, "download")?;
-    let partial = staging.join(relative(&entry.path)?);
-    fs::create_dir_all(partial.parent().ok_or("缺少父目录")?)?;
-    // 使用系统目录中的 curl，避免 Windows 优先执行当前目录的同名程序。
-    let system_root = PathBuf::from(std::env::var_os("SystemRoot").ok_or("缺少 SystemRoot")?);
-    if !system_root.is_absolute() {
-        return Err("SystemRoot 必须是绝对路径".into());
-    }
-    let status = process::run(
-        Command::new(system_root.join("System32/curl.exe"))
-            .args([
-                "--fail",
-                "--location",
-                "--silent",
-                "--show-error",
-                "--proto",
-                "=https",
-                "--proto-redir",
-                "=https",
-                "--connect-timeout",
-                "15",
-                "--max-time",
-                "180",
-                "--max-filesize",
-                &entry.size.to_string(),
-                "--output",
-            ])
-            .arg(&partial)
-            .arg(url),
-        Duration::from_secs(190),
-    )?;
-    if !status.success() {
-        return Err(format!("curl 下载失败: {status}").into());
-    }
-    verify_entry(&staging, entry)?;
-    fs::create_dir_all(path.parent().ok_or("缺少父目录")?)?;
-    fs::rename(partial, &path)?;
-    Ok(path)
-}
-
-fn extract(archive: &Path, target: &Path) -> Result<()> {
-    let seven_zip = Path::new(r"C:\Program Files\7-Zip\7z.exe");
-    let listing_path = target.with_extension("archive-list.txt");
-    // 输出写入自己的临时文件，避免等待子进程时 stdout 管道塞满造成死锁。
-    let listing = fs::File::options()
-        .write(true)
-        .create_new(true)
-        .open(&listing_path)?;
-    let status = process::run(
-        Command::new(seven_zip)
-            .args(["l", "-slt", "-ba", "-sccUTF-8"])
-            .arg(archive)
-            .stdout(listing),
-        Duration::from_secs(60),
-    )?;
-    if !status.success() {
-        return Err("7-Zip 无法读取已校验发行包".into());
-    }
-    validate_archive_listing(&fs::read_to_string(&listing_path)?)?;
-    fs::remove_file(listing_path)?;
-    let status = process::run(
-        Command::new(seven_zip)
-            .args(["x", "-y"])
-            .arg(format!("-o{}", target.display()))
-            .arg(archive),
-        Duration::from_secs(120),
-    )?;
-    if !status.success() {
-        return Err("7-Zip 解压失败".into());
-    }
-    Ok(())
-}
-
-fn validate_archive_listing(listing: &str) -> Result<()> {
-    for line in listing.lines() {
-        if let Some(name) = line.strip_prefix("Path = ") {
-            relative(name)?;
-        }
-        if line.starts_with("Symbolic Link =") || line.starts_with("Hard Link =") {
-            return Err("发行包不允许链接".into());
-        }
-    }
-    Ok(())
-}
-
-pub fn verify(root: &Path) -> Result<()> {
-    let tiger: Group = read_json(&root.join("resources/tiger.lock.json"))?;
-    let lock: Lock = read_json(&root.join("dependencies.lock.json"))?;
-    verify_files(&root.join("vendor/tiger"), &tiger.files, true)?;
-    for (name, group) in [("prelude", lock.prelude), ("essay", lock.essay)] {
-        verify_files(&root.join("vendor").join(name), &group.files, true)?;
-    }
-    let files: Vec<Entry> = read_json(&root.join("vendor/librime/files.json"))?;
-    verify_files(&root.join("vendor/librime"), &files, false)?;
-    if sha256(&root.join("vendor/librime/dist/lib/rime.dll"))? != tigerrime_engine::DLL_SHA256 {
-        return Err("DLL 与编译锁不符".into());
-    }
-    Ok(())
-}
-
-pub fn prepare(root: &Path, tiger_source: &Path) -> Result<()> {
-    let tiger: Group = read_json(&root.join("resources/tiger.lock.json"))?;
-    let lock: Lock = read_json(&root.join("dependencies.lock.json"))?;
-    import_tiger(tiger_source, &root.join("vendor/tiger"), &tiger.files)?;
-    let mut archives = Vec::new();
-    for entry in &lock.librime.artifacts {
-        archives.push(download(entry, &root.join(".cache/downloads"))?);
-    }
-    if archives.len() != 2 {
-        return Err("引擎锁必须包含主包和依赖包".into());
-    }
-    let target = root.join("vendor/librime");
-    reject_links(&target)?;
-    if !target.exists() {
-        let staging = new_directory(&root.join("vendor"), "librime-staging")?;
-        extract(&archives[0], &staging)?;
-        extract(&archives[1], &staging.join("deps"))?;
-        let mut names = BTreeSet::new();
-        file_names(&staging, &staging, &mut names)?;
-        let files: Vec<Entry> = names
-            .into_iter()
-            .map(|name| {
-                let path = staging.join(&name);
-                Ok(Entry {
-                    size: fs::metadata(&path)?.len(),
-                    sha256: sha256(&path)?,
-                    path: name,
-                    url: None,
-                })
-            })
-            .collect::<Result<_>>()?;
-        fs::write(
-            staging.join("files.json"),
-            serde_json::to_vec_pretty(&files)?,
-        )?;
-        fs::rename(staging, target)?;
-    }
-    for (name, group) in [("prelude", lock.prelude), ("essay", lock.essay)] {
-        let cache = root.join(".cache/downloads").join(name);
-        for entry in &group.files {
-            download(entry, &cache)?;
-        }
-        let target = root.join("vendor").join(name);
-        import_tiger(&cache, &target, &group.files)?;
-    }
-    verify(root)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn directory_nonces_are_unique_with_frozen_or_rewound_clock() {
@@ -465,152 +123,11 @@ mod tests {
         assert!(directory_nonce(1, &Mutex::new(u128::MAX)).is_err());
     }
 
-    fn fixture() -> (PathBuf, Vec<Entry>) {
-        let root = new_directory(&std::env::temp_dir(), "tigerrime-resources").unwrap();
-        fs::write(root.join("schema.yaml"), b"test").unwrap();
-        let entry = Entry {
-            path: "schema.yaml".into(),
-            size: 4,
-            sha256: sha256(&root.join("schema.yaml")).unwrap(),
-            url: None,
-        };
-        (root, vec![entry])
-    }
-
     #[test]
-    fn rejects_escape_and_alternate_data_streams() {
+    fn rejects_escape_alternate_data_streams_and_bad_prefixes() {
         for name in ["", ".", "..", "../a", r"a\..\b", "/a", "C:/a", "a:stream"] {
             assert!(relative(name).is_err(), "{name}");
         }
-    }
-
-    #[test]
-    fn import_is_exact_idempotent_and_excludes_user_data() {
-        let (root, entries) = fixture();
-        fs::write(root.join("personal.userdb.txt"), "不能导入").unwrap();
-        let target = root.join("copy");
-        import_tiger(&root, &target, &entries).unwrap();
-        import_tiger(&root, &target, &entries).unwrap();
-        assert!(!target.join("personal.userdb.txt").exists());
-        assert_eq!(fs::read(target.join("schema.yaml")).unwrap(), b"test");
-    }
-
-    #[test]
-    fn modified_source_is_not_published_and_modified_copy_is_not_overwritten() {
-        let (root, entries) = fixture();
-        let target = root.join("copy");
-        import_tiger(&root, &target, &entries).unwrap();
-        fs::write(target.join("schema.yaml"), "manual").unwrap();
-        assert!(import_tiger(&root, &target, &entries).is_err());
-        assert_eq!(fs::read(target.join("schema.yaml")).unwrap(), b"manual");
-        fs::write(root.join("schema.yaml"), "evil").unwrap();
-        let new_target = root.join("other");
-        assert!(import_tiger(&root, &new_target, &entries).is_err());
-        assert!(!new_target.exists());
-    }
-
-    #[test]
-    fn extra_files_and_duplicate_entries_are_rejected() {
-        let (root, entries) = fixture();
-        fs::write(root.join("extra.txt"), "extra").unwrap();
-        assert!(verify_files(&root, &entries, true).is_err());
-        let duplicated: Vec<Entry> =
-            serde_json::from_value(serde_json::json!([entries[0], entries[0]])).unwrap();
-        assert!(verify_files(&root, &duplicated, false).is_err());
-    }
-
-    #[test]
-    fn corrupted_cache_is_never_replaced_by_a_download() {
-        let (root, entries) = fixture();
-        fs::write(root.join("schema.yaml"), "evil").unwrap();
-        assert!(download(&entries[0], &root).is_err());
-        assert_eq!(fs::read(root.join("schema.yaml")).unwrap(), b"evil");
-    }
-
-    #[test]
-    fn rejects_archive_escape_and_links_before_extraction() {
-        for listing in [
-            "Path = ../outside.txt",
-            "Path = a\nSymbolic Link = outside",
-            "Path = a\nHard Link = outside",
-        ] {
-            assert!(validate_archive_listing(listing).is_err());
-        }
-        assert!(validate_archive_listing("Path = dist/include/rime_api.h").is_ok());
-    }
-
-    #[test]
-    fn unsafe_download_origin_is_rejected_without_starting_curl() {
-        let (root, _) = fixture();
-        let entry = Entry {
-            path: "missing.txt".into(),
-            size: 1,
-            sha256: String::new(),
-            url: Some("http://example.com/file".into()),
-        };
-        assert!(download(&entry, &root).is_err());
-        assert!(!root.join("missing.txt").exists());
-    }
-
-    #[test]
-    fn compiled_dll_pin_matches_dependency_lock() {
-        let lock: serde_json::Value =
-            serde_json::from_str(include_str!("../../../dependencies.lock.json")).unwrap();
-        assert_eq!(
-            lock["librime"]["runtime"]["dll_sha256"],
-            tigerrime_engine::DLL_SHA256
-        );
-    }
-
-    #[test]
-    fn calculator_patch_preserves_surroundings_and_line_endings() {
-        for newline in ["\n", "\r\n"] {
-            let source = format!(
-                "prefix{newline}{}suffix{newline}",
-                CALCULATOR_BEFORE.replace('\n', newline)
-            );
-            let expected = format!(
-                "prefix{newline}{}suffix{newline}",
-                CALCULATOR_AFTER
-                    .replace("\r\n", "\n")
-                    .replace('\n', newline)
-            );
-            assert_eq!(rewrite_calculator(&source).unwrap(), expected);
-        }
-    }
-
-    #[test]
-    fn calculator_patch_rejects_changed_or_duplicate_input() {
-        assert!(rewrite_calculator("different source").is_err());
-        assert!(rewrite_calculator(&CALCULATOR_BEFORE.repeat(2)).is_err());
-    }
-
-    #[test]
-    fn runtime_staging_will_not_overwrite_existing_data() {
-        let (root, _) = fixture();
-        assert!(stage_tiger(&root, &root).is_err());
-        assert_eq!(fs::read(root.join("schema.yaml")).unwrap(), b"test");
-    }
-
-    #[test]
-    fn patch_source_pin_matches_tiger_lock() {
-        let tiger: Group =
-            serde_json::from_str(include_str!("../../../resources/tiger.lock.json")).unwrap();
-        let original = tiger
-            .files
-            .iter()
-            .find(|entry| entry.path == CALCULATOR_PATH)
-            .unwrap();
-        assert_eq!(calculator_patch().unwrap().source_sha256, original.sha256);
-    }
-
-    #[test]
-    fn altered_runtime_calculator_is_rejected_without_rewriting_it() {
-        let (root, _) = fixture();
-        fs::create_dir(root.join("lua")).unwrap();
-        let path = root.join(CALCULATOR_PATH);
-        fs::write(&path, "manual edit").unwrap();
-        assert!(verify_runtime_tiger(&root).is_err());
-        assert_eq!(fs::read(path).unwrap(), b"manual edit");
+        assert!(new_directory(&std::env::temp_dir(), "../outside").is_err());
     }
 }

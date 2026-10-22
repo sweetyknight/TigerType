@@ -1,11 +1,9 @@
-//! 组装资源工具、引擎会话调度与诊断；尚不提供安装、TSF 或后台常驻模式。
+//! 纯 Rust 核心与安全数据工具的应用组装；不初始化或加载旧引擎。
 
+#[cfg(windows)]
+pub mod data;
 pub mod dispatch;
-#[cfg(windows)]
-pub mod job;
-#[cfg(windows)]
-pub mod pipe_engine;
-pub mod probe;
+pub mod import;
 pub mod process;
 pub mod resources;
 

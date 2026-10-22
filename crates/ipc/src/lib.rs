@@ -1,5 +1,5 @@
 //! 有界协议与在途状态；Windows 管道边界提供认证、限时等待和异步取消。
-//! 管理进程、监督与 TSF 尚未接入，不代表产品端到端预算已经达标。
+//! 传输保留认证和取消语义；尚无 TSF 端到端预算结论。
 
 mod client;
 mod frame;
@@ -14,7 +14,7 @@ use std::{
     io::{self, Write},
 };
 use tigerrime_contracts::{
-    InputState, MAX_CANDIDATES, MAX_TEXT_BYTES,
+    InputState, Key, MAX_CANDIDATES, MAX_LEARNING_ITEMS, MAX_TEXT_BYTES, PAGE_SIZE,
     protocol::{Command, Message, Reply, Request, Response, Route, VERSION},
 };
 
@@ -142,6 +142,8 @@ pub fn decode_response(frame: &[u8], expected: &Request) -> Result<Response> {
         (&expected.command, &response.reply),
         (Command::Open { .. }, Reply::Opened(_))
             | (Command::Key { .. }, Reply::Key(_))
+            | (Command::Select { .. }, Reply::Key(_))
+            | (Command::Configure { .. }, Reply::Configured(_))
             | (Command::Clear, Reply::Cleared(_))
             | (Command::Close, Reply::Closed)
             | (_, Reply::Rejected(_))
@@ -187,12 +189,26 @@ fn state(state: &InputState) -> Result<()> {
     {
         return Err(Error::Invalid("协议候选页或高亮位置不符"));
     }
-    for value in [&state.commit_preview, &state.schema_id, &state.schema_name] {
+    for value in [&state.commit_preview, &state.notice] {
         text(value)?;
     }
     for candidate in &state.candidates {
         for value in [&candidate.text, &candidate.comment, &candidate.label] {
             text(value)?;
+        }
+        if let Some(info) = &candidate.learning {
+            // 学习字段同样是跨进程输入，不能只限制候选文字而放任嵌套集合增长。
+            for items in [&info.codes, &info.full_codes, &info.readings] {
+                if items.len() > MAX_LEARNING_ITEMS {
+                    return Err(Error::Invalid("学习资料条目超限"));
+                }
+                for item in items {
+                    text(item)?;
+                }
+            }
+            if let Some(decomposition) = &info.decomposition {
+                text(decomposition)?;
+            }
         }
     }
     Ok(())
@@ -202,22 +218,26 @@ fn validate(message: &Message) -> Result<()> {
     match message {
         Message::Request(request) => {
             route(&request.route)?;
-            if let Command::Open { schema } = &request.command
-                && (schema.is_empty()
-                    || schema.len() > 64
-                    || !schema
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)))
-            {
-                return Err(Error::Invalid(
-                    "方案标识必须为有界的字母、数字、下划线或连字符",
-                ));
+            match request.command {
+                Command::Key {
+                    key: Key::Character(c),
+                } if c.is_control() => {
+                    return Err(Error::Invalid("控制键必须使用逻辑按键而非字符"));
+                }
+                Command::Select { revision, index }
+                    if revision == 0 || index as usize >= PAGE_SIZE =>
+                {
+                    return Err(Error::Invalid("候选选择的快照或索引非法"));
+                }
+                _ => {}
             }
         }
         Message::Response(response) => {
             route(&response.route)?;
             match &response.reply {
-                Reply::Opened(value) | Reply::Cleared(value) => state(value)?,
+                Reply::Opened(value) | Reply::Cleared(value) | Reply::Configured(value) => {
+                    state(value)?
+                }
                 Reply::Key(outcome) => {
                     state(&outcome.state)?;
                     if let Some(commit) = &outcome.commit {

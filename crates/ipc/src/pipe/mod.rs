@@ -250,6 +250,34 @@ impl Pipe {
         result
     }
 
+    /// 仅供常驻服务端空闲接收，不能用于输入回调；首段之后组帧/处理/发送共用返回的期限。
+    /// 空闲只保留一个可取消的读取，断连或 Cancellation 会唤醒；半帧不能无限占用连接。
+    pub fn receive_frame_idle(&mut self, frame_budget: Duration) -> Result<(Vec<u8>, Instant)> {
+        if frame_budget.is_zero() || frame_budget > Duration::from_secs(5) {
+            return Err(Error::Invalid("服务端组帧预算必须大于零且不超过五秒"));
+        }
+        let result = (|| {
+            let (mut bytes, mut count) = self.idle_read(CHUNK)?;
+            let deadline = Instant::now() + frame_budget;
+            let mut frame = FrameAssembler::default();
+            loop {
+                if count == 0 {
+                    return Err(std_io::Error::from(std_io::ErrorKind::UnexpectedEof).into());
+                }
+                if let Some(bytes) = frame.push(&bytes[..count])? {
+                    decode(&bytes)?;
+                    self.check_open(deadline)?;
+                    return Ok((bytes, deadline));
+                }
+                (bytes, count) = self.read(deadline)?;
+            }
+        })();
+        if result.is_err() {
+            self.io.cancel();
+        }
+        result
+    }
+
     pub fn transact(
         &mut self,
         client: &mut ClientState,

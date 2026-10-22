@@ -4,7 +4,7 @@ use crate::{Error, Result};
 use std::{
     ffi::c_void,
     io,
-    os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
+    os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     ptr,
 };
 use windows_sys::Win32::{
@@ -24,7 +24,7 @@ use windows_sys::Win32::{
             GetNamedPipeServerSessionId,
         },
         SystemServices::SE_GROUP_LOGON_ID,
-        Threading::{GetProcessId, OpenProcessToken, WaitForSingleObject},
+        Threading::{GetCurrentProcess, GetProcessId, OpenProcessToken, WaitForSingleObject},
     },
 };
 
@@ -190,7 +190,32 @@ pub struct Peer {
     identity: Identity,
 }
 
+impl AsHandle for Peer {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        self.process.as_handle()
+    }
+}
+
 impl Peer {
+    /// app 的宿主表只接受已取得可信进程句柄的同登录进程；不接受消息自报 PID。
+    pub fn require_local(&self) -> Result<()> {
+        // SAFETY: 只查询当前进程令牌，伪句柄不转移所有权。
+        let local = Identity::from_process(unsafe { GetCurrentProcess() })?;
+        if self.identity != local || !self.is_alive()? {
+            return Err(Error::Invalid("宿主不是同登录的存活进程"));
+        }
+        Ok(())
+    }
+
+    pub fn is_alive(&self) -> Result<bool> {
+        // SAFETY: 所有权句柄防止 PID 复用；一次查询而非忙轮询。
+        match unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) } {
+            WAIT_TIMEOUT => Ok(true),
+            windows_sys::Win32::Foundation::WAIT_OBJECT_0 => Ok(false),
+            _ => Err(io::Error::last_os_error().into()),
+        }
+    }
+
     /// 必须借用可信启动信息持有的进程句柄（如 Child），不能凭正文自报 PID 打开。
     /// 复制句柄而非稍后按 PID 重开，避免原进程已退出后 PID 被复用。
     pub fn from_process(process: BorrowedHandle<'_>) -> Result<Self> {

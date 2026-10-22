@@ -35,10 +35,9 @@ fn raw(body: &[u8]) -> Vec<u8> {
 
 #[test]
 fn fixed_wire_bytes_do_not_depend_on_pointer_width() {
-    let body = br#"{"type":"request","value":{"route":{"generation":18446744073709551615,"request_id":2,"session_id":3},"command":{"type":"key","value":{"keycode":117,"modifiers":0}}}}"#;
+    let body = br#"{"type":"request","value":{"route":{"generation":18446744073709551615,"request_id":2,"session_id":3},"command":{"type":"key","value":{"key":{"type":"character","value":"u"}}}}}"#;
     let expected = Message::Request(request(Command::Key {
-        keycode: 117,
-        modifiers: 0,
+        key: tigerrime_contracts::Key::Character('u'),
     }));
     assert_eq!(encode(&expected).unwrap(), raw(body));
     assert_eq!(decode(&raw(body)).unwrap(), expected);
@@ -70,10 +69,10 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
             text: "𠀀".into(),
             comment: "[U+20000]".into(),
             label: "㊀".into(),
+            ..Default::default()
         }],
         page_size: 9,
         highlighted: Some(0),
-        schema_id: "tiger".into(),
         composing: true,
         ..Default::default()
     };
@@ -84,15 +83,22 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
     };
     let messages = [
         Message::Request(request(Command::Open {
-            schema: "PY_c".into(),
+            options: Default::default(),
         })),
         Message::Request(request(Command::Key {
-            keycode: 0x01020000,
-            modifiers: 1 << 30,
+            key: tigerrime_contracts::Key::Character('𠀀'),
         })),
         Message::Request(request(Command::Clear)),
+        Message::Request(request(Command::Configure {
+            options: Default::default(),
+        })),
+        Message::Request(request(Command::Select {
+            revision: 1,
+            index: 0,
+        })),
         Message::Request(request(Command::Close)),
         reply(Reply::Opened(state.clone())),
+        reply(Reply::Configured(state.clone())),
         reply(Reply::Cleared(state)),
         reply(Reply::Key(outcome)),
         reply(Reply::Closed),
@@ -137,20 +143,19 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
         assert!(decode(&raw(body)).is_err());
     }
     let original = serde_json::to_string(&Message::Request(request(Command::Key {
-        keycode: 117,
-        modifiers: 0,
+        key: tigerrime_contracts::Key::Character('u'),
     })))
     .unwrap();
     for (from, to) in [
-        ("\"keycode\":117", "\"keycode\":2147483648"),
-        ("\"modifiers\":0", "\"modifiers\":-2147483649"),
+        ("\"value\":\"u\"", "\"value\":\"uu\""),
+        ("\"value\":\"u\"", "\"value\":12"),
         ("\"request_id\":2", "\"request_id\":2.5"),
         ("\"request_id\":2", "\"request_id\":-1"),
         ("\"request_id\":2", "\"request_id\":0"),
         ("\"session_id\":3", "\"session_id\":0"),
         ("\"generation\":18446744073709551615", "\"generation\":0"),
         ("\"request_id\":2", "\"request_id\":2,\"request_id\":3"),
-        ("\"keycode\":117", "\"keycode\":117,\"extra\":true"),
+        ("\"value\":\"u\"", "\"value\":\"u\",\"extra\":true"),
         ("\"session_id\":3", "\"session_id\":3,\"extra\":true"),
         ("\"type\":\"key\"", "\"type\":\"unknown\""),
     ] {
@@ -158,18 +163,20 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
         assert_ne!(changed, original);
         assert!(decode(&raw(changed.as_bytes())).is_err(), "{to}");
     }
-    for schema in [
-        "",
-        "../tiger",
-        "a/b",
-        "a\\b",
-        "tiger\0",
-        "虎码",
-        &"a".repeat(65),
+    for command in [
+        Command::Key {
+            key: tigerrime_contracts::Key::Character('\0'),
+        },
+        Command::Select {
+            revision: 0,
+            index: 0,
+        },
+        Command::Select {
+            revision: 1,
+            index: 9,
+        },
     ] {
-        let message = Message::Request(request(Command::Open {
-            schema: schema.into(),
-        }));
+        let message = Message::Request(request(command));
         assert!(encode(&message).is_err());
         assert!(decode(&raw(&serde_json::to_vec(&message).unwrap())).is_err());
     }
@@ -220,7 +227,7 @@ fn rejects_invalid_composition_and_candidate_boundaries() {
         ..Default::default()
     });
     rejects_state(InputState {
-        schema_name: "a".repeat(MAX_TEXT_BYTES + 1),
+        notice: "a".repeat(MAX_TEXT_BYTES + 1),
         ..Default::default()
     });
 }
@@ -258,8 +265,7 @@ fn limits_encoded_bytes_even_when_each_field_is_within_bounds() {
 #[test]
 fn only_the_expected_route_and_reply_type_can_be_delivered() {
     let request = request(Command::Key {
-        keycode: 32,
-        modifiers: 0,
+        key: tigerrime_contracts::Key::Space,
     });
     let response = Response {
         route: request.route,
