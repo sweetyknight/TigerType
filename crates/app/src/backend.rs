@@ -1,27 +1,25 @@
-//! 每登录会话一后台：固定反应器/引擎线程与 UI 线程，16 对预建管道，不按连接创建线程。
+//! 每登录会话一后台：固定反应器/引擎线程，16 个预建请求管道，不按连接创建线程。
+//! 宿主只凭 DACL 与同会话接纳，不打开宿主进程；断开由常驻读失败发现，始终保留至少一个空闲监听槽。
 use crate::{Result, data::Data, dispatch::Dispatcher, import};
 use std::{
-    os::windows::io::{AsHandle, AsRawHandle},
+    os::windows::io::AsRawHandle,
     path::Path,
-    sync::mpsc::TryRecvError,
     time::{Duration, Instant},
 };
 use tigertype_contracts::{
     Options,
-    candidate::{CandidateChoice, CandidateFrame},
     protocol::{Command, Message},
 };
 use tigertype_engine::Dictionary;
 use tigertype_ipc::{
     FrameAssembler,
-    pipe::{Listener, Pending, Pipe, Runtime},
+    pipe::{Listener, Pending, Pipe, Runtime, grant_app_container_query},
     service::HOST_SLOTS,
 };
-use tigertype_ui::{Inbox, candidate::FrameSender};
 use windows_sys::Win32::{
     Foundation::WAIT_FAILED,
     Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
-    System::Threading::{INFINITE, SetEvent, WaitForMultipleObjects},
+    System::Threading::{INFINITE, SetEvent, WaitForSingleObject},
 };
 
 #[derive(Clone, Copy)]
@@ -63,7 +61,7 @@ impl Endpoint {
     }
     fn write(&mut self, frame: Vec<u8>, deadline: Instant) -> Result<()> {
         if self.pending.is_some() {
-            return Err("宿主通知/回复队列已满".into());
+            return Err("宿主回复队列已满".into());
         }
         if Instant::now() >= deadline {
             return Err("回复已过期".into());
@@ -86,7 +84,7 @@ impl Endpoint {
         self.pending.take();
         match self.phase {
             Phase::Accept => {
-                self.pipe.authenticate_client()?;
+                self.pipe.verify_client()?;
                 self.connected = true;
                 self.phase = Phase::Idle;
                 self.deadline = Some(Instant::now() + Duration::from_secs(2));
@@ -126,24 +124,27 @@ impl Endpoint {
     }
 }
 struct Slot {
-    request: Endpoint,
-    notice: Endpoint,
-    hello: bool,
+    end: Endpoint,
     host: Option<u64>,
     stopping: bool,
+    // 最近一次收到帧的逻辑时钟，回收时选最久未用者；不读取系统时钟。
+    used: u64,
 }
 impl Slot {
     fn bind(runtime: &Runtime, namespace: &str, index: usize) -> Result<Self> {
-        // 两个名字都成功占用后才提交异步 accept，避免半对重建不断取消自身并触发忙循环。
-        let request = runtime.bind(&format!("{namespace}-request-{index}"))?;
-        let notice = runtime.bind(&format!("{namespace}-notice-{index}"))?;
         Ok(Self {
-            request: Endpoint::listen(request)?,
-            notice: Endpoint::listen(notice)?,
-            hello: false,
+            end: Endpoint::listen(runtime.bind(&format!("{namespace}-request-{index}"))?)?,
             host: None,
             stopping: false,
+            used: 0,
         })
+    }
+    /// 已握手且只剩常驻空闲读取：无半帧、无在途回复；组合与焦点另由调度器判定。
+    fn quiet(&self) -> bool {
+        self.host.is_some()
+            && !self.stopping
+            && matches!(self.end.phase, Phase::Read)
+            && self.end.deadline.is_none()
     }
     fn tick(
         &mut self,
@@ -151,56 +152,44 @@ impl Slot {
         generation: u64,
         options: Options,
         image: &Path,
+        clock: &mut u64,
     ) -> Result<()> {
-        if let Some(event) = self.request.tick()? {
-            match event {
-                Event::Connected | Event::Written => self.request.read()?,
-                Event::Frame(frame) => match tigertype_ipc::decode(&frame)? {
-                    Message::Stop if self.host.is_some() => {
-                        self.request.pipe.peer()?.verify_image(image)?;
-                        self.request.write(
-                            tigertype_ipc::encode(&Message::Stopped)?,
-                            self.request.deadline.ok_or("停机缺少期限")?,
-                        )?;
-                        self.stopping = true;
-                    }
-                    Message::Hello if self.host.is_none() && !self.hello => self.hello = true,
-                    Message::Request(mut request) => {
-                        let host = self.host.ok_or("握手前收到输入请求")?;
-                        // 输入配置来自后台启动时已校验的设置，不在输入路径读盘。
-                        if matches!(request.command, Command::Open { .. }) {
-                            request.command = Command::Open { options };
-                        }
-                        let frame = tigertype_ipc::encode(&Message::Request(request))?;
-                        let reply = dispatch.dispatch(host, &frame)?;
-                        self.request
-                            .write(reply, self.request.deadline.ok_or("请求缺少期限")?)?;
-                    }
-                    _ => return Err("宿主请求类型不符".into()),
-                },
+        let Some(event) = self.end.tick()? else {
+            return Ok(());
+        };
+        let frame = match event {
+            // 停止确认写完即结束：不再挂读取，避免对端先关闭使读取失败而丢失已确认的停止。
+            Event::Written if self.stopping => return Ok(()),
+            Event::Connected | Event::Written => return self.end.read(),
+            Event::Frame(frame) => frame,
+        };
+        *clock += 1;
+        self.used = *clock;
+        let deadline = self.end.deadline.ok_or("请求缺少期限")?;
+        let reply = match tigertype_ipc::decode(&frame)? {
+            Message::Stop if self.host.is_some() => {
+                // 停止命令仍打开调用进程核对映像；普通宿主不经过此路径，也不被打开。
+                self.end.pipe.verify_client_image(image)?;
+                self.stopping = true;
+                tigertype_ipc::encode(&Message::Stopped)?
             }
-        }
-        self.notice.tick()?;
-        if self.request.connected && self.notice.connected {
-            if !self
-                .request
-                .pipe
-                .peer()?
-                .same_process(self.notice.pipe.peer()?)?
-            {
-                return Err("请求和通知通道宿主不一致".into());
-            }
-            if self.hello && self.host.is_none() {
+            Message::Hello if self.host.is_none() => {
                 let host = dispatch.add_host()?;
                 self.host = Some(host);
-                self.notice.deadline = None;
-                self.request.write(
-                    tigertype_ipc::encode(&Message::Welcome { generation, host })?,
-                    self.request.deadline.ok_or("握手缺少期限")?,
-                )?;
+                tigertype_ipc::encode(&Message::Welcome { generation, host })?
             }
-        }
-        Ok(())
+            Message::Request(mut request) => {
+                let host = self.host.ok_or("握手前收到输入请求")?;
+                // 输入配置来自后台启动时已校验的设置，不在输入路径读盘。
+                if matches!(request.command, Command::Open { .. }) {
+                    request.command = Command::Open { options };
+                }
+                let frame = tigertype_ipc::encode(&Message::Request(request))?;
+                dispatch.dispatch(host, &frame)?
+            }
+            _ => return Err("宿主请求类型不符".into()),
+        };
+        self.end.write(reply, deadline)
     }
 }
 
@@ -213,10 +202,13 @@ pub struct Server<'a> {
     namespace: String,
     options: Options,
     image: std::path::PathBuf,
+    clock: u64,
 }
 impl<'a> Server<'a> {
     /// namespace 在正式入口固定为 backend；测试使用新建独立标签，不连接现用后台。
     pub fn new(dictionary: &'a Dictionary, namespace: &str, options: Options) -> Result<Self> {
+        // 沙箱宿主须以受限查询打开后台核对映像；只改本进程对象 DACL，退出即失效。
+        grant_app_container_query()?;
         let runtime = Runtime::new()?;
         // 所有权管道永不接收业务，也不在连接更换时释放；首实例约束就是每登录会话排他租约。
         let owner = runtime.bind(&format!("{namespace}-owner"))?;
@@ -247,6 +239,7 @@ impl<'a> Server<'a> {
             namespace: namespace.into(),
             options,
             image: std::env::current_exe()?,
+            clock: 0,
         })
     }
     fn remove(&mut self, index: usize) {
@@ -254,6 +247,8 @@ impl<'a> Server<'a> {
             if let Some(host) = slot.host {
                 self.dispatch.remove_host(host);
             }
+            // 立即断开，宿主下次发送前的非阻塞检查即可发现，不必等取消回调关闭句柄。
+            slot.end.pipe.disconnect();
             drop(slot);
             // SAFETY: 即时失败未必产生内核完成包；只额外唤醒一次以补建监听，失败重建本身不自激。
             unsafe {
@@ -261,29 +256,31 @@ impl<'a> Server<'a> {
             }
         }
     }
-    fn notify(&mut self, host: u64, message: Message) {
-        if let Some(index) = self
+    /// 最后一个空槽被占用或会话达上限时，回收最久未用、非焦点、无组合且无未读字节的宿主。
+    /// 待重建的槽位算作空槽，避免旧实例释放前重复回收。
+    fn reclaim(&mut self) {
+        let free = self
             .slots
             .iter()
-            .position(|s| s.as_ref().is_some_and(|s| s.host == Some(host)))
-        {
-            let result = tigertype_ipc::encode(&message)
-                .map_err(Into::into)
-                .and_then(|frame| {
-                    self.slots[index]
-                        .as_mut()
-                        .unwrap()
-                        .notice
-                        .write(frame, Instant::now() + Duration::from_millis(50))
-                });
-            // 通知无法交付就断开该宿主，不能让点击留在未知状态或在后来重放。
-            if result.is_err() {
-                self.remove(index);
-            }
+            .any(|slot| slot.as_ref().is_none_or(|slot| !slot.end.connected));
+        if free && !self.dispatch.full() {
+            return;
+        }
+        let victim = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let slot = slot.as_ref()?;
+                (slot.quiet() && self.dispatch.idle(slot.host?)).then_some((slot.used, index))
+            })
+            .min();
+        if let Some((_, index)) = victim {
+            self.remove(index);
         }
     }
-    pub fn run(mut self, frames: FrameSender, choices: Inbox<CandidateChoice>) -> Result<()> {
-        let result = self.serve(&frames, &choices);
+    pub fn run(mut self) -> Result<()> {
+        let result = self.serve();
         self.slots.clear();
         self.owner.take();
         self.dispatch.invalidate();
@@ -291,8 +288,7 @@ impl<'a> Server<'a> {
             .shutdown(Instant::now() + Duration::from_secs(2))?;
         result
     }
-    fn serve(&mut self, frames: &FrameSender, choices: &Inbox<CandidateChoice>) -> Result<()> {
-        let mut shown: Option<CandidateFrame> = None;
+    fn serve(&mut self) -> Result<()> {
         loop {
             // 每次事件只访问固定 16 槽；空闲等待内核事件，不遍历词表、不忙轮询。
             for index in 0..HOST_SLOTS {
@@ -303,83 +299,37 @@ impl<'a> Server<'a> {
                             self.generation,
                             self.options,
                             &self.image,
+                            &mut self.clock,
                         )
                         .is_err()
-                        || (slot.request.connected && !slot.request.pipe.peer()?.is_alive()?)
                     {
                         self.remove(index);
-                    } else if slot.stopping && matches!(slot.request.phase, Phase::Read) {
+                    } else if slot.stopping && matches!(slot.end.phase, Phase::Idle) {
                         // 停止确认写入完成后才关闭全部管道；不是用超时冒充线程退出。
                         return Ok(());
                     }
-                } else {
+                } else if let Ok(slot) = Slot::bind(&self.runtime, &self.namespace, index) {
                     // 旧取消回调可能仍持有首实例；完成事件到来后才会再次尝试重建。
-                    if let Ok(slot) = Slot::bind(&self.runtime, &self.namespace, index) {
-                        self.slots[index] = Some(slot);
-                    }
+                    self.slots[index] = Some(slot);
                 }
             }
-            match choices.try_receive() {
-                Ok(choice) => {
-                    if let Ok(host) = self.dispatch.offer_selection(choice) {
-                        self.notify(
-                            host,
-                            Message::Notification {
-                                token: choice.token,
-                                reset: false,
-                            },
-                        );
-                    } else {
-                        shown = None;
-                    }
-                }
-                Err(TryRecvError::Disconnected) => return Ok(()),
-                Err(TryRecvError::Empty) => {}
-            }
-            let current = self.dispatch.frame();
-            if current != shown {
-                if let Some(old) = &shown
-                    && current.as_ref().is_none_or(|new| {
-                        (new.token.host, new.token.session, new.token.focus)
-                            != (old.token.host, old.token.session, old.token.focus)
-                    })
-                {
-                    self.notify(
-                        old.token.host,
-                        Message::Notification {
-                            token: old.token,
-                            reset: true,
-                        },
-                    );
-                }
-                frames.send(current.clone())?;
-                shown = current;
-            }
-            let mut handles = vec![
-                self.runtime.completion_event().as_raw_handle(),
-                choices.event().as_raw_handle(),
-            ];
-            let mut deadline = None;
-            for slot in self.slots.iter().flatten() {
-                if slot.request.connected {
-                    handles.push(slot.request.pipe.peer()?.as_handle().as_raw_handle());
-                }
-                for end in [slot.request.deadline, slot.notice.deadline]
-                    .into_iter()
-                    .flatten()
-                {
-                    deadline = Some(deadline.map_or(end, |old: Instant| old.min(end)));
-                }
-            }
+            self.reclaim();
+            let deadline = self
+                .slots
+                .iter()
+                .flatten()
+                .filter_map(|slot| slot.end.deadline)
+                .min();
             let timeout = deadline.map_or(INFINITE, |end| {
                 end.saturating_duration_since(Instant::now())
                     .as_nanos()
                     .div_ceil(1_000_000)
                     .min((u32::MAX - 1) as u128) as u32
             });
-            // SAFETY: 所有句柄由此 Server/Inbox 持有；完成、用户关闭、宿主退出及有限期限共用一次等待。
-            if unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, timeout) }
-                == WAIT_FAILED
+            // SAFETY: Runtime 持有完成事件；完成与最近期限共用一次等待，不等待宿主进程句柄。
+            if unsafe {
+                WaitForSingleObject(self.runtime.completion_event().as_raw_handle(), timeout)
+            } == WAIT_FAILED
             {
                 return Err(std::io::Error::last_os_error().into());
             }
@@ -387,8 +337,10 @@ impl<'a> Server<'a> {
     }
 }
 
+/// 前台线程即固定反应器/引擎线程；不显示后台候选窗，用 stop 命令停止。
 pub fn run(package: &Path, directory: &Path) -> Result<()> {
     let dictionary = Dictionary::new(import::load(package)?.data)?;
+    // 受管目录租约在后台运行期间保持，退出后才释放。
     let data = if directory.try_exists()? {
         Data::open(directory)?
     } else {
@@ -400,18 +352,7 @@ pub fn run(package: &Path, directory: &Path) -> Result<()> {
         .map(serde_json::from_slice)
         .transpose()?
         .unwrap_or_default();
-    let (frames, inbox) = tigertype_ui::candidate::mailbox()?;
-    let (choices, received) = tigertype_ui::mailbox()?;
-    let worker = std::thread::Builder::new()
-        .name("tiger-backend".into())
-        .spawn(move || -> std::result::Result<(), String> {
-            let _data = data;
-            let work = || -> Result<()> {
-                Server::new(&dictionary, "backend", options)?.run(frames, received)
-            };
-            work().map_err(|e| e.to_string())
-        })?;
-    let result = tigertype_ui::candidate::run(inbox, choices, "停止后台");
-    worker.join().map_err(|_| "后台线程异常退出")??;
-    result.map_err(Into::into)
+    let result = Server::new(&dictionary, "backend", options)?.run();
+    drop(data);
+    result
 }

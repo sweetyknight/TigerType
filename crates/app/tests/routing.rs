@@ -1,8 +1,7 @@
-//! 多宿主序号/焦点隔离和候选回送联测；合成数据，不注册或向真实应用写字。
+//! 多宿主序号/焦点隔离与回收判定；合成数据，不注册或向真实应用写字。
 use tigertype_app::{Result, dispatch::Dispatcher};
 use tigertype_contracts::{
-    Key, Options,
-    candidate::{CandidateChoice, ScreenRect},
+    InputState, Key, Options,
     protocol::{Command, Message, Rejection, Reply, Request, Route},
 };
 use tigertype_engine::{Data, Dictionary, Entry};
@@ -36,16 +35,11 @@ fn exchange(
     let frame = tigertype_ipc::encode(&Message::Request(request.clone()))?;
     Ok(tigertype_ipc::decode_response(&dispatch.dispatch(host, &frame)?, &request)?.reply)
 }
-fn focus(epoch: u64) -> Command {
-    Command::Focus {
-        epoch,
-        caret: Some(ScreenRect {
-            left: -10,
-            top: 20,
-            right: -9,
-            bottom: 40,
-        }),
-    }
+fn focus(epoch: u64, focused: bool) -> Command {
+    Command::Focus { epoch, focused }
+}
+fn key(epoch: u64, key: Key) -> Command {
+    Command::Key { epoch, key }
 }
 fn open(dispatch: &mut Dispatcher<'_>, host: u64) -> Result<()> {
     assert!(matches!(
@@ -60,8 +54,15 @@ fn open(dispatch: &mut Dispatcher<'_>, host: u64) -> Result<()> {
         )?,
         Reply::Opened(_)
     ));
-    exchange(dispatch, host, 2, 1, focus(1))?;
+    exchange(dispatch, host, 2, 1, focus(1, true))?;
     Ok(())
+}
+fn state(reply: Reply) -> InputState {
+    match reply {
+        Reply::Key(outcome) => outcome.state,
+        Reply::Focused(state) => state,
+        other => panic!("需要状态回复：{other:?}"),
+    }
 }
 #[test]
 fn multi_host_sequences_and_sessions_are_isolated_and_focus_switch_cancels_old_composition()
@@ -71,49 +72,35 @@ fn multi_host_sequences_and_sessions_are_isolated_and_focus_switch_cancels_old_c
     let a = dispatch.add_host()?;
     let b = dispatch.add_host()?;
     open(&mut dispatch, a)?;
-    exchange(
+    let composing = state(exchange(
         &mut dispatch,
         a,
         3,
         1,
-        Command::Key {
-            epoch: 1,
-            key: Key::Character('u'),
-        },
-    )?;
-    let old = dispatch.frame().unwrap();
+        key(1, Key::Character('u')),
+    )?);
+    assert!(composing.composing);
     open(&mut dispatch, b)?;
+    assert_eq!(
+        exchange(&mut dispatch, a, 4, 1, key(1, Key::Space))?,
+        Reply::Rejected(Rejection::NotFocused)
+    );
+    // 焦点切走已清掉 A 的组合，旧快照选字不能上屏。
     assert_eq!(
         exchange(
             &mut dispatch,
             a,
-            4,
+            5,
             1,
-            Command::Key {
-                epoch: 1,
-                key: Key::Space
+            Command::Select {
+                revision: composing.revision,
+                index: 0,
+                epoch: 1
             }
         )?,
         Reply::Rejected(Rejection::NotFocused)
     );
-    assert_eq!(
-        dispatch.offer_selection(CandidateChoice {
-            token: old.token,
-            index: 0
-        }),
-        Err(Rejection::StaleSnapshot)
-    );
-    let Reply::Key(empty) = exchange(
-        &mut dispatch,
-        b,
-        3,
-        1,
-        Command::Key {
-            epoch: 1,
-            key: Key::Space,
-        },
-    )?
-    else {
+    let Reply::Key(empty) = exchange(&mut dispatch, b, 3, 1, key(1, Key::Space))? else {
         panic!("需要按键回复");
     };
     assert!(empty.commit.is_none());
@@ -121,123 +108,82 @@ fn multi_host_sequences_and_sessions_are_isolated_and_focus_switch_cancels_old_c
         exchange(&mut dispatch, b, 3, 1, Command::Clear)?,
         Reply::Rejected(Rejection::OutOfOrder)
     );
-    exchange(&mut dispatch, a, 5, 1, focus(2))?;
-    assert!(dispatch.frame().unwrap().state.composition.text.is_empty());
+    assert!(
+        state(exchange(&mut dispatch, a, 6, 1, focus(2, true))?)
+            .composition
+            .text
+            .is_empty()
+    );
     assert_eq!(
-        exchange(&mut dispatch, a, 6, 1, focus(1))?,
+        exchange(&mut dispatch, a, 7, 1, focus(1, true))?,
         Reply::Rejected(Rejection::StaleFocus)
     );
-    // 旧宿主的失焦通知不会清掉当前宿主 A 的焦点。
-    exchange(
-        &mut dispatch,
-        b,
-        4,
-        1,
-        Command::Focus {
-            epoch: 2,
-            caret: None,
-        },
-    )?;
-    assert_eq!(dispatch.frame().unwrap().token.host, a);
+    // 旧宿主迟到的失焦不会清掉当前宿主 A 的焦点。
+    exchange(&mut dispatch, b, 4, 1, focus(2, false))?;
     assert_eq!(
+        exchange(&mut dispatch, a, 8, 1, key(1, Key::Character('u')))?,
+        Reply::Rejected(Rejection::StaleFocus)
+    );
+    assert!(
+        state(exchange(
+            &mut dispatch,
+            a,
+            9,
+            1,
+            key(2, Key::Character('u'))
+        )?)
+        .composing
+    );
+    Ok(())
+}
+#[test]
+fn reclaim_queries_protect_focused_or_composing_hosts_and_track_session_capacity() -> Result<()> {
+    let dictionary = dictionary();
+    let mut dispatch = Dispatcher::new(&dictionary, 7)?;
+    let a = dispatch.add_host()?;
+    let b = dispatch.add_host()?;
+    open(&mut dispatch, a)?;
+    assert!(!dispatch.idle(a));
+    open(&mut dispatch, b)?;
+    assert!(dispatch.idle(a));
+    assert!(!dispatch.idle(b));
+    exchange(&mut dispatch, b, 3, 1, key(1, Key::Character('u')))?;
+    // 宿主自己失焦也清掉组合，之后才可回收；未知宿主永不作为回收对象。
+    assert!(!state(exchange(&mut dispatch, b, 4, 1, focus(2, false))?).composing);
+    assert!(dispatch.idle(b));
+    assert!(!dispatch.idle(99));
+    assert!(!dispatch.full());
+    for id in 2..=63 {
         exchange(
             &mut dispatch,
             a,
-            7,
-            1,
-            Command::Key {
-                epoch: 1,
-                key: Key::Character('u')
-            }
-        )?,
-        Reply::Rejected(Rejection::StaleFocus)
-    );
-    assert!(dispatch.frame().unwrap().state.composition.text.is_empty());
+            id + 1,
+            id,
+            Command::Open {
+                options: Options::default(),
+            },
+        )?;
+    }
+    assert!(dispatch.full());
+    exchange(&mut dispatch, a, 65, 2, Command::Close)?;
+    assert!(!dispatch.full());
+    dispatch.remove_host(a);
+    assert!(!dispatch.idle(a));
     Ok(())
 }
 #[test]
-fn candidate_view_click_is_delivered_to_original_host_once_and_only_on_explicit_claim() -> Result<()>
-{
+fn stale_snapshot_blur_and_disconnect_reject_selection() -> Result<()> {
     let dictionary = dictionary();
     let mut dispatch = Dispatcher::new(&dictionary, 7)?;
     let host = dispatch.add_host()?;
     open(&mut dispatch, host)?;
-    exchange(
+    let old = state(exchange(
         &mut dispatch,
         host,
         3,
         1,
-        Command::Key {
-            epoch: 1,
-            key: Key::Character('u'),
-        },
-    )?;
-    let frame = dispatch.frame().unwrap();
-    let mut view = tigertype_ui::candidate::View::default();
-    let serial = view.update(Some(frame.clone()))?;
-    let choice = view.choose(serial, 0).unwrap();
-    assert_eq!(dispatch.offer_selection(choice), Ok(host));
-    assert_eq!(dispatch.offer_selection(choice), Err(Rejection::Busy));
-    assert_eq!(dispatch.frame().unwrap().state, frame.state); // 投递不是提交。
-    assert_eq!(
-        exchange(
-            &mut dispatch,
-            host,
-            4,
-            1,
-            Command::TakeSelection { epoch: 2 }
-        )?,
-        Reply::Rejected(Rejection::StaleFocus)
-    );
-    let Reply::Key(commit) = exchange(
-        &mut dispatch,
-        host,
-        5,
-        1,
-        Command::TakeSelection { epoch: 1 },
-    )?
-    else {
-        panic!("需要领取结果");
-    };
-    assert_eq!(commit.commit.as_deref(), Some("的"));
-    assert_eq!(
-        exchange(
-            &mut dispatch,
-            host,
-            6,
-            1,
-            Command::TakeSelection { epoch: 1 }
-        )?,
-        Reply::Rejected(Rejection::StaleSnapshot)
-    );
-    assert!(view.choose(serial, 0).is_none());
-    assert_eq!(
-        dispatch.offer_selection(choice),
-        Err(Rejection::StaleSnapshot)
-    );
-    Ok(())
-}
-#[test]
-fn changed_state_blur_and_disconnect_invalidate_pending_clicks() -> Result<()> {
-    let dictionary = dictionary();
-    let mut dispatch = Dispatcher::new(&dictionary, 7)?;
-    let host = dispatch.add_host()?;
-    open(&mut dispatch, host)?;
-    exchange(
-        &mut dispatch,
-        host,
-        3,
-        1,
-        Command::Key {
-            epoch: 1,
-            key: Key::Character('u'),
-        },
-    )?;
-    let choice = CandidateChoice {
-        token: dispatch.frame().unwrap().token,
-        index: 0,
-    };
-    dispatch.offer_selection(choice).unwrap();
+        key(1, Key::Character('u')),
+    )?);
     exchange(
         &mut dispatch,
         host,
@@ -253,33 +199,26 @@ fn changed_state_blur_and_disconnect_invalidate_pending_clicks() -> Result<()> {
             host,
             5,
             1,
-            Command::TakeSelection { epoch: 1 }
+            Command::Select {
+                revision: old.revision,
+                index: 0,
+                epoch: 1
+            }
         )?,
         Reply::Rejected(Rejection::StaleSnapshot)
     );
-    let choice = CandidateChoice {
-        token: dispatch.frame().unwrap().token,
-        index: 0,
-    };
-    dispatch.offer_selection(choice).unwrap();
-    exchange(
-        &mut dispatch,
-        host,
-        6,
-        1,
-        Command::Focus {
-            epoch: 2,
-            caret: None,
-        },
-    )?;
-    assert!(dispatch.frame().is_none());
+    exchange(&mut dispatch, host, 6, 1, focus(2, false))?;
     assert_eq!(
         exchange(
             &mut dispatch,
             host,
             7,
             1,
-            Command::TakeSelection { epoch: 1 }
+            Command::Select {
+                revision: old.revision + 1,
+                index: 0,
+                epoch: 2
+            }
         )?,
         Reply::Rejected(Rejection::NotFocused)
     );

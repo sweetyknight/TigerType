@@ -2,22 +2,25 @@
 //! 默认入口拒绝 DLL；显式驻留入口锁定模块至宿主退出，关闭排空不宣称允许热卸载。
 
 mod io;
+#[cfg(test)]
+mod sandbox_tests;
 mod security;
 #[cfg(test)]
 mod tests;
 
 pub use io::Cancellation;
 pub use io::Pending;
-pub use security::Peer;
+pub use security::grant_app_container_query;
 
 use self::{
     io::{Io, Kind},
-    security::{CLIENT_ACCESS, Identity},
+    security::{CLIENT_ACCESS, Identity, verify_peer_image},
 };
 use crate::{ClientState, Error, FrameAssembler, Result, decode};
 use std::{
     io as std_io,
     os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
+    path::Path,
     ptr,
     sync::{
         Arc,
@@ -35,11 +38,11 @@ use windows_sys::Win32::{
     },
     System::{
         Pipes::{
-            CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-            PIPE_WAIT,
+            CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe,
         },
         Threading::{
-            CloseThreadpool, CreateEventW, CreateThreadpool, GetCurrentProcess, PTP_POOL, SetEvent,
+            CloseThreadpool, CreateEventW, CreateThreadpool, PTP_POOL, SetEvent,
             SetThreadpoolThreadMaximum, WaitForSingleObject,
         },
     },
@@ -95,8 +98,7 @@ impl Runtime {
     }
 
     fn create() -> Result<Self> {
-        // SAFETY: 当前进程伪句柄只借用，不关闭。
-        let identity = Identity::from_process(unsafe { GetCurrentProcess() })?;
+        let identity = Identity::current()?;
         // SAFETY: 非继承、未命名的手动复位事件，只有最后一个关闭引用释放时才置位。
         let drained = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
         if drained.is_null() {
@@ -144,7 +146,7 @@ impl Runtime {
             })?;
         Ok(Slot(self.0.clone()))
     }
-    /// 固定反应器可把此事件与停机、UI 和宿主进程句柄放入同一次内核等待。
+    /// 固定反应器只等待此事件与最近期限，不等待宿主进程句柄，不受 64 个等待对象上限约束。
     pub fn completion_event(&self) -> BorrowedHandle<'_> {
         self.0.wake.as_handle()
     }
@@ -199,12 +201,12 @@ impl Runtime {
         let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
         Ok(Listener(Pipe {
             io: Io::new(handle, slot)?,
-            _peer: None,
         }))
     }
 
-    /// 只尝试连接已创建的本机实例；忙/不存在立即失败，不在输入路径启动进程或轮询。
-    pub fn connect(&self, label: &str, peer: Peer, deadline: Instant) -> Result<Pipe> {
+    /// 宿主发现后台：只尝试已创建的本机实例，忙/不存在立即失败，不在输入路径启动进程或轮询。
+    /// 核对管道所有者、服务端会话及显式预期映像，不读取后台令牌或发现文件。
+    pub fn connect(&self, label: &str, image: &Path, deadline: Instant) -> Result<Pipe> {
         remaining(deadline)?;
         let name = self.0.identity.name(label)?;
         let slot = self.slot()?;
@@ -225,49 +227,12 @@ impl Runtime {
         }
         // SAFETY: CreateFileW 成功的句柄由 OwnedHandle 负责所有失败路径回收。
         let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
-        peer.verify(handle.as_raw_handle(), &self.0.identity, false)?;
+        self.0
+            .identity
+            .verify_server(handle.as_raw_handle(), image)?;
         remaining(deadline)?;
         let pipe = Pipe {
             io: Io::new(handle, slot)?,
-            _peer: Some(peer),
-        };
-        pipe.check_open(deadline)?;
-        Ok(pipe)
-    }
-
-    /// 激活时发现后台：身份来自内核且映像必须匹配显式预期路径，不读取发现文件。
-    pub fn connect_image(
-        &self,
-        label: &str,
-        image: &std::path::Path,
-        deadline: Instant,
-    ) -> Result<Pipe> {
-        remaining(deadline)?;
-        let name = self.0.identity.name(label)?;
-        let slot = self.slot()?;
-        // SAFETY: 本机受限名称与 IDENTIFICATION，服务端不能获得客户端可模拟令牌。
-        let handle = unsafe {
-            CreateFileW(
-                name.as_ptr(),
-                CLIENT_ACCESS,
-                0,
-                ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
-                ptr::null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(std_io::Error::last_os_error().into());
-        }
-        // SAFETY: 成功打开的管道由 RAII 持有，认证失败也回收。
-        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
-        let peer = Peer::from_pipe(handle.as_raw_handle(), &self.0.identity, false)?;
-        peer.verify_image(image)?;
-        remaining(deadline)?;
-        let pipe = Pipe {
-            io: Io::new(handle, slot)?,
-            _peer: Some(peer),
         };
         pipe.check_open(deadline)?;
         Ok(pipe)
@@ -285,23 +250,16 @@ impl Listener {
         self.0.cancellation()
     }
 
-    pub fn accept(mut self, peer: Peer, deadline: Instant) -> Result<Pipe> {
+    pub fn accept(mut self, deadline: Instant) -> Result<Pipe> {
         self.0.operate(Kind::Connect, Vec::new(), deadline)?;
-        peer.verify(
-            self.0.io.handle.as_raw_handle(),
-            &self.0.io._slot.0.identity,
-            true,
-        )?;
+        self.0.verify_client()?;
         self.0.check_open(deadline)?;
-        self.0._peer = Some(peer);
         Ok(self.0)
     }
 }
 
 pub struct Pipe {
     io: Arc<Io>,
-    // 保持预期进程句柄存活，不把后续 PID 复用当作同一对端。
-    _peer: Option<Peer>,
 }
 impl Drop for Pipe {
     fn drop(&mut self) {
@@ -310,16 +268,44 @@ impl Drop for Pipe {
 }
 
 impl Pipe {
-    pub fn authenticate_client(&mut self) -> Result<&Peer> {
-        self._peer = Some(Peer::from_pipe(
-            self.io.handle.as_raw_handle(),
-            &self.io._slot.0.identity,
-            true,
-        )?);
-        Ok(self._peer.as_ref().unwrap())
+    /// 服务端接纳：只核对同会话；不打开宿主进程，宿主断开由常驻读失败发现。
+    pub fn verify_client(&self) -> Result<()> {
+        self.io
+            ._slot
+            .0
+            .identity
+            .verify_client(self.io.handle.as_raw_handle())
     }
-    pub fn peer(&self) -> Result<&Peer> {
-        self._peer.as_ref().ok_or(Error::Invalid("管道尚未认证"))
+    /// 仅供停止命令：受限查询打开调用进程并核对映像，普通宿主请求不走此路径。
+    pub fn verify_client_image(&self, image: &Path) -> Result<()> {
+        verify_peer_image(self.io.handle.as_raw_handle(), false, image)
+    }
+    /// 非阻塞查询可读字节数；失败表示已断开，宿主据此决定是否在同一期限内重连。
+    pub fn available(&self) -> Result<u32> {
+        let mut available = 0;
+        // SAFETY: 只查询连接状态与字节数，不读取或消费数据。
+        if unsafe {
+            PeekNamedPipe(
+                self.io.handle.as_raw_handle(),
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                &mut available,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(std_io::Error::last_os_error().into());
+        }
+        Ok(available)
+    }
+    /// 服务端立即断开对端，使被回收宿主发送前就能发现；随后释放仍由 Drop 取消在途操作。
+    pub fn disconnect(&self) {
+        self.io.cancel();
+        // SAFETY: Arc 保持句柄存活；对未连接实例失败无副作用，结果由后续 I/O 错误体现。
+        unsafe {
+            DisconnectNamedPipe(self.io.handle.as_raw_handle());
+        }
     }
     fn check_open(&self, deadline: Instant) -> Result<()> {
         if self.io.closed.load(Ordering::Acquire) {

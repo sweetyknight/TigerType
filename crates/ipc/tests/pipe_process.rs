@@ -2,10 +2,7 @@
 #![cfg(windows)]
 
 use std::{
-    os::windows::{
-        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
-        process::CommandExt,
-    },
+    os::windows::{io::AsRawHandle, process::CommandExt},
     process::{Child, Command as ProcessCommand, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
@@ -14,16 +11,10 @@ use tigertype_contracts::{
     InputState, KeyOutcome,
     protocol::{Command, Message, Reply, Request, Response, Route},
 };
-use tigertype_ipc::{
-    ClientState, Error, decode, encode,
-    pipe::{Peer, Runtime},
-};
+use tigertype_ipc::{ClientState, Error, decode, encode, pipe::Runtime};
 use windows_sys::Win32::{
     Foundation::WAIT_OBJECT_0,
-    System::Threading::{
-        CREATE_NO_WINDOW, GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_SYNCHRONIZE, WaitForSingleObject,
-    },
+    System::Threading::{CREATE_NO_WINDOW, WaitForSingleObject},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -35,7 +26,6 @@ impl Worker {
             ProcessCommand::new(std::env::current_exe()?)
                 .args(["--ignored", "--exact", "pipe_worker", "--nocapture"])
                 .env("TIGERTYPE_PIPE_TEST_LABEL", label)
-                .env("TIGERTYPE_PIPE_TEST_PARENT", std::process::id().to_string())
                 .env("TIGERTYPE_PIPE_TEST_MODE", mode)
                 .creation_flags(CREATE_NO_WINDOW)
                 .stdin(Stdio::null())
@@ -76,29 +66,6 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
 
-fn current_peer() -> Result<Peer> {
-    // SAFETY: 仅借用有效的当前进程伪句柄，Peer 会复制句柄。
-    Ok(Peer::from_process(unsafe {
-        BorrowedHandle::borrow_raw(GetCurrentProcess())
-    })?)
-}
-
-fn test_parent(id: u32) -> Result<Peer> {
-    // SAFETY: 仅供限时测试 worker 的启动参数使用；生产发现机制不能照搬 PID 环境变量。
-    let handle = unsafe {
-        OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-            0,
-            id,
-        )
-    };
-    if handle.is_null() {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    // SAFETY: 成功返回的查询句柄由 RAII 回收。
-    let process = unsafe { OwnedHandle::from_raw_handle(handle) };
-    Ok(Peer::from_process(process.as_handle())?)
-}
 fn request() -> Request {
     Request {
         route: Route {
@@ -121,10 +88,8 @@ fn authenticated_child_round_trip_uses_real_process_boundaries() -> Result<()> {
         .bind(&label)
         .map_err(|error| format!("bind: {error}"))?;
     let worker = Worker::start(&label, "echo").map_err(|error| format!("spawn: {error}"))?;
-    let peer =
-        Peer::from_process(worker.0.as_handle()).map_err(|error| format!("peer: {error}"))?;
     let mut pipe = listener
-        .accept(peer, deadline())
+        .accept(deadline())
         .map_err(|error| format!("accept: {error}"))?;
     assert_eq!(
         decode(
@@ -149,25 +114,11 @@ fn authenticated_child_round_trip_uses_real_process_boundaries() -> Result<()> {
 }
 
 #[test]
-fn same_logon_but_wrong_server_process_is_rejected() -> Result<()> {
+fn same_logon_server_with_unexpected_image_is_rejected() -> Result<()> {
     let runtime = Runtime::new()?;
     let label = label();
     let _listener = runtime.bind(&label)?;
     Worker::start(&label, "wrong-server")?.finish()
-}
-
-#[test]
-fn same_logon_but_wrong_client_process_is_rejected_before_reading() -> Result<()> {
-    let runtime = Runtime::new()?;
-    let label = label();
-    let listener = runtime.bind(&label)?;
-    let worker = Worker::start(&label, "rejected-client")?;
-    // 实际对端是子进程，故意声明为父进程，不能仅因登录 SID 相同就接受。
-    assert!(matches!(
-        listener.accept(current_peer()?, deadline()),
-        Err(Error::Invalid(_))
-    ));
-    worker.finish()
 }
 
 #[test]
@@ -177,20 +128,21 @@ fn pipe_worker() -> Result<()> {
         return Ok(());
     };
     let mode = std::env::var("TIGERTYPE_PIPE_TEST_MODE")?;
-    let parent = std::env::var("TIGERTYPE_PIPE_TEST_PARENT")?.parse()?;
+    // 父子是同一测试程序；映像来自本进程而非环境变量，错误映像用于覆盖拒绝分支。
+    let image = std::env::current_exe()?;
     let runtime = Runtime::new()?;
     if mode == "wrong-server" {
         assert!(matches!(
-            runtime.connect(&label, current_peer()?, deadline()),
+            runtime.connect(
+                &label,
+                &image.with_file_name("not-the-server.exe"),
+                deadline()
+            ),
             Err(Error::Invalid(_))
         ));
         return Ok(());
     }
-    let mut pipe = runtime.connect(&label, test_parent(parent)?, deadline())?;
-    if mode == "rejected-client" {
-        assert!(pipe.receive_frame(deadline()).is_err());
-        return Ok(());
-    }
+    let mut pipe = runtime.connect(&label, &image, deadline())?;
     assert_eq!(mode, "echo");
     let reply = pipe.transact(&mut ClientState::new(3)?, request(), deadline())?;
     assert!(

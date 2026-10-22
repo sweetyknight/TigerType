@@ -1,7 +1,7 @@
-//! v4 增加跨进程握手和独立宿主通知；旧协议直接拒绝，不保留兼容分支。
+//! v5 删除宿主通知、领取点击和焦点光标矩形；候选位置留在宿主进程，旧协议直接拒绝。
 use crate::{InputState, Key, KeyOutcome, Options};
 use serde::{Deserialize, Serialize};
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,14 +41,10 @@ pub enum Command {
     Configure {
         options: Options,
     },
-    /// 每个宿主单调递增；None 表示失焦，矩形是屏幕物理像素而非窗口句柄。
+    /// 每个宿主单调递增，只报告取得/失去；光标与候选窗位置不出宿主进程。
     Focus {
         epoch: u64,
-        caret: Option<crate::candidate::ScreenRect>,
-    },
-    /// UI 只能投递意图，必须由原宿主在再次确认焦点后领取并请求组合编辑。
-    TakeSelection {
-        epoch: u64,
+        focused: bool,
     },
     Clear,
     Close,
@@ -89,7 +85,6 @@ pub enum Rejection {
     UnknownHost,
     NotFocused,
     StaleFocus,
-    Busy,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -102,14 +97,7 @@ pub enum Message {
     Hello,
     Stop,
     Stopped,
-    Welcome {
-        generation: u64,
-        host: u64,
-    },
-    Notification {
-        token: crate::candidate::CandidateToken,
-        reset: bool,
-    },
+    Welcome { generation: u64, host: u64 },
     Request(Request),
     Response(Response),
 }

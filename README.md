@@ -61,15 +61,15 @@ cargo run --locked --offline -p tigertype-app -- lookup-window 'D:\Projects\Tige
 
 这是独立工具，不是单后台或输入法。关闭主窗口会断开请求通道并等待当前工作结束，不强行终止保存线程。正式 APPDATA、候选窗、TSF 和视觉/无障碍验收情况见项目状态；不安装、不注册、不切换现用输入法。
 
-## 候选显示与点击回送联调
+## 候选显示联调（进程内）
 
 ```powershell
 cargo run --locked --offline -p tigertype-app -- preview-candidates 'D:\Projects\TigerType\.cache\tiger-v1.json' 'u'
 ```
 
-使用真实数据包和引擎生成一页竖排候选，窗口以非激活方式显示。点击候选后，带宿主/会话/焦点/快照的意图回到调度器，由预览宿主领取一次，最终选择只打印到控制台；不会向其他应用输入文字。点击“关闭预览”也可退出。编码限 1–4 位小写虎码，无候选明确报错。
+使用真实数据包和引擎生成一页竖排候选，窗口以非激活方式显示。点击候选后，预览线程以绑定快照编号的选字请求取得结果，只打印到控制台；不会向其他应用输入文字。点击“关闭预览”也可退出。编码限 1–4 位小写虎码，无候选明确报错。
 
-这是联调工具，不是 TSF 宿主。协议 v4 与旧版不兼容，旧程序不得混用。候选目前使用标准系统控件，最终 Win11Light 外观、完整字体回退和真实无障碍验收见项目状态。
+这是进程内联调工具，不是 TSF 宿主，也不经过跨进程协议；宿主内候选窗落地后删除。候选目前使用标准系统控件，最终 Win11Light 外观、完整字体回退和真实无障碍验收见项目状态。
 
 ## 手动运行跨进程后台
 
@@ -80,9 +80,17 @@ cargo run --locked --offline -p tigertype-app -- serve 'D:\Projects\TigerType\.c
 cargo run --locked --offline -p tigertype-app -- stop
 ```
 
-后台独占本登录会话，预建 16 对请求/通知管道，读取设置后固定在内存中；修改设置须先停止后台，之后重新启动。空闲时候选窗隐藏，可用 `stop` 停止；候选显示时也可点击“停止后台”。后台异常或退出由用户重新启动。`stop` 成功表示停止确认已送出，后台随后取消并排空资源，不承诺宿主 DLL 已卸载。
+后台独占本登录会话，预建 16 个请求管道（协议 v5，旧版程序不得混用），读取设置后固定在内存中；修改设置须先停止后台，之后重新启动。后台不显示窗口，用 `stop` 停止；在终端强行结束进程不会经过停止确认。后台异常或退出由用户重新启动。
+
+管道只授权本登录 SID 与 ALL APPLICATION PACKAGES，并带低完整性标签：AppContainer/低完整性宿主可连接，Untrusted 级被拒。后台只核对同会话，不打开宿主进程；宿主核对管道所有者、会话和后台映像，因此后台须以普通（非提升）权限运行，提升启动时管道所有者为 Administrators，宿主会拒绝连接。16 槽占满或合计会话达上限时，后台回收最久未用、无焦点且无组合的宿主，该宿主下次发送前发现断开并重连一次。`stop` 成功表示停止确认已送出，后台随后取消并排空资源，不承诺宿主 DLL 已卸载。
 
 `tigertype-tsf` 当前提供 COM 组合编辑组件，不是可注册的完整 TIP DLL；尚未提供类工厂和系统按键/焦点 sink 的组装，不能把启动后台当成系统输入法已经可用。普通测试用合成 COM 文本宿主及限时后台子进程，不往现用应用上屏。
+
+AppContainer 宿主前提测试会创建并删除一个临时 AppContainer 配置（当前用户注册表与 `%LOCALAPPDATA%\Packages`），默认忽略，须经用户授权后单独运行：
+
+```powershell
+cargo test --locked --offline -p tigertype-ipc --lib -- --ignored --exact pipe::sandbox_tests::app_container_host_connects_with_logon_sid_and_limited_query_but_cannot_squat
+```
 
 ## 数据边界
 原资源只读并锁定来源/hash；不读取个人词库，不修改现用输入法。正式数据独立使用 `%APPDATA%\TigerType`，开放情况见状态。

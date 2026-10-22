@@ -1,15 +1,10 @@
 //! 专供限时子进程加载的 DLL 驻留探针；不注册 COM，不触碰真实输入宿主。
 #![cfg(windows)]
 use std::{
-    os::windows::io::BorrowedHandle,
     panic::catch_unwind,
     time::{Duration, Instant},
 };
-use tigertype_ipc::{
-    Error,
-    pipe::{Peer, Runtime},
-};
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use tigertype_ipc::{Error, pipe::Runtime};
 
 fn probe() -> Result<(), Box<dyn std::error::Error>> {
     // 默认入口即使模块已经 PIN 也不得悄悄放宽为 DLL 入口。
@@ -19,10 +14,9 @@ fn probe() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::new_process_resident()?;
     for index in 0..16 {
         let listener = runtime.bind(&format!("dll-probe-{}-{index}", std::process::id()))?;
-        // SAFETY: 借用当前进程伪句柄；探针不接收其他进程，等待故意在连接完成前到期。
-        let peer = Peer::from_process(unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) })?;
+        // 探针不接收其他进程，等待故意在连接完成前到期。
         if !matches!(
-            listener.accept(peer, Instant::now() + Duration::from_millis(1)),
+            listener.accept(Instant::now() + Duration::from_millis(1)),
             Err(Error::TimedOut)
         ) {
             return Err("挂起 accept 未按期取消".into());

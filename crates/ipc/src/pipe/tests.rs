@@ -1,7 +1,6 @@
 //! 真实本机管道与取消回归；测试线程模拟对端，不进入产品线程模型。
 
 use super::*;
-use std::os::windows::io::BorrowedHandle;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 use tigertype_contracts::{
@@ -22,17 +21,12 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
 
-fn current_peer() -> Result<Peer> {
-    // SAFETY: 当前进程伪句柄始终有效，只借用；Peer 内部复制成拥有所有权的句柄。
-    Peer::from_process(unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) })
-}
-
 fn pair(runtime: &Runtime) -> Result<(Pipe, Pipe)> {
     let name = label();
     let listener = runtime.bind(&name)?;
     // 特意先连接再 accept，覆盖 ERROR_PIPE_CONNECTED 的无完成包分支。
-    let client = runtime.connect(&name, current_peer()?, deadline())?;
-    let server = listener.accept(current_peer()?, deadline())?;
+    let client = runtime.connect(&name, &std::env::current_exe()?, deadline())?;
+    let server = listener.accept(deadline())?;
     Ok((client, server))
 }
 
@@ -134,7 +128,7 @@ fn shutdown_drains_cancelled_accept_and_idle_read_without_polling() -> Result<()
     let listener = runtime.bind(&label())?;
     let cancellation = listener.cancellation();
     std::thread::scope(|scope| -> Result<()> {
-        let worker = scope.spawn(move || listener.accept(current_peer()?, deadline()));
+        let worker = scope.spawn(move || listener.accept(deadline()));
         cancellation.cancel();
         drop(cancellation);
         assert!(matches!(
@@ -269,7 +263,7 @@ fn pending_accept_times_out_and_callback_releases_its_pipe() -> Result<()> {
     let mut listener = runtime.bind(&label())?;
     let (sender, receiver) = mpsc::sync_channel(1);
     Arc::get_mut(&mut listener.0.io).unwrap().on_drop = Some(sender);
-    let result = listener.accept(current_peer()?, Instant::now() + Duration::from_millis(30));
+    let result = listener.accept(Instant::now() + Duration::from_millis(30));
     assert!(matches!(result, Err(Error::TimedOut)));
     // 等完成回调，而不是忙轮询；调用方返回后，I/O 持有的资源仍必须最终释放。
     receiver.recv_timeout(Duration::from_secs(2)).unwrap();

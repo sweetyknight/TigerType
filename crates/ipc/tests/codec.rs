@@ -35,7 +35,7 @@ fn raw(body: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn handshake_and_notifications_reject_zero_identity_and_cannot_be_input_replies() {
+fn handshake_rejects_zero_identity_and_cannot_be_input_replies() {
     for message in [
         Message::Welcome {
             host: 0,
@@ -44,16 +44,6 @@ fn handshake_and_notifications_reject_zero_identity_and_cannot_be_input_replies(
         Message::Welcome {
             host: 1,
             generation: 0,
-        },
-        Message::Notification {
-            token: tigertype_contracts::candidate::CandidateToken {
-                host: 1,
-                generation: 1,
-                session: 1,
-                focus: 1,
-                revision: 0,
-            },
-            reset: true,
         },
     ] {
         assert!(encode(&message).is_err());
@@ -81,10 +71,12 @@ fn fixed_wire_bytes_do_not_depend_on_pointer_width() {
     }));
     assert_eq!(encode(&expected).unwrap(), raw(body));
     assert_eq!(decode(&raw(body)).unwrap(), expected);
-    // 新焦点字段不向后兼容，旧 v2 即使正文形状正确也不得通过。
-    let mut old = raw(body);
-    old[4..6].copy_from_slice(&2u16.to_le_bytes());
-    assert!(decode(&old).is_err());
+    // 不向后兼容：旧 v2–v4 即使正文形状正确也不得通过。
+    for version in 2u16..VERSION {
+        let mut old = raw(body);
+        old[4..6].copy_from_slice(&version.to_le_bytes());
+        assert!(decode(&old).is_err());
+    }
     let mut state = InputState {
         page_index: u32::MAX as usize,
         ..Default::default()
@@ -133,16 +125,6 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
             generation: 7,
             host: 8,
         },
-        Message::Notification {
-            token: tigertype_contracts::candidate::CandidateToken {
-                host: 8,
-                generation: 7,
-                session: 1,
-                focus: 2,
-                revision: 3,
-            },
-            reset: false,
-        },
         Message::Request(request(Command::Open {
             options: Default::default(),
         })),
@@ -162,18 +144,12 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
         Message::Request(request(Command::Close)),
         Message::Request(request(Command::Focus {
             epoch: 1,
-            caret: Some(tigertype_contracts::candidate::ScreenRect {
-                left: -10,
-                top: 20,
-                right: -9,
-                bottom: 40,
-            }),
+            focused: true,
         })),
         Message::Request(request(Command::Focus {
             epoch: 2,
-            caret: None,
+            focused: false,
         })),
-        Message::Request(request(Command::TakeSelection { epoch: 1 })),
         reply(Reply::Opened(state.clone())),
         reply(Reply::Configured(state.clone())),
         reply(Reply::Focused(state.clone())),
@@ -245,27 +221,8 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
     for command in [
         Command::Focus {
             epoch: 0,
-            caret: None,
+            focused: true,
         },
-        Command::Focus {
-            epoch: 1,
-            caret: Some(tigertype_contracts::candidate::ScreenRect {
-                left: i32::MIN,
-                top: 0,
-                right: 0,
-                bottom: 1,
-            }),
-        },
-        Command::Focus {
-            epoch: 1,
-            caret: Some(tigertype_contracts::candidate::ScreenRect {
-                left: 1,
-                top: 0,
-                right: 0,
-                bottom: 1,
-            }),
-        },
-        Command::TakeSelection { epoch: 0 },
         Command::Key {
             epoch: 0,
             key: tigertype_contracts::Key::Space,
@@ -288,6 +245,19 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
         let message = Message::Request(request(command));
         assert!(encode(&message).is_err());
         assert!(decode(&raw(&serde_json::to_vec(&message).unwrap())).is_err());
+    }
+}
+
+#[test]
+fn v4_notifications_claims_and_caret_rectangles_are_rejected_under_a_v5_header() {
+    // 即使伪造 v5 头，旧正文也不能把光标位置或点击领取带回协议。
+    for body in [
+        r#"{"type":"notification","value":{"token":{"host":1,"generation":1,"session":1,"focus":1,"revision":1},"reset":false}}"#,
+        r#"{"type":"request","value":{"route":{"generation":1,"request_id":1,"session_id":1},"command":{"type":"take_selection","value":{"epoch":1}}}}"#,
+        r#"{"type":"request","value":{"route":{"generation":1,"request_id":1,"session_id":1},"command":{"type":"focus","value":{"epoch":1,"caret":null}}}}"#,
+        r#"{"type":"request","value":{"route":{"generation":1,"request_id":1,"session_id":1},"command":{"type":"focus","value":{"epoch":1,"focused":true,"caret":null}}}}"#,
+    ] {
+        assert!(decode(&raw(body.as_bytes())).is_err(), "{body}");
     }
 }
 

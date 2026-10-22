@@ -1,9 +1,10 @@
-//! 可见候选联调入口：真实引擎/路由/窗口/点击领取闭环，只向控制台打印最终选择，不向宿主上屏。
+//! 进程内候选联调入口：真实引擎/路由/窗口/点击选字闭环，只向控制台打印最终选择，不向宿主上屏。
+//! 宿主内候选窗（B 批）落地前保留；候选快照取自按键回复，位置固定，不经过跨进程协议。
 use crate::{Result, dispatch::Dispatcher, import};
 use std::path::Path;
 use tigertype_contracts::{
     Key, Options,
-    candidate::ScreenRect,
+    candidate::{CandidateChoice, CandidateFrame, CandidateToken, ScreenRect},
     protocol::{Command, Message, Reply, Request, Route},
 };
 use tigertype_engine::Dictionary;
@@ -36,7 +37,7 @@ pub fn run(package: &Path, code: &str) -> Result<()> {
     let dictionary = Dictionary::new(import::load(package)?.data)?;
     let code = code.to_owned();
     let (frames, inbox) = tigertype_ui::candidate::mailbox()?;
-    let (choices, received) = tigertype_ui::mailbox()?;
+    let (choices, received) = tigertype_ui::mailbox::<CandidateChoice>()?;
     let worker = std::thread::Builder::new()
         .name("tiger-candidate-preview".into())
         .spawn(move || -> std::result::Result<(), String> {
@@ -58,16 +59,12 @@ pub fn run(package: &Path, code: &str) -> Result<()> {
                     &mut sequence,
                     Command::Focus {
                         epoch: 1,
-                        caret: Some(ScreenRect {
-                            left: 200,
-                            top: 200,
-                            right: 201,
-                            bottom: 224,
-                        }),
+                        focused: true,
                     },
                 )?;
+                let mut state = None;
                 for key in code.chars() {
-                    exchange(
+                    let Reply::Key(outcome) = exchange(
                         &mut dispatch,
                         host,
                         &mut sequence,
@@ -75,31 +72,50 @@ pub fn run(package: &Path, code: &str) -> Result<()> {
                             epoch: 1,
                             key: Key::Character(key),
                         },
-                    )?;
+                    )?
+                    else {
+                        return Err("预览按键被拒绝".into());
+                    };
+                    state = Some(outcome.state);
                 }
-                let frame = dispatch.frame().ok_or("预览焦点丢失")?;
-                if frame.state.candidates.is_empty() {
+                let state = state.ok_or("预览没有按键结果")?;
+                if state.candidates.is_empty() {
                     return Err("此编码没有候选，未打开窗口".into());
                 }
-                frames.send(Some(frame))?;
+                let frame = CandidateFrame {
+                    token: CandidateToken {
+                        host,
+                        generation: 1,
+                        session: 1,
+                        focus: 1,
+                        revision: state.revision,
+                    },
+                    caret: ScreenRect {
+                        left: 200,
+                        top: 200,
+                        right: 201,
+                        bottom: 224,
+                    },
+                    state,
+                };
+                frames.send(Some(frame.clone()))?;
                 if let Ok(choice) = received.receive() {
-                    if dispatch
-                        .offer_selection(choice)
-                        .map_err(|e| format!("点击被拒绝：{e:?}"))?
-                        != host
-                    {
-                        return Err("预览宿主不符".into());
+                    if choice.token != frame.token {
+                        return Err("点击快照与预览不符".into());
                     }
-                    let reply = exchange(
+                    // 选字绑定快照编号，旧点击由引擎拒绝而不是按当前页重解释。
+                    let Reply::Key(outcome) = exchange(
                         &mut dispatch,
                         host,
                         &mut sequence,
-                        Command::TakeSelection {
-                            epoch: choice.token.focus,
+                        Command::Select {
+                            revision: choice.token.revision,
+                            index: choice.index,
+                            epoch: 1,
                         },
-                    )?;
-                    let Reply::Key(outcome) = reply else {
-                        return Err("选择未被原宿主领取".into());
+                    )?
+                    else {
+                        return Err("选择被拒绝".into());
                     };
                     println!(
                         "候选预览选择：{}（未向任何应用上屏）",

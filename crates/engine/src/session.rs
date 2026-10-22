@@ -71,7 +71,7 @@ impl<'a> Session<'a> {
         self.rebuild();
         Ok(self.snapshot())
     }
-    fn composing(&self) -> bool {
+    pub fn composing(&self) -> bool {
         !self.buffer.is_empty() || self.mode == InputMode::Pinyin
     }
     fn raw(&self) -> String {

@@ -1,10 +1,7 @@
 //! 固定引擎线程的多宿主路由；宿主标识来自连接所有者，不接受协议正文冒认宿主。
 use crate::Result;
 use std::collections::BTreeMap;
-use tigertype_contracts::{
-    candidate::{CandidateChoice, CandidateFrame, CandidateToken, ScreenRect},
-    protocol::{Command, Message, Rejection, Reply, Request, Response},
-};
+use tigertype_contracts::protocol::{Command, Message, Rejection, Reply, Request, Response};
 use tigertype_engine::{Dictionary, Session};
 const MAX_HOSTS: usize = 16;
 const MAX_SESSIONS: usize = 64;
@@ -20,7 +17,6 @@ struct Focus {
     host: u64,
     session: u64,
     epoch: u64,
-    caret: ScreenRect,
 }
 pub struct Dispatcher<'a> {
     dictionary: &'a Dictionary,
@@ -28,7 +24,6 @@ pub struct Dispatcher<'a> {
     generation: u64,
     last_host: u64,
     active: Option<Focus>,
-    pending: Option<CandidateChoice>,
     failed: bool,
 }
 impl<'a> Dispatcher<'a> {
@@ -42,7 +37,6 @@ impl<'a> Dispatcher<'a> {
             generation,
             last_host: 0,
             active: None,
-            pending: None,
             failed: false,
         })
     }
@@ -67,7 +61,6 @@ impl<'a> Dispatcher<'a> {
         self.hosts.remove(&host);
         if self.active.is_some_and(|focus| focus.host == host) {
             self.active = None;
-            self.pending = None;
         }
     }
     pub fn dispatch(&mut self, host: u64, frame: &[u8]) -> Result<Vec<u8>> {
@@ -103,7 +96,7 @@ impl<'a> Dispatcher<'a> {
         if request.route.generation != self.generation {
             return Err(Rejection::StaleGeneration);
         }
-        let total: usize = self.hosts.values().map(|host| host.sessions.len()).sum();
+        let full = self.full();
         let host = self.hosts.get_mut(&id).ok_or(Rejection::UnknownHost)?;
         if request.route.request_id <= host.last_request {
             return Err(Rejection::OutOfOrder);
@@ -114,7 +107,7 @@ impl<'a> Dispatcher<'a> {
                 return Err(Rejection::SessionReused);
             }
             host.last_session = request.route.session_id;
-            if total >= MAX_SESSIONS {
+            if full {
                 return Err(Rejection::SessionLimit);
             }
         } else if !host.sessions.contains_key(&request.route.session_id) {
@@ -124,13 +117,13 @@ impl<'a> Dispatcher<'a> {
     }
     fn execute(&mut self, host: u64, request: &Request) -> Result<Reply> {
         let session = request.route.session_id;
-        if let Command::Focus { epoch, caret } = request.command {
+        if let Command::Focus { epoch, focused } = request.command {
             if epoch <= self.hosts[&host].last_focus {
                 return Ok(Reply::Rejected(Rejection::StaleFocus));
             }
             self.hosts.get_mut(&host).unwrap().last_focus = epoch;
             // 新焦点取消上一个未上屏组合；迟到的旧宿主失焦不能清掉其他宿主的候选。
-            if caret.is_some()
+            if focused
                 || self
                     .active
                     .is_some_and(|f| f.host == host && f.session == session)
@@ -146,12 +139,10 @@ impl<'a> Dispatcher<'a> {
                         .unwrap()
                         .clear()?;
                 }
-                self.pending = None;
-                self.active = caret.map(|caret| Focus {
+                self.active = focused.then_some(Focus {
                     host,
                     session,
                     epoch,
-                    caret,
                 });
             }
             let state = self
@@ -166,42 +157,18 @@ impl<'a> Dispatcher<'a> {
         }
         if matches!(
             request.command,
-            Command::Key { .. } | Command::Select { .. } | Command::TakeSelection { .. }
+            Command::Key { .. } | Command::Select { .. }
         ) && !self
             .active
             .is_some_and(|f| f.host == host && f.session == session)
         {
             return Ok(Reply::Rejected(Rejection::NotFocused));
         }
-        let command = if let Command::TakeSelection { epoch } = request.command {
-            if self.active.unwrap().epoch != epoch {
-                return Ok(Reply::Rejected(Rejection::StaleFocus));
-            }
-            let Some(choice) = self.pending.take() else {
-                return Ok(Reply::Rejected(Rejection::StaleSnapshot));
-            };
-            if self.frame().as_ref().map(|frame| frame.token) != Some(choice.token) {
-                return Ok(Reply::Rejected(Rejection::StaleSnapshot));
-            }
-            Command::Select {
-                revision: choice.token.revision,
-                index: choice.index,
-                epoch,
-            }
-        } else {
-            request.command.clone()
-        };
+        let command = request.command.clone();
         if let Command::Key { epoch, .. } | Command::Select { epoch, .. } = command
             && self.active.is_none_or(|focus| focus.epoch != epoch)
         {
             return Ok(Reply::Rejected(Rejection::StaleFocus));
-        }
-        // 同一会话的按键/清屏/配置都使待领取点击失效；不能在新状态上选旧索引。
-        if self
-            .active
-            .is_some_and(|f| f.host == host && f.session == session)
-        {
-            self.pending = None;
         }
         let owner = self.hosts.get_mut(&host).ok_or("宿主准入状态不一致")?;
         Ok(match command {
@@ -241,45 +208,21 @@ impl<'a> Dispatcher<'a> {
             }
         })
     }
-    pub fn frame(&self) -> Option<CandidateFrame> {
-        let focus = self.active?;
-        let state = self
-            .hosts
-            .get(&focus.host)?
-            .sessions
-            .get(&focus.session)?
-            .snapshot();
-        Some(CandidateFrame {
-            token: CandidateToken {
-                host: focus.host,
-                generation: self.generation,
-                session: focus.session,
-                focus: focus.epoch,
-                revision: state.revision,
-            },
-            caret: focus.caret,
-            state,
-        })
+    /// 可回收：非当前焦点且所有会话都无组合；回收后宿主下次按键重连并重新打开会话，不丢未上屏内容。
+    pub fn idle(&self, host: u64) -> bool {
+        self.active.is_none_or(|focus| focus.host != host)
+            && self
+                .hosts
+                .get(&host)
+                .is_some_and(|owner| owner.sessions.values().all(|s| !s.composing()))
     }
-    /// 返回应通知的宿主；这里只存一次选字意图，UI 线程不能直接产生上屏提交。
-    pub fn offer_selection(
-        &mut self,
-        choice: CandidateChoice,
-    ) -> std::result::Result<u64, Rejection> {
-        let frame = self.frame().ok_or(Rejection::NotFocused)?;
-        if frame.token != choice.token || choice.index as usize >= frame.state.candidates.len() {
-            return Err(Rejection::StaleSnapshot);
-        }
-        if self.pending.is_some() {
-            return Err(Rejection::Busy);
-        }
-        self.pending = Some(choice);
-        Ok(choice.token.host)
+    /// 合计会话已达上限时由应用层回收空闲宿主，避免新宿主的 Open 被长期拒绝。
+    pub fn full(&self) -> bool {
+        self.hosts.values().map(|h| h.sessions.len()).sum::<usize>() >= MAX_SESSIONS
     }
     pub fn invalidate(&mut self) {
         self.failed = true;
         self.hosts.clear();
         self.active = None;
-        self.pending = None;
     }
 }

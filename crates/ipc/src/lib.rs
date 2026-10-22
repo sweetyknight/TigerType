@@ -146,7 +146,6 @@ pub fn decode_response(frame: &[u8], expected: &Request) -> Result<Response> {
         (Command::Open { .. }, Reply::Opened(_))
             | (Command::Key { .. }, Reply::Key(_))
             | (Command::Select { .. }, Reply::Key(_))
-            | (Command::TakeSelection { .. }, Reply::Key(_))
             | (Command::Focus { .. }, Reply::Focused(_))
             | (Command::Configure { .. }, Reply::Configured(_))
             | (Command::Clear, Reply::Cleared(_))
@@ -227,19 +226,6 @@ fn validate(message: &Message) -> Result<()> {
                 return Err(Error::Invalid("握手身份不能为零"));
             }
         }
-        Message::Notification { token, .. } => {
-            if [
-                token.host,
-                token.generation,
-                token.session,
-                token.focus,
-                token.revision,
-            ]
-            .contains(&0)
-            {
-                return Err(Error::Invalid("通知身份不能为零"));
-            }
-        }
         Message::Request(request) => {
             route(&request.route)?;
             match request.command {
@@ -254,16 +240,10 @@ fn validate(message: &Message) -> Result<()> {
                 } if revision == 0 || index as usize >= PAGE_SIZE => {
                     return Err(Error::Invalid("候选选择的快照或索引非法"));
                 }
-                Command::Key { epoch: 0, .. } | Command::Select { epoch: 0, .. } => {
-                    return Err(Error::Invalid("按键和选字必须绑定焦点代次"));
-                }
-                Command::Focus { epoch, caret }
-                    if epoch == 0 || caret.is_some_and(|rect| !rect.valid()) =>
-                {
-                    return Err(Error::Invalid("焦点代次或光标矩形非法"));
-                }
-                Command::TakeSelection { epoch: 0 } => {
-                    return Err(Error::Invalid("领取候选必须绑定焦点代次"));
+                Command::Key { epoch: 0, .. }
+                | Command::Select { epoch: 0, .. }
+                | Command::Focus { epoch: 0, .. } => {
+                    return Err(Error::Invalid("按键、选字和焦点必须绑定焦点代次"));
                 }
                 _ => {}
             }

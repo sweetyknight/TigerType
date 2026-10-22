@@ -1,4 +1,4 @@
-//! 后台在独立限时进程运行，UI 用合成点击驱动；不创建可见窗口、不注册输入法。
+//! 后台在独立限时进程运行；合成词表和合成宿主，不创建窗口、不注册输入法。
 #![cfg(windows)]
 use std::{
     io::{BufRead, BufReader, Write},
@@ -10,11 +10,13 @@ use std::{
 use tigertype_app::{Result, backend::Server};
 use tigertype_contracts::{
     Key, Options,
-    candidate::{CandidateChoice, ScreenRect},
-    protocol::{Command, Message, Rejection, Reply},
+    protocol::{Command, Rejection, Reply},
 };
 use tigertype_engine::{Data, Dictionary, Entry};
-use tigertype_ipc::{pipe::Runtime, service::Client};
+use tigertype_ipc::{
+    pipe::Runtime,
+    service::{Client, Link},
+};
 use windows_sys::Win32::{
     Foundation::WAIT_OBJECT_0,
     System::Threading::{CREATE_NO_WINDOW, WaitForSingleObject},
@@ -43,8 +45,46 @@ impl Drop for Worker {
         }
     }
 }
+fn open(client: &mut Client) -> Result<()> {
+    assert!(matches!(
+        client.request(
+            1,
+            Command::Open {
+                options: Options::default()
+            },
+            deadline()
+        )?,
+        Reply::Opened(_)
+    ));
+    Ok(())
+}
+fn key(client: &mut Client, epoch: u64, key: Key) -> Result<Reply> {
+    Ok(client.request(1, Command::Key { key, epoch }, deadline())?)
+}
+fn focus(client: &mut Client, epoch: u64) -> Result<()> {
+    assert!(matches!(
+        client.request(
+            1,
+            Command::Focus {
+                epoch,
+                focused: true
+            },
+            deadline()
+        )?,
+        Reply::Focused(_)
+    ));
+    Ok(())
+}
+fn commit(reply: Reply) -> Option<String> {
+    let Reply::Key(outcome) = reply else {
+        panic!("需要按键回复：{reply:?}");
+    };
+    outcome.commit
+}
+
 #[test]
-fn real_backend_singleton_authenticated_hosts_notification_and_one_commit() -> Result<()> {
+fn real_backend_singleton_image_check_reclaims_idle_hosts_and_reconnects_without_losing_keys()
+-> Result<()> {
     let namespace = format!("service-test-{}", std::process::id());
     let image = std::env::current_exe()?;
     let mut worker = Worker(
@@ -82,79 +122,66 @@ fn real_backend_singleton_authenticated_hosts_notification_and_one_commit() -> R
         )
         .is_err()
     );
-    let mut a = Client::connect(&runtime, &image, &namespace, deadline())?;
-    let mut b = Client::connect(&runtime, &image, &namespace, deadline())?;
-    assert_ne!(a.host, b.host);
-    assert_eq!(a.generation, b.generation);
-    for client in [&mut a, &mut b] {
-        assert!(matches!(
-            client.request(
-                1,
-                Command::Open {
-                    options: Options::default()
-                },
-                deadline()
-            )?,
-            Reply::Opened(_)
-        ));
-    }
-    a.request(
-        1,
-        Command::Focus {
-            epoch: 1,
-            caret: Some(ScreenRect {
-                left: 10,
-                top: 10,
-                right: 11,
-                bottom: 30,
-            }),
-        },
-        deadline(),
-    )?;
-    let Reply::Key(state) = a.request(
-        1,
-        Command::Key {
-            key: Key::Character('u'),
-            epoch: 1,
-        },
-        deadline(),
-    )?
-    else {
-        panic!("需要按键回复");
-    };
-    assert!(state.commit.is_none());
+
+    // 宿主懒连接：首次 ensure 才连接，后续复用同一连接。
+    let mut a = Link::new(image.clone(), &namespace);
+    let (client, fresh) = a.ensure(&runtime, deadline())?;
+    assert!(fresh);
+    open(client)?;
+    focus(client, 1)?;
+    assert_eq!(commit(key(client, 1, Key::Character('u'))?), None);
+    let mut b = Link::new(image.clone(), &namespace);
+    let (client, fresh) = b.ensure(&runtime, deadline())?;
+    assert!(fresh);
+    let old_b = client.host;
+    open(client)?;
     assert_eq!(
-        b.request(
-            1,
-            Command::Key {
-                key: Key::Space,
-                epoch: 1
-            },
-            deadline()
-        )?,
+        key(client, 1, Key::Space)?,
         Reply::Rejected(Rejection::NotFocused)
     );
-    assert!(b.poll_notification()?.is_none());
-    let Message::Notification {
-        token,
-        reset: false,
-    } = a.notification(deadline())?
-    else {
-        panic!("需要候选通知");
-    };
-    assert_eq!(token.host, a.host);
-    assert_eq!(token.revision, state.state.revision);
-    let Reply::Key(outcome) =
-        a.request(1, Command::TakeSelection { epoch: token.focus }, deadline())?
-    else {
-        panic!("需要提交结果");
-    };
-    assert_eq!(outcome.commit.as_deref(), Some("的"));
-    // 单次提交已验证；关闭通道不会重连或重放，固定工作线程由测试 UI 结束通知停止。
-    a.stop_backend(deadline())?;
-    b.cancel();
-    drop(a);
-    drop(b);
+
+    // 再连 14 个宿主占满 16 槽：后台立即回收最久未用的空闲宿主 B；A 持有焦点和组合，不被回收。
+    let mut others = Vec::new();
+    for _ in 0..14 {
+        let mut link = Link::new(image.clone(), &namespace);
+        let (client, fresh) = link.ensure(&runtime, deadline())?;
+        assert!(fresh);
+        open(client)?;
+        others.push(link);
+    }
+    let (client, fresh) = a.ensure(&runtime, deadline())?;
+    assert!(!fresh);
+    assert_eq!(commit(key(client, 1, Key::Space)?).as_deref(), Some("的"));
+
+    // B 发送前发现已断开，同一期限内只重连一次；新宿主须重新打开会话，按键不丢、旧请求不重放。
+    let (client, fresh) = b.ensure(&runtime, deadline())?;
+    assert!(fresh);
+    assert_ne!(client.host, old_b);
+    assert_eq!(
+        client.request(1, Command::Clear, deadline())?,
+        Reply::Rejected(Rejection::UnknownSession)
+    );
+    open(client)?;
+    focus(client, 1)?;
+    assert_eq!(commit(key(client, 1, Key::Character('u'))?), None);
+    assert_eq!(commit(key(client, 1, Key::Space)?).as_deref(), Some("的"));
+    // B 重连再次占满槽位，最久未用的 others[0] 被回收；第 17 个宿主仍能连接并触发下一次回收。
+    let mut extra = Link::new(image.clone(), &namespace);
+    assert!(extra.ensure(&runtime, deadline())?.1);
+    for link in &mut others[..2] {
+        let (client, fresh) = link.ensure(&runtime, deadline())?;
+        assert!(fresh);
+        open(client)?;
+    }
+    let (client, fresh) = others[13].ensure(&runtime, deadline())?;
+    assert!(!fresh);
+    assert!(matches!(
+        client.request(1, Command::Clear, deadline())?,
+        Reply::Cleared(_)
+    ));
+
+    Client::connect(&runtime, &image, &namespace, deadline())?.stop_backend(deadline())?;
+    drop((a, b, others, extra));
     runtime.shutdown(deadline())?;
     assert_eq!(
         // SAFETY: 等待自己创建的测试进程，失败时 Worker 析构负责终止与回收。
@@ -166,33 +193,12 @@ fn real_backend_singleton_authenticated_hosts_notification_and_one_commit() -> R
     Ok(())
 }
 #[test]
-#[ignore = "只由限时父测试启动，使用合成词表和合成 UI 点击"]
+#[ignore = "只由限时父测试启动，使用合成词表"]
 fn backend_worker() -> Result<()> {
     let namespace = std::env::var("TIGERTYPE_BACKEND_TEST")?;
     let data = dictionary();
     let server = Server::new(&data, &namespace, Options::default())?;
-    let (frames, received) = tigertype_ui::candidate::mailbox()?;
-    let (choices, clicks) = tigertype_ui::mailbox()?;
-    let ui = std::thread::spawn(move || {
-        let mut clicked = false;
-        while let Ok(frame) = received.receive() {
-            if let Some(frame) = frame
-                && !clicked
-                && !frame.state.candidates.is_empty()
-            {
-                choices
-                    .send(CandidateChoice {
-                        token: frame.token,
-                        index: 0,
-                    })
-                    .unwrap();
-                clicked = true;
-            }
-        }
-    });
     println!("BACKEND_READY");
     std::io::stdout().flush()?;
-    let result = server.run(frames, clicks);
-    ui.join().unwrap();
-    result
+    server.run()
 }
