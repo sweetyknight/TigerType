@@ -131,6 +131,7 @@ impl<'a> Session<'a> {
             mode: self.mode,
             options: self.options,
             ascii_mode: self.ascii,
+            ascii_punctuation: self.ascii_punctuation,
             composing: self.composing(),
             revision: self.revision,
             notice: self.notice.clone(),

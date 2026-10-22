@@ -2,26 +2,73 @@
 use super::*;
 use std::time::Duration;
 use windows::{
-    Win32::{Foundation::E_NOTIMPL, System::Com::IDataObject},
+    Win32::{
+        Foundation::{E_NOTIMPL, POINT},
+        System::Com::IDataObject,
+    },
     core::{BOOL, GUID, IUnknown, PCWSTR, PWSTR},
 };
 
 #[derive(Default)]
-struct Document {
-    text: RefCell<Vec<u16>>,
-    selection: Cell<(usize, usize)>,
-    sink: RefCell<Option<ITfCompositionSink>>,
+pub(crate) struct Document {
+    pub(crate) text: RefCell<Vec<u16>>,
+    pub(crate) selection: Cell<(usize, usize)>,
+    pub(crate) sink: RefCell<Option<ITfCompositionSink>>,
     readonly: Cell<bool>,
     fail_end: Cell<bool>,
     fail_write: Cell<bool>,
     writes: Cell<u32>,
     ends: Cell<u32>,
-    defer: Cell<bool>,
-    deferred: RefCell<Option<ITfEditSession>>,
+    pub(crate) defer: Cell<bool>,
+    pub(crate) deferred: RefCell<Option<ITfEditSession>>,
+    /// 模拟宿主尚未完成布局：GetTextExt 失败。
+    no_layout: Cell<bool>,
 }
 #[implement(ITfContext, ITfContextComposition)]
 struct Context {
     doc: Rc<Document>,
+}
+/// 合成视图：每个 UTF-16 单元宽 10 像素，从屏幕 (100, 100) 起排一行；视图窗口为空。
+#[implement(ITfContextView)]
+struct View {
+    doc: Rc<Document>,
+}
+impl ITfContextView_Impl for View_Impl {
+    fn GetRangeFromPoint(&self, _: u32, _: *const POINT, _: u32) -> Result<ITfRange> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetTextExt(
+        &self,
+        cookie: u32,
+        target: Ref<ITfRange>,
+        rect: *mut RECT,
+        clipped: *mut BOOL,
+    ) -> Result<()> {
+        if self.doc.no_layout.get() {
+            return Err(TS_E_NOLAYOUT.into());
+        }
+        let target = target.as_ref().ok_or(E_INVALIDARG)?;
+        let origin = range(&self.doc, 0, 0);
+        // SAFETY: 范围属于本合成文档，偏移从同一 cookie 读取；输出指针由调用方提供。
+        unsafe {
+            let start = target.CompareStart(cookie, &origin, TF_ANCHOR_START)?;
+            let end = target.CompareEnd(cookie, &origin, TF_ANCHOR_START)?;
+            rect.write(RECT {
+                left: 100 + start * 10,
+                top: 100,
+                right: 100 + end * 10,
+                bottom: 120,
+            });
+            clipped.write(false.into());
+        }
+        Ok(())
+    }
+    fn GetScreenExt(&self) -> Result<RECT> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetWnd(&self) -> Result<HWND> {
+        Ok(HWND::default())
+    }
 }
 #[implement(ITfRange)]
 struct Range {
@@ -58,10 +105,20 @@ fn outcome(revision: u64, preedit: &str, commit: Option<&str>) -> KeyOutcome {
         },
     }
 }
-fn setup() -> (Rc<Document>, Editor) {
+pub(crate) fn document() -> (Rc<Document>, ITfContext) {
     let doc = Rc::new(Document::default());
     let context: ITfContext = Context { doc: doc.clone() }.into();
+    (doc, context)
+}
+fn setup() -> (Rc<Document>, Editor) {
+    let (doc, context) = document();
     (doc, Editor::new(context, 1, 1).unwrap())
+}
+fn apply(editor: &Editor, outcome: KeyOutcome, deadline: Instant) -> EditReport {
+    editor.key(deadline, move |_, _| Verdict::Apply(outcome))
+}
+pub(crate) fn text(doc: &Document) -> String {
+    String::from_utf16(&doc.text.borrow()).unwrap()
 }
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(2)
@@ -134,7 +191,10 @@ impl ITfContext_Impl for Context_Impl {
         Ok(range(&self.doc, end, end))
     }
     fn GetActiveView(&self) -> Result<ITfContextView> {
-        Err(E_NOTIMPL.into())
+        Ok(View {
+            doc: self.doc.clone(),
+        }
+        .into())
     }
     fn EnumViews(&self) -> Result<IEnumTfContextViews> {
         Err(E_NOTIMPL.into())
@@ -345,162 +405,178 @@ impl ITfRange_Impl for Range_Impl {
 #[test]
 fn com_preedit_non_bmp_commit_next_composition_and_cancel_preserve_committed_prefix() {
     let (doc, editor) = setup();
-    assert!(
-        editor
-            .apply(outcome(1, "u", None), deadline())
-            .error
-            .is_none()
-    );
-    assert_eq!(String::from_utf16(&doc.text.borrow()).unwrap(), "u");
-    let report = editor.apply(outcome(2, "a", Some("𠀀")), deadline());
+    let report = apply(&editor, outcome(1, "u", None), deadline());
+    assert!(report.error.is_none() && report.exchanged && report.handled);
+    assert_eq!(text(&doc), "u");
+    let report = apply(&editor, outcome(2, "a", Some("𠀀")), deadline());
     assert!(report.committed && report.error.is_none());
-    assert_eq!(String::from_utf16(&doc.text.borrow()).unwrap(), "𠀀a");
+    assert_eq!(text(&doc), "𠀀a");
     assert_eq!(doc.selection.get(), (3, 3));
     assert!(editor.cancel(deadline()).error.is_none());
-    assert_eq!(String::from_utf16(&doc.text.borrow()).unwrap(), "𠀀");
+    assert_eq!(text(&doc), "𠀀");
     assert!(
-        editor
-            .apply(outcome(3, "b", None), deadline())
+        apply(&editor, outcome(3, "b", None), deadline())
             .error
             .is_none()
     );
     assert!(editor.cancel(deadline()).error.is_none());
 }
+
 #[test]
-fn expired_duplicate_blurred_readonly_and_external_edits_are_rejected() {
+fn document_checks_precede_the_exchange_so_rejected_keys_leave_the_backend_unchanged() {
+    let (doc, editor) = setup();
+    let calls = Rc::new(Cell::new(0));
+    let key = |editor: &Editor, deadline| {
+        let calls = calls.clone();
+        editor.key(deadline, move |_, _| {
+            calls.set(calls.get() + 1);
+            Verdict::Apply(outcome(1, "u", None))
+        })
+    };
+    let rejected = |report: EditReport| report.error.is_some() && !report.exchanged;
+    assert!(rejected(key(&editor, Instant::now())));
+    doc.readonly.set(true);
+    assert!(rejected(key(&editor, deadline())));
+    doc.readonly.set(false);
+    *doc.text.borrow_mut() = "原文".encode_utf16().collect();
+    doc.selection.set((0, 2));
+    assert!(rejected(key(&editor, deadline())));
+    doc.selection.set((2, 2));
+    doc.defer.set(true);
+    assert!(rejected(key(&editor, deadline())));
+    let deferred = doc.deferred.borrow_mut().take().unwrap();
+    // SAFETY: 合成宿主故意违反同步约定，编辑对象仍由 COM 引用计数持有；失效令牌必须拒绝写入。
+    assert!(unsafe { deferred.DoEditSession(1) }.is_err());
+    doc.defer.set(false);
+    editor.invalidate();
+    assert!(rejected(key(&editor, deadline())));
+    assert_eq!(calls.get(), 0);
+    assert_eq!(doc.writes.get(), 0);
+    assert_eq!(text(&doc), "原文");
+}
+
+#[test]
+fn external_edits_end_the_old_composition_without_deleting_text_and_request_a_reset() {
+    let (doc, editor) = setup();
+    let resets = Rc::new(RefCell::new(Vec::new()));
+    let key = |preedit: &'static str, commit: Option<&'static str>| {
+        let resets = resets.clone();
+        editor.key(deadline(), move |reset, _| {
+            resets.borrow_mut().push(reset);
+            Verdict::Apply(outcome(1, preedit, commit))
+        })
+    };
+    assert!(key("u", None).error.is_none());
+    doc.text.borrow_mut()[0] = 'x' as u16;
+    // 宿主改写过的文字保留，本键在当前插入点照常处理。
+    assert!(key("", Some("的")).error.is_none());
+    assert_eq!(text(&doc), "x的");
+    assert!(key("u", None).error.is_none());
+    // 用户把光标移出组合：旧组合原样留给宿主，新组合从新插入点开始。
+    doc.selection.set((0, 0));
+    assert!(key("a", None).error.is_none());
+    assert_eq!(text(&doc), "ax的u");
+    assert_eq!(*resets.borrow(), [false, true, false, true]);
+    assert!(editor.cancel(deadline()).error.is_none());
+    assert_eq!(text(&doc), "x的u");
+}
+
+#[test]
+fn host_termination_keeps_host_text_and_the_next_key_asks_for_a_reset() {
     let (doc, editor) = setup();
     assert!(
-        editor
-            .apply(outcome(1, "u", None), Instant::now())
-            .error
-            .is_some()
-    );
-    assert_eq!(doc.writes.get(), 0);
-    doc.readonly.set(true);
-    assert!(
-        editor
-            .apply(outcome(1, "u", None), deadline())
-            .error
-            .is_some()
-    );
-    doc.readonly.set(false);
-    assert!(
-        editor
-            .apply(outcome(1, "u", None), deadline())
+        apply(&editor, outcome(1, "u", None), deadline())
             .error
             .is_none()
     );
-    assert!(
-        editor
-            .apply(outcome(1, "u", Some("的")), deadline())
-            .error
-            .is_some()
-    );
-    doc.text.borrow_mut()[0] = 'x' as u16;
-    assert!(
-        editor
-            .apply(outcome(2, "", Some("的")), deadline())
-            .error
-            .is_some()
-    );
-    assert!(editor.cancel(deadline()).error.is_some());
-    assert_eq!(String::from_utf16(&doc.text.borrow()).unwrap(), "x");
-    editor.invalidate();
-    assert!(
-        editor
-            .apply(outcome(3, "a", None), deadline())
-            .error
-            .is_some()
-    );
+    assert!(editor.composing());
+    let sink = doc.sink.borrow().as_ref().unwrap().clone();
+    // SAFETY: 模拟宿主终止当前组合；回调只置标志，不借用编辑状态。
+    unsafe {
+        sink.OnCompositionTerminated(1, None::<&ITfComposition>)
+            .unwrap();
+    }
+    assert!(!editor.composing());
+    let reset = Rc::new(Cell::new(false));
+    let seen = reset.clone();
+    let report = editor.key(deadline(), move |value, _| {
+        seen.set(value);
+        Verdict::Apply(outcome(2, "a", None))
+    });
+    assert!(report.error.is_none() && reset.get());
+    assert_eq!(text(&doc), "ua");
 }
+
+#[test]
+fn exchange_failure_discards_own_preedit_and_unhandled_keys_write_nothing() {
+    let (doc, editor) = setup();
+    assert!(
+        apply(&editor, outcome(1, "u", None), deadline())
+            .error
+            .is_none()
+    );
+    let report = editor.key(deadline(), |_, _| Verdict::Lost);
+    assert!(report.exchanged && report.error.is_some() && !report.handled);
+    assert_eq!(text(&doc), "");
+    assert!(!editor.composing());
+    let mut unhandled = outcome(2, "", None);
+    unhandled.handled = false;
+    let report = apply(&editor, unhandled, deadline());
+    assert!(report.exchanged && report.error.is_none() && !report.handled);
+    assert_eq!(doc.writes.get(), 2);
+}
+
 #[test]
 fn selected_user_text_and_confirmed_commit_survive_failure() {
     let (doc, editor) = setup();
     *doc.text.borrow_mut() = "原文".encode_utf16().collect();
-    doc.selection.set((0, 2));
-    assert!(
-        editor
-            .apply(outcome(1, "u", None), deadline())
-            .error
-            .is_some()
-    );
-    assert_eq!(String::from_utf16(&doc.text.borrow()).unwrap(), "原文");
     doc.selection.set((2, 2));
     assert!(
-        editor
-            .apply(outcome(1, "u", None), deadline())
+        apply(&editor, outcome(1, "u", None), deadline())
             .error
             .is_none()
     );
     doc.fail_end.set(true);
-    let report = editor.apply(outcome(2, "", Some("的")), deadline());
+    let report = apply(&editor, outcome(2, "", Some("的")), deadline());
     assert!(report.committed && report.error.is_some());
-    assert!(
-        editor
-            .apply(outcome(2, "", Some("的")), deadline())
-            .error
-            .is_some()
-    );
+    // 清理失败期间不再交换：重试只结束旧组合，不能重放已确认提交。
+    let report = apply(&editor, outcome(2, "", Some("的")), deadline());
+    assert!(report.error.is_some() && !report.exchanged);
     assert!(editor.cancel(deadline()).error.is_some());
-    assert_eq!(String::from_utf16(&doc.text.borrow()).unwrap(), "原文的");
+    assert_eq!(text(&doc), "原文的");
     doc.fail_end.set(false);
     assert!(editor.cancel(deadline()).error.is_none());
-    assert_eq!(String::from_utf16(&doc.text.borrow()).unwrap(), "原文的");
+    assert_eq!(text(&doc), "原文的");
 }
 
 #[test]
-fn failed_preedit_write_is_not_replayed_and_can_be_cancelled() {
+fn failed_preedit_write_reports_the_exchange_and_can_be_cancelled() {
     let (doc, editor) = setup();
     doc.fail_write.set(true);
-    let report = editor.apply(outcome(1, "u", None), deadline());
-    assert!(report.error.is_some() && !report.committed);
+    let report = apply(&editor, outcome(1, "u", None), deadline());
+    assert!(report.exchanged && report.error.is_some() && !report.committed);
     assert!(doc.text.borrow().is_empty());
     doc.fail_write.set(false);
     assert!(editor.cancel(deadline()).error.is_none());
     assert!(
-        editor
-            .apply(outcome(1, "u", None), deadline())
-            .error
-            .is_some()
-    );
-    assert!(
-        editor
-            .apply(outcome(2, "a", None), deadline())
+        apply(&editor, outcome(2, "a", None), deadline())
             .error
             .is_none()
     );
-}
-
-#[test]
-fn queued_com_callback_after_return_cannot_apply_a_late_commit() {
-    let (doc, editor) = setup();
-    doc.defer.set(true);
-    assert!(
-        editor
-            .apply(outcome(1, "", Some("的")), deadline())
-            .error
-            .is_some()
-    );
-    let deferred = doc.deferred.borrow_mut().take().unwrap();
-    // SAFETY: 合成宿主故意违反同步约定，编辑对象仍由 COM 引用计数持有；失效令牌必须拒绝写入。
-    assert!(unsafe { deferred.DoEditSession(1) }.is_err());
-    assert!(doc.text.borrow().is_empty());
-    assert_eq!(doc.writes.get(), 0);
+    assert_eq!(text(&doc), "a");
 }
 
 #[test]
 fn old_composition_termination_cannot_invalidate_a_new_composition() {
     let (doc, editor) = setup();
     assert!(
-        editor
-            .apply(outcome(1, "u", None), deadline())
+        apply(&editor, outcome(1, "u", None), deadline())
             .error
             .is_none()
     );
     let old_sink = doc.sink.borrow().as_ref().unwrap().clone();
     assert!(
-        editor
-            .apply(outcome(2, "a", Some("的")), deadline())
+        apply(&editor, outcome(2, "a", Some("的")), deadline())
             .error
             .is_none()
     );
@@ -510,11 +586,192 @@ fn old_composition_termination_cannot_invalidate_a_new_composition() {
             .OnCompositionTerminated(1, None::<&ITfComposition>)
             .unwrap();
     }
+    let reset = Rc::new(Cell::new(true));
+    let seen = reset.clone();
+    let report = editor.key(deadline(), move |value, _| {
+        seen.set(value);
+        Verdict::Apply(outcome(3, "ab", None))
+    });
+    assert!(report.error.is_none() && !reset.get());
+    assert_eq!(text(&doc), "的ab");
+}
+
+#[test]
+fn abandon_cancels_now_or_queues_one_verified_cancel_and_blocks_later_keys() {
+    let (doc, context) = document();
+    let editor = Editor::new(context.clone(), 1, 1).unwrap();
+    assert!(editor.is(&context) && !editor.is(&document().1));
     assert!(
-        editor
-            .apply(outcome(3, "ab", None), deadline())
+        apply(&editor, outcome(1, "u", None), deadline())
             .error
             .is_none()
     );
-    assert_eq!(String::from_utf16(&doc.text.borrow()).unwrap(), "的ab");
+    editor.abandon();
+    assert_eq!(text(&doc), "");
+    assert!(
+        apply(&editor, outcome(2, "a", None), deadline())
+            .error
+            .is_some()
+    );
+    // 拿不到同步锁：排队的取消仍只删除与记录一致的自有组合。
+    for external in [false, true] {
+        let (doc, editor) = setup();
+        assert!(
+            apply(&editor, outcome(1, "u", None), deadline())
+                .error
+                .is_none()
+        );
+        doc.defer.set(true);
+        editor.abandon();
+        let queued = doc.deferred.borrow_mut().take().unwrap();
+        if external {
+            doc.text.borrow_mut()[0] = 'x' as u16;
+        }
+        // SAFETY: 由合成宿主稍后执行异步会话，编辑对象仍由 COM 引用计数持有。
+        let result = unsafe { queued.DoEditSession(1) };
+        assert_eq!(result.is_ok(), !external);
+        assert_eq!(text(&doc), if external { "x" } else { "" });
+    }
+}
+
+#[test]
+fn key_sessions_report_the_composition_rectangle_only_while_composing() {
+    let (doc, editor) = setup();
+    let report = apply(&editor, outcome(1, "un", None), deadline());
+    let expected = RECT {
+        left: 100,
+        top: 100,
+        right: 120,
+        bottom: 120,
+    };
+    assert_eq!(
+        (report.caret, report.owner),
+        (Some(expected), HWND::default())
+    );
+    // 宿主未完成布局：写入照常成功，只是没有位置，由候选窗另行回退。
+    doc.no_layout.set(true);
+    let report = apply(&editor, outcome(2, "uni", None), deadline());
+    assert!(report.error.is_none() && report.handled && report.caret.is_none());
+    doc.no_layout.set(false);
+    let report = apply(&editor, outcome(3, "", Some("的")), deadline());
+    assert!(report.committed && report.caret.is_none());
+}
+
+type Shared<T> = Rc<RefCell<T>>;
+fn select(
+    editor: &Editor,
+    verdict: impl FnOnce() -> Verdict + 'static,
+) -> (bool, Shared<Option<EditReport>>, Rc<Cell<bool>>) {
+    let (report, called) = (Rc::new(RefCell::new(None)), Rc::new(Cell::new(false)));
+    let (sink, seen) = (report.clone(), called.clone());
+    let queued = editor.select(
+        move |_| {
+            seen.set(true);
+            verdict()
+        },
+        move |value| *sink.borrow_mut() = Some(value),
+    );
+    (queued, report, called)
+}
+
+#[test]
+fn click_sessions_commit_into_the_intact_composition_and_never_end_or_reset_it() {
+    let (doc, editor) = setup();
+    // 没有自有组合：不交换，报告失败。
+    let (queued, report, called) = select(&editor, || Verdict::Apply(outcome(1, "", Some("的"))));
+    assert!(queued && !called.get());
+    assert!(report.borrow().as_ref().unwrap().error.is_some());
+    assert!(
+        apply(&editor, outcome(1, "u", None), deadline())
+            .error
+            .is_none()
+    );
+    // 后台明确未处理：不写入、不作废组合。
+    let (_, report, called) = select(&editor, || Verdict::Skip);
+    let skipped = report.borrow_mut().take().unwrap();
+    assert!(called.get() && !skipped.exchanged && skipped.error.is_some());
+    assert!(editor.composing() && text(&doc) == "u");
+    // 用户把光标移走不影响点击（组合文本未变）；外部改写则拒绝且不结束组合。
+    doc.selection.set((0, 0));
+    doc.text.borrow_mut()[0] = 'x' as u16;
+    let (_, report, called) = select(&editor, || Verdict::Apply(outcome(2, "", Some("的"))));
+    assert!(!called.get() && report.borrow().as_ref().unwrap().error.is_some());
+    assert_eq!(text(&doc), "x");
+    doc.text.borrow_mut()[0] = 'u' as u16;
+    let (_, report, _) = select(&editor, || Verdict::Apply(outcome(3, "", Some("的"))));
+    let done = report.borrow_mut().take().unwrap();
+    assert!(done.committed && done.handled && done.error.is_none());
+    assert_eq!(text(&doc), "的");
+    assert!(!editor.composing());
+}
+
+#[test]
+fn click_on_a_terminated_composition_keeps_the_reset_for_the_next_key() {
+    let (doc, editor) = setup();
+    assert!(
+        apply(&editor, outcome(1, "u", None), deadline())
+            .error
+            .is_none()
+    );
+    let sink = doc.sink.borrow().as_ref().unwrap().clone();
+    // SAFETY: 模拟宿主终止当前组合。
+    unsafe {
+        sink.OnCompositionTerminated(1, None::<&ITfComposition>)
+            .unwrap();
+    }
+    let (_, report, called) = select(&editor, || Verdict::Apply(outcome(2, "", Some("的"))));
+    assert!(!called.get() && report.borrow().as_ref().unwrap().error.is_some());
+    let reset = Rc::new(Cell::new(false));
+    let seen = reset.clone();
+    let report = editor.key(deadline(), move |value, _| {
+        seen.set(value);
+        Verdict::Apply(outcome(3, "a", None))
+    });
+    assert!(report.error.is_none() && reset.get());
+    assert_eq!(text(&doc), "ua");
+}
+
+#[test]
+fn queued_click_budget_starts_when_the_session_runs_and_invalidation_cancels_it() {
+    for invalidate in [false, true] {
+        let (doc, editor) = setup();
+        assert!(
+            apply(&editor, outcome(1, "u", None), deadline())
+                .error
+                .is_none()
+        );
+        doc.defer.set(true);
+        let window = Rc::new(Cell::new(None));
+        let seen = window.clone();
+        let finished = Rc::new(Cell::new(false));
+        let done = finished.clone();
+        assert!(editor.select(
+            move |deadline| {
+                seen.set(Some(deadline.saturating_duration_since(Instant::now())));
+                Verdict::Apply(outcome(2, "", Some("的")))
+            },
+            move |_| done.set(true),
+        ));
+        assert!(!finished.get());
+        if invalidate {
+            editor.invalidate();
+        }
+        let queued = doc.deferred.borrow_mut().take().unwrap();
+        let started = Instant::now();
+        // SAFETY: 合成宿主稍后执行排队会话，编辑对象仍由 COM 引用计数持有。
+        let result = unsafe { queued.DoEditSession(1) };
+        assert_eq!(result.is_ok(), !invalidate);
+        if invalidate {
+            // 失效的排队会话在访问文档前拒绝，也不回调结束通知。
+            assert!(window.get().is_none() && !finished.get());
+            assert_eq!(text(&doc), "u");
+        } else {
+            let budget = window.get().unwrap();
+            assert!(
+                budget <= Duration::from_millis(50) && started.elapsed() < Duration::from_secs(1)
+            );
+            assert!(finished.get());
+            assert_eq!(text(&doc), "的");
+        }
+    }
 }

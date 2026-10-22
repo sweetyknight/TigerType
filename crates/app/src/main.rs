@@ -8,7 +8,7 @@ fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.is_empty() || args == ["--help"] {
         println!(
-            "TigerType Rust 核心工具\n  import-resources <新数据包绝对路径>\n  verify-package <数据包绝对路径>\n  lookup <数据包绝对路径> <拼音或汉字>\n  lookup-window <数据包绝对路径> <独立受管数据目录绝对路径>\n  preview-candidates <数据包绝对路径> <1–4 位小写虎码>\n  serve <数据包绝对路径> <独立受管数据目录绝对路径>\n  stop\n  demo-input <数据包绝对路径> <编码>\n尚不安装或注册输入法。"
+            "TigerType Rust 核心工具\n  import-resources <新数据包绝对路径>\n  verify-package <数据包绝对路径>\n  lookup <数据包绝对路径> <拼音或汉字>\n  lookup-window <数据包绝对路径> <独立受管数据目录绝对路径>\n  serve <数据包绝对路径> <独立受管数据目录绝对路径>\n  stop\n  demo-input <数据包绝对路径> <编码>\n尚不安装或注册输入法。"
         );
         return Ok(());
     }
@@ -26,12 +26,6 @@ fn run() -> Result<()> {
         }
         (Some("serve"), 3) => {
             tigertype_app::backend::run(Path::new(&args[1]), Path::new(&args[2]))?;
-        }
-        (Some("preview-candidates"), 3) => {
-            tigertype_app::candidate_preview::run(
-                Path::new(&args[1]),
-                args[2].to_str().ok_or("编码不是有效 Unicode")?,
-            )?;
         }
         (Some("lookup-window"), 3) => {
             tigertype_app::lookup::run(Path::new(&args[1]), Path::new(&args[2]))?;

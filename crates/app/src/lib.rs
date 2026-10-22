@@ -3,8 +3,6 @@
 #[cfg(windows)]
 pub mod backend;
 #[cfg(windows)]
-pub mod candidate_preview;
-#[cfg(windows)]
 pub mod data;
 pub mod dispatch;
 pub mod import;

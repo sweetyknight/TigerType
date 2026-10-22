@@ -134,4 +134,12 @@ impl Link {
         }
         Ok((self.client.as_mut().unwrap(), fresh))
     }
+    /// 同一次 ensure 之后、同一期限内的后续请求使用；不做可用性检查，也不在此重连。
+    pub fn client(&mut self) -> Option<&mut Client> {
+        self.client.as_mut()
+    }
+    /// 宿主停用时立即释放管道，后台随即发现断开；不依赖其余引用何时释放。
+    pub fn close(&mut self) {
+        self.client = None;
+    }
 }

@@ -1,7 +1,8 @@
-//! v5 删除宿主通知、领取点击和焦点光标矩形；候选位置留在宿主进程，旧协议直接拒绝。
+//! v5 删除宿主通知、领取点击和焦点光标矩形；候选位置留在宿主进程。
+//! v6 在输入状态中加入英文标点开关，供 TSF 本地按键判定；旧协议直接拒绝。
 use crate::{InputState, Key, KeyOutcome, Options};
 use serde::{Deserialize, Serialize};
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

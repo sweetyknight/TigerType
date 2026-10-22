@@ -71,7 +71,7 @@ fn fixed_wire_bytes_do_not_depend_on_pointer_width() {
     }));
     assert_eq!(encode(&expected).unwrap(), raw(body));
     assert_eq!(decode(&raw(body)).unwrap(), expected);
-    // 不向后兼容：旧 v2–v4 即使正文形状正确也不得通过。
+    // 不向后兼容：旧 v2–v5 即使正文形状正确也不得通过。
     for version in 2u16..VERSION {
         let mut old = raw(body);
         old[4..6].copy_from_slice(&version.to_le_bytes());
@@ -249,8 +249,15 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
 }
 
 #[test]
-fn v4_notifications_claims_and_caret_rectangles_are_rejected_under_a_v5_header() {
-    // 即使伪造 v5 头，旧正文也不能把光标位置或点击领取带回协议。
+fn old_bodies_are_rejected_under_the_current_header() {
+    // 即使伪造当前版本头，旧正文也不能把光标位置、点击领取或缺少标点开关的 v5 状态带回协议。
+    let mut v5_state = serde_json::to_value(reply(Reply::Opened(InputState::default()))).unwrap();
+    v5_state["value"]["reply"]["value"]
+        .as_object_mut()
+        .unwrap()
+        .remove("ascii_punctuation")
+        .unwrap();
+    assert!(decode(&raw(&serde_json::to_vec(&v5_state).unwrap())).is_err());
     for body in [
         r#"{"type":"notification","value":{"token":{"host":1,"generation":1,"session":1,"focus":1,"revision":1},"reset":false}}"#,
         r#"{"type":"request","value":{"route":{"generation":1,"request_id":1,"session_id":1},"command":{"type":"take_selection","value":{"epoch":1}}}}"#,

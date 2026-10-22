@@ -3,7 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
-pub mod candidate;
 pub mod protocol;
 pub mod ui;
 
@@ -116,10 +115,49 @@ pub struct InputState {
     pub mode: InputMode,
     pub options: Options,
     pub ascii_mode: bool,
+    /// 英文标点开关；TSF 本地按键判定须据此预判未组合时的标点是否由引擎处理。
+    pub ascii_punctuation: bool,
     pub composing: bool,
     pub revision: u64,
     /// 空码、越界等可恢复情况对用户可见，不能伪装成成功选字。
     pub notice: String,
+}
+impl InputState {
+    /// TSF 的 OnTestKeyDown 不发 IPC，只凭上次状态判断是否吃键；
+    /// 必须与引擎在该状态下的 handled 完全一致，由引擎测试穷举核对，多吃会吞掉应用按键。
+    pub fn consumes(&self, key: Key) -> bool {
+        match key {
+            Key::ToggleAscii | Key::ToggleLearning | Key::TogglePunctuation => true,
+            _ if self.ascii_mode => false,
+            Key::Character(c) => {
+                c == '`'
+                    || c.is_ascii_lowercase()
+                    || (!c.is_control()
+                        && (self.composing
+                            || (!self.ascii_punctuation
+                                && matches!(
+                                    c,
+                                    ',' | '.'
+                                        | '?'
+                                        | '!'
+                                        | ':'
+                                        | ';'
+                                        | '('
+                                        | ')'
+                                        | '<'
+                                        | '>'
+                                        | '['
+                                        | ']'
+                                        | '\\'
+                                        | '_'
+                                        | '^'
+                                        | '\''
+                                        | '"'
+                                ))))
+            }
+            _ => self.composing,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

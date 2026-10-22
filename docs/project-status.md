@@ -3,19 +3,43 @@
 更新：2026-10-22。范围见 [实施方案](implementation-plan.md)。
 
 ## 当前迁移
-本批按实施方案第 4 步完成 A 批（传输与认证、协议 v5），删除通知通道与后台候选窗；经用户授权实际运行 AppContainer 子进程用例，两项平台前提成立。**完整 TIP DLL（类工厂、激活/按键/焦点 sink）尚未组装，仍不是可安装的输入法**。未注册、切换或安装输入法，未读取个人词库；本批不提交、不推送。
+本批按实施方案第 4 步完成 B 批：B1 TIP DLL 类工厂、按键/焦点 sink、按键映射与本地判定、统一按键编辑会话（协议 v6）；B2 宿主进程内自绘候选窗、IME WinEvent 与 UIA、点击异步选字会话，并删除 `preview-candidates` 与 ui 候选窗。**尚无注册入口、未经任何真实宿主验收（C 批），仍不是可安装的输入法**。未注册、切换或安装输入法，未激活系统 TSF，测试不在桌面显示窗口，未读取个人词库；本批不提交、不推送。
 
 | 阶段 | 状态 |
 |---|---|
 | 文档治理 | 按最新授权删除旧文档/源码归档及迁移快照，只保留四份主文档 |
-| 数据/引擎/基础协议/门禁 | 已实现并复验；协议为 v5，直接拒绝 v2–v4；无旧引擎运行依赖 |
+| 数据/引擎/基础协议/门禁 | 已实现并复验；协议为 v6，直接拒绝 v2–v5；无旧引擎运行依赖 |
 | 独立查字/设置 | 已实现 Win32 原生窗口、分页学习资料和事务设置；可见交互/视觉与无障碍待验收 |
-| 候选显示/点击 | 后台候选窗与点击回送已删除；进程内 `preview-candidates` 保留至 B 批；宿主内候选窗未开始 |
+| 候选显示/点击 | B2 已实现宿主内自绘候选窗、WinEvent/UIA、点击异步会话；`preview-candidates` 与 ui 候选窗已删除；可见外观、读屏器与真实宿主未验收 |
 | 多宿主后台 | A 批已实现：AC/低完整性 DACL、双侧认证（后台不开宿主进程）、单请求管道、懒连接重连一次、16 槽 LRU 回收、serve/stop |
 | 沙箱宿主前提 | AppContainer/低完整性子进程可连接、Untrusted 被拒、均不能抢建实例，已实测；真实 UWP 宿主未验收 |
 | DLL 驻留/关闭 | 已实现显式进程期 PIN 与资源排空；默认 EXE 限制保留，不支持热卸载 |
-| TSF COM 编辑 | 已实现同步编辑会话、组合 sink 和自有范围保护；完整 TIP 服务、点击所需的异步编辑会话及混合位数端到端尚未完成（B 批） |
+| TSF TIP | B 批已实现：DLL 导出与类工厂、`ITfTextInputProcessorEx`/按键/线程管理器 sink、会话内 IPC 的同步按键会话与异步点击会话、失焦取消；注册与真实宿主端到端未完成（C 批） |
 | 安装和长期使用 | 未开始，须另行授权 |
+
+## B2：宿主内候选窗、UIA 与点击选字
+
+- 候选窗（`crates/tsf/src/candidate.rs`）：TSF 线程惰性创建、停用时销毁；窗口类以 TIP 模块注册（重复注册视为已存在，模块驻留不注销）；`WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW`、`WM_MOUSEACTIVATE` 返回 `MA_NOACTIVATE`；owner 取 `ITfContextView::GetWnd`，空则 `GetFocus`，x86 用 `SetWindowLongW` 改 owner。自绘九行内候选（序号+候选字+灰色注释，省略号截断）与提示行，系统颜色兼顾高对比度；未声明 DPI 感知，字号按 `GetDpiForWindow` 缩放；按组合矩形放在工作区内，下方不足翻到上方。窗口过程经本线程登记表以弱引用找回候选窗，窗口数据不存指针，panic 不穿过回调。
+- 位置：按键/点击会话写入后以同一 cookie 取组合 `GetTextExt` 与视图窗口；无布局时回退本线程 `GetGUIThreadInfo` 光标，再无则隐藏。显示/刷新/隐藏发 `EVENT_OBJECT_IME_SHOW/CHANGE/HIDE`。
+- UIA（`crates/tsf/src/uia.rs`）：根元素 AutomationId `IME_Candidate_Window`、List、宿主提供者补窗口属性；候选项 Name 为候选字、HelpText 为注释、ListItem，`ISelectionItemProvider::IsSelected` 对应高亮，运行时编号含展示编号，展示更新后旧元素返回 `UIA_E_ELEMENTNOTAVAILABLE`；显隐发 MenuOpened/MenuClosed、高亮项发 ElementSelected，只在有监听者时构造元素；声明 `UseComThreading`，只在 STA 上被调用；UIA 选择被拒绝。
+- 点击：同行按下/抬起才投递私有消息（展示编号+序号）；`Popup::selectable` 绑定当前快照编号且同一展示只受理一个；`Editor::select` 以 `TF_ES_ASYNCDONTCARE` 排队，开始时才计算 50ms 预算，核对代次与组合文本（不要求光标在末端），终止的组合拒绝并把清空留给下一按键；会话内再核对展示编号后发 `Select`。宿主层：未打开/未聚焦/待清空/刚重连不发请求，`StaleSnapshot`/`NotFocused`/`StaleFocus` 视为未处理且保留连接，其余失败作废连接。
+- 交换结论三态（跳过/丢失/写入）；写入阶段失败在同一会话内撤回仍一致的自有组合。停用时显式断开管道（`Link::close`），不依赖引用释放；测试中后台在停用后立即收到断开。
+- 删除：`preview-candidates` 命令与 `app::candidate_preview`、`ui::candidate`（视图/邮箱/系统按钮弹窗）、contracts 的 `candidate` 模块（`ScreenRect`/`CandidateToken`/`CandidateFrame`/`CandidateChoice`），TSF 直接使用平台 `RECT`。
+- 测试（tsf 共 28 项，新增 8 项）：组合矩形只在组合中报告、无布局仍写入；点击会话只写入完整的自有组合、跳过不作废、外部改写拒绝且不结束组合、终止后把清空留给下一键、排队预算从开始计算且失效后不执行；宿主选字只针对当前快照、拒绝保留连接；隐藏候选窗的布局/命中/同行点击投递/受理去重/展示编号；UIA 约定属性、导航、选中、运行时编号、命中与过期；进程内假后台端到端经真实窗口消息点击第二候选，后台收到 `Select{revision, index:1, epoch:2}`，旧展示编号的点击不发请求。全部测试保持候选窗隐藏，不移动真实鼠标。
+- DLL 仍只导出两个函数，见 `artifacts/tsf-b2-dll-exports-20261022.log`、`artifacts/tsf-b2-dll-exports-x86-20261022.log`。
+- 统一入口 `cargo run --locked --offline -p tigertype-app --example check` 于 2026-10-22 实际通过架构/文档、fmt、Clippy、x64/x86 单元/集成/文档测试，每个位数 **107 passed、6 ignored**（同前口径；较 B1 新增 tsf 8 项，随删除去掉 ui 4 项、app 1 项）；日志 `artifacts/tsf-b2-check-20261022.log`。
+- 未执行：可见候选窗外观、读屏器（讲述人/NVDA）对 UIA 与 WinEvent 的实际朗读、真实宿主的 owner/z-order（含 UWP 沉浸式）、逐显示器 DPI 宿主、宿主拒绝或延后排队点击会话时的行为。
+
+## B1：最小 TIP 与统一按键会话
+
+- 协议 v6：`InputState` 增加 `ascii_punctuation`；`InputState::consumes` 为 TSF 本地判定。引擎测试在 12 种可达前缀 × 两组选项 × 全部命名键/ASCII/若干非 ASCII 字符下核对其与 `handled` 完全一致（不只是子集）。编解码测试覆盖 v2–v5 头部拒绝及当前头下缺少该字段的 v5 状态正文拒绝。
+- `tigertype_tsf.dll`（cdylib+rlib）：只导出 `DllGetClassObject`、`DllCanUnloadNow`（恒 `S_FALSE`），x64/x86 均为未修饰导出名，dumpbin 记录见 `artifacts/tsf-b1-dll-exports-20261022.log`、`artifacts/tsf-b1-dll-exports-x86-20261022.log`。新 CLSID `79A65161-8689-43AC-A57C-574C6A74922A`；类工厂拒绝聚合，实例只暴露 TIP/按键/线程管理器 sink。未实现注册入口（C 批）。
+- 激活：首次激活创建进程期驻留 `Runtime`（静态单例，基础设施），以同一编号/cookie 配对登记与注销两个 sink，按键 sink 登记失败时回滚线程管理器 sink；重复激活拒绝。后台映像取 DLL 同目录 `tigertype.exe`，DLL 不读配置。
+- 按键：`OnTestKeyDown`/`OnKeyDown` 先映射（Alt/AltGr 放行，`Ctrl+.`、组合中 `Ctrl+L`，单击 Shift 中英，上/左、下/右移动高亮，字符经 `ToUnicodeEx` 不改键盘状态取得）再按上次状态判定，不吃的键不发 IPC。吃下的键在 `TF_ES_SYNC` 会话内依次核对文档（只读、非空选区、迟到/失效回调都在调用后台前拒绝）→ 懒连接/Open/Focus/Clear/Key 共用 50ms 期限 → 写入；后台失败删除自有组合并放行原键，写入失败作废剩余组合且下次先 Clear，不重放。
+- 焦点：文档焦点变化或按键上下文更换不发 IPC，旧编辑器失效并同步取消自有组合（锁被拒时排队一次只删一致组合的异步取消）；下一键先 `Focus`。后台以 `NotFocused`/`StaleFocus` 拒绝时重新报告焦点后补发一次。宿主终止组合或外部改写/光标移出时只结束旧组合、不改正文，后台先 `Clear` 再按当前插入点处理本键。编辑器不再跟踪快照编号（结果只在会话内取得），因此重连后引擎快照编号重置不影响写入。
+- 测试（tsf 20 项）：按键映射与修饰键放行；宿主会话序列（新连接 Open/Focus、失焦重报、Clear、焦点被夺补发一次、传输失败不重放并以新会话重建、连接失败/Open 被拒不发键）；编辑会话（文档核对先于交换、外部改写与宿主终止、交换失败删除自有组合、未处理键不写、提交后清理失败不重放、同步/排队取消）；类工厂与导出；合成线程管理器的激活配对与回滚；未激活/无后台放行；进程内真实管道假后台端到端（两文档焦点切换、提交、停用取消组合并断开，后台收到的请求序列逐条核对）。测试不激活系统 TSF，使用独立命名空间，不连接正式后台。
+- 统一入口 `cargo run --locked --offline -p tigertype-app --example check` 于 2026-10-22 实际通过架构/文档、fmt、Clippy、x64/x86 单元/集成/文档测试，每个位数 **104 passed、6 ignored**（同前口径，不重复计入 DLL 探针子进程）；日志 `artifacts/tsf-b1-check-20261022.log`。ignored 与 A 批相同，不计入 passed。
+- 未执行：注册与任何真实宿主（含 UWP、管理员、x86 宿主）、`OnTestKeyDown` 吃键而 `OnKeyDown` 放行时宿主是否把原键交还应用、50ms 端到端预算、按键 sink 与 `ToUnicodeEx` 在真实布局下的行为、读屏器与长期压力。
 
 ## A 批：传输与认证
 
@@ -115,10 +139,12 @@
 
 ## 风险与下一步
 - LevelDB/Lua/独立引擎问题随组件退役退出范围，不宣称本批修复。
-- 下一步：AppContainer 前提已成立，进入 B 批，组装最小 TIP 与宿主内候选窗，接入 `Link::ensure` 的懒连接/重连语义和 EditReport.committed 的不可重放语义与失败清理。AppContainer 用例每次重跑仍须用户授权。独立窗口的可见交互、字体/DPI/无障碍仍须验收；组件测试不是端到端输入法。
+- 下一步：C 批——须先实现注册/注销入口（COM 类、TSF 语言配置与类别），再经用户单独授权在对 ALL APPLICATION PACKAGES 授读/执行的暂存目录注册，于真实宿主（含 x86、管理员、UWP 开始菜单/设置搜索）验收后注销。AppContainer 用例每次重跑仍须用户授权。独立窗口与候选窗的可见外观、字体/DPI、读屏器仍须验收；组件测试不是端到端输入法。
+- B2 已知限制：候选窗用系统颜色与 Microsoft YaHei UI 15pt，未按 Win11Light 锁定配色、字体优先顺序、圆角或 PUA 字根字体；长注释以省略号截断。宿主无布局且无系统光标时不显示候选窗。点击排队会话若宿主始终不执行，同一展示的后续点击被挡住，直到下一次展示更新。UIA 未实现选择容器模式，`Select` 被拒；读屏器效果未实测。候选窗 owner 取自上下文视图或焦点窗口，跨线程 owner 的输入队列影响未验证。
+- B1 已知限制：后台未运行时 `OnTestKeyDown` 仍按默认状态吃字母/标点，`OnKeyDown` 连接失败后放行；宿主是否在此情形把原键交还应用须在 C 批实测，若不交还需改判定策略。单击 Shift 判定不感知鼠标，Shift+点击选择后松开会切换中英。后台回收或重启后新会话恢复中文模式，不保留宿主侧英文模式。组合中按 Home/End/Delete 等未映射键会交给应用，下一键按外部改写处理。
 - AppContainer 子进程测试已确认须创建并删除临时 AppContainer 配置（当前用户注册表与 `%LOCALAPPDATA%\Packages`）；C 批须对暂存目录授予 ALL APPLICATION PACKAGES 读取/执行，并由用户手动注册。两者都须在执行前单独授权。
 - 放开低完整性后，同会话沙箱进程都能连接并占槽；回收只能缓解，同会话恶意代码造成的拒绝服务不在防护范围。后台须以非提升权限运行：提升启动时管道所有者为 Administrators，宿主会拒绝连接。微软提示绕过 AppContainer 规则的输入法可能被拦截；本方案只用显式 ACL 授权，该风险未完全排除。
 - 独立工具退出等待当前工作真正结束；磁盘操作异常阻塞可能延迟进程退出，未实现强杀或假定超时即终止。设置冲突会保留外部文件与已确认选项，需关闭工具后重新打开读取外部版本。
-- 默认 IPC 仍仅限 EXE；显式驻留入口与关闭排空已加入，尚未组装完整 TIP。跨进程测试与合成 COM 宿主测试不能替代真实应用、管理员宿主、焦点切换和混合位数端到端故障验收；不以空壳 COM 导出或模拟键盘注入声称完成。
+- 默认 IPC 仍仅限 EXE；TIP 激活时显式选择进程期驻留。跨进程测试与合成 COM 宿主/线程管理器测试不能替代真实应用、管理员宿主、焦点切换和混合位数端到端故障验收；不以空壳 COM 导出或模拟键盘注入声称完成。
 - DLL 首版驻留选择不可逆系统 PIN；必须等宿主退出才释放模块映像，不支持热更新/热卸载。管道关闭超时仍可能留有活跃引用，不能据此结束生命周期或释放关联资源。
 - 字体覆盖、无障碍、真实应用、50ms 总预算和长期性能未验证。输入核心测试不代表 Windows 输入法验收。

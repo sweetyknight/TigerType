@@ -158,6 +158,63 @@ fn type_code(session: &mut Session<'_>, code: &str) -> Vec<String> {
         .collect()
 }
 #[test]
+fn tsf_local_key_judgment_matches_engine_handling_in_every_reachable_state() {
+    // TSF 在 OnTestKeyDown 只凭上次快照判定；任何偏差都会吞掉应用按键或漏掉输入。
+    let dictionary = Dictionary::new(data()).unwrap();
+    let letters = |code: &str| code.chars().map(Key::Character).collect::<Vec<_>>();
+    let mut prefixes = vec![
+        vec![],
+        letters("u"),
+        letters("unid"),
+        letters("qqqq"),
+        letters("`"),
+        letters("`xing"),
+        vec![Key::TogglePunctuation],
+        [vec![Key::TogglePunctuation], letters("u")].concat(),
+        vec![Key::ToggleAscii],
+        vec![Key::ToggleAscii, Key::TogglePunctuation],
+        [letters("u"), vec![Key::ToggleAscii, Key::ToggleAscii]].concat(),
+    ];
+    prefixes.push([letters("u"), vec![Key::Space]].concat());
+    let mut keys = vec![
+        Key::Space,
+        Key::Enter,
+        Key::Backspace,
+        Key::Escape,
+        Key::Tab,
+        Key::PageUp,
+        Key::PageDown,
+        Key::Previous,
+        Key::Next,
+        Key::ToggleAscii,
+        Key::ToggleLearning,
+        Key::TogglePunctuation,
+    ];
+    keys.extend((0u8..=0x7f).map(|b| Key::Character(b as char)));
+    keys.extend(['ü', 'Ü', '中', '１', '\u{3000}', '\u{85}'].map(Key::Character));
+    for options in [
+        Options::default(),
+        Options {
+            auto_commit_four: true,
+            common_only: false,
+            show_learning: true,
+            output_form: OutputForm::Traditional,
+        },
+    ] {
+        for prefix in &prefixes {
+            for key in &keys {
+                let mut session = Session::new(&dictionary, options);
+                for step in prefix {
+                    session.process(*step).unwrap();
+                }
+                let predicted = session.snapshot().consumes(*key);
+                let handled = session.process(*key).unwrap().handled;
+                assert_eq!(predicted, handled, "前缀 {prefix:?} 按键 {key:?}");
+            }
+        }
+    }
+}
+#[test]
 fn default_waits_four_then_next_letter_commits_once() {
     let dictionary = Dictionary::new(data()).unwrap();
     let mut session = Session::new(&dictionary, Options::default());
