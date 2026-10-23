@@ -10,7 +10,7 @@ use std::{
 use tigertype_app::{Result, backend::Server};
 use tigertype_contracts::{
     Key, Options,
-    protocol::{Command, Rejection, Reply},
+    protocol::{Command, Panel, Rejection, Reply},
 };
 use tigertype_engine::{Data, Dictionary, Entry};
 use tigertype_ipc::{
@@ -180,10 +180,10 @@ fn real_backend_singleton_image_check_reclaims_idle_hosts_and_reconnects_without
         Reply::Cleared(_)
     ));
 
-    // 反例：未接查字 UI 的后台拒绝唤起请求，管理连接作废，后台继续服务。
+    // 反例：未接查字 UI 的后台拒绝唤起请求，该连接作废，后台继续服务。
     assert!(
         Client::connect(&runtime, &image, &namespace, deadline())?
-            .show_lookup(deadline())
+            .show(Panel::Settings, deadline())
             .is_err()
     );
     Client::connect(&runtime, &image, &namespace, deadline())?.stop_backend(deadline())?;

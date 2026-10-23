@@ -218,7 +218,7 @@ fn state(state: &InputState) -> Result<()> {
 
 fn validate(message: &Message) -> Result<()> {
     match message {
-        Message::Hello | Message::Stop | Message::Stopped | Message::Show | Message::Shown => {}
+        Message::Hello | Message::Stop | Message::Stopped | Message::Show(_) | Message::Shown => {}
         Message::Welcome { generation, host } => {
             if *generation == 0 || *host == 0 {
                 return Err(Error::Invalid("握手身份不能为零"));

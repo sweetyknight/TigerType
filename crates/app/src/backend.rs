@@ -12,7 +12,7 @@ use std::{
 };
 use tigertype_contracts::{
     Options,
-    protocol::{Command, Message},
+    protocol::{Command, Message, Panel},
     ui::Reply as UiReply,
 };
 use tigertype_engine::Dictionary;
@@ -190,7 +190,7 @@ impl Slot {
         options: Options,
         image: &Path,
         clock: &mut u64,
-        show: Option<&ReplySender<()>>,
+        show: Option<&ReplySender<Panel>>,
     ) -> Result<()> {
         let Some(event) = self.end.tick()? else {
             return Ok(());
@@ -211,10 +211,9 @@ impl Slot {
                 self.stopping = true;
                 tigertype_ipc::encode(&Message::Stopped)?
             }
-            Message::Show if self.host.is_some() => {
-                // 与停止同样核对调用进程映像；窗口由 UI 线程创建，这里只投递唤起信号。
-                self.end.pipe.verify_client_image(image)?;
-                show.ok_or("此后台未提供查字窗")?.send(())?;
+            Message::Show(panel) if self.host.is_some() => {
+                // 宿主图标菜单与管理端都可唤起：只投递信号、不改数据，因此不核对映像；窗口由 UI 线程创建。
+                show.ok_or("此后台未提供查字窗")?.send(panel)?;
                 tigertype_ipc::encode(&Message::Shown)?
             }
             Message::Hello if self.host.is_none() => {
@@ -249,7 +248,7 @@ pub struct Server<'a> {
     clock: u64,
     reload: Arc<Reload>,
     // 正式后台才有查字 UI 线程；随 Server 释放而断开，UI 线程据此退出。
-    show: Option<ReplySender<()>>,
+    show: Option<ReplySender<Panel>>,
 }
 impl<'a> Server<'a> {
     /// namespace 在正式入口固定为 backend；测试使用新建独立标签，不连接现用后台。
@@ -411,7 +410,7 @@ pub fn run(package: &Path, directory: &Path, show: bool) -> Result<()> {
     let reload = server.reload.clone();
     let (show_sender, show_inbox) = tigertype_ui::mailbox()?;
     if show {
-        show_sender.send(())?;
+        show_sender.send(Panel::Lookup)?;
     }
     server.show = Some(show_sender);
     let (requests, receiver) = mpsc::sync_channel(1);
@@ -439,10 +438,7 @@ pub fn run(package: &Path, directory: &Path, show: bool) -> Result<()> {
         let ui = thread::Builder::new()
             .name("tiger-lookup-ui".into())
             .spawn_scoped(scope, move || {
-                // 首次唤起前不建窗口；后台停止时唤起邮箱断开，UI 线程随之退出。
-                if show_inbox.receive().is_err() {
-                    return Ok(());
-                }
+                // 启动即挂通知区图标，查字/设置窗首次唤起才建；后台停止时唤起邮箱断开，UI 线程随之退出。
                 tigertype_ui::run(requests, inbox, show_inbox, options)
             })?;
         // run 结束即释放 Server 与唤起邮箱：UI 退出并断开请求通道，工作线程随之结束。
@@ -503,15 +499,12 @@ mod tests {
                 let deadline = || Instant::now() + Duration::from_secs(3);
                 let runtime = Runtime::new().unwrap();
                 let image = std::env::current_exe().unwrap();
-                // 管理端唤起：后台核对映像后先把信号投进 UI 邮箱，再回复 Shown。
-                Client::connect(&runtime, &image, &namespace, deadline())
-                    .unwrap()
-                    .show_lookup(deadline())
-                    .unwrap();
-                assert!(shown.try_receive().is_ok());
+                // 宿主图标菜单唤起设置页：后台先把目标窗口投进 UI 邮箱再回复 Shown，连接继续用于输入。
+                let mut client = Client::connect(&runtime, &image, &namespace, deadline()).unwrap();
+                client.show(Panel::Settings, deadline()).unwrap();
+                assert_eq!(shown.try_receive(), Ok(Panel::Settings));
                 // 保存交接之后发出的 Open 一定拿到新设置，无需重启后台。
                 reload.set(changed).unwrap();
-                let mut client = Client::connect(&runtime, &image, &namespace, deadline()).unwrap();
                 let Reply::Opened(state) = client
                     .request(
                         1,

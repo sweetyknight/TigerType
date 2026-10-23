@@ -1,6 +1,7 @@
 //! 合成线程管理器与进程内假后台：不激活系统 TSF、不注册 COM，也不连接用户正在运行的后台。
 use super::*;
 use crate::edit::tests::{document, text};
+use crate::indicator::tests::right_click;
 use std::{
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -15,16 +16,18 @@ use tigertype_contracts::{
 use tigertype_ipc::{decode, encode};
 use windows::{
     Win32::{
-        Foundation::{E_NOTIMPL, HWND, RECT, S_OK},
+        Foundation::{E_NOTIMPL, HWND, POINT, RECT, S_OK},
         UI::{
-            Input::KeyboardAndMouse::{VK_OEM_COMMA, VK_SPACE, VK_U},
+            Input::KeyboardAndMouse::{
+                VK_DOWN, VK_ESCAPE, VK_OEM_COMMA, VK_RETURN, VK_SPACE, VK_U,
+            },
             WindowsAndMessaging::{
                 DispatchMessageW, GetWindowRect, MSG, PM_REMOVE, PeekMessageW, SendMessageW,
                 WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP,
             },
         },
     },
-    core::{BSTR, ComObject, PCWSTR},
+    core::{BSTR, ComObject, OutRef, PCWSTR},
 };
 
 #[derive(Default)]
@@ -38,9 +41,90 @@ struct Manager {
     open: Cell<Option<i32>>,
     writers: RefCell<Vec<u32>>,
     watcher: RefCell<Option<ITfCompartmentEventSink>>,
+    /// 已登记的语言栏按钮（任务栏输入法图标）。
+    items: RefCell<Vec<ITfLangBarItem>>,
 }
-#[implement(ITfThreadMgr, ITfSource, ITfKeystrokeMgr, ITfCompartmentMgr)]
+#[implement(
+    ITfThreadMgr,
+    ITfSource,
+    ITfKeystrokeMgr,
+    ITfCompartmentMgr,
+    ITfLangBarItemMgr
+)]
 struct ThreadMgr(Rc<Manager>);
+impl ITfLangBarItemMgr_Impl for ThreadMgr_Impl {
+    fn EnumItems(&self) -> Result<IEnumTfLangBarItems> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetItem(&self, _: *const GUID) -> Result<ITfLangBarItem> {
+        Err(E_NOTIMPL.into())
+    }
+    fn AddItem(&self, item: Ref<ITfLangBarItem>) -> Result<()> {
+        self.0.items.borrow_mut().push(item.ok()?.clone());
+        Ok(())
+    }
+    fn RemoveItem(&self, item: Ref<ITfLangBarItem>) -> Result<()> {
+        let item = item.ok()?;
+        let mut items = self.0.items.borrow_mut();
+        let index = items.iter().position(|i| i == item).ok_or(E_INVALIDARG)?;
+        items.remove(index);
+        self.0.released.borrow_mut().push("indicator");
+        Ok(())
+    }
+    fn AdviseItemSink(
+        &self,
+        _: Ref<ITfLangBarItemSink>,
+        _: *mut u32,
+        _: *const GUID,
+    ) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn UnadviseItemSink(&self, _: u32) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetItemFloatingRect(&self, _: u32, _: *const GUID) -> Result<RECT> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetItemsStatus(&self, _: u32, _: *const GUID, _: *mut u32) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetItemNum(&self) -> Result<u32> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetItems(
+        &self,
+        _: u32,
+        _: OutRef<ITfLangBarItem>,
+        _: *mut TF_LANGBARITEMINFO,
+        _: *mut u32,
+        _: *mut u32,
+    ) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn AdviseItemsSink(
+        &self,
+        _: u32,
+        _: *const Option<ITfLangBarItemSink>,
+        _: *const GUID,
+        _: *mut u32,
+    ) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn UnadviseItemsSink(&self, _: u32, _: *const u32) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+}
+/// 已登记的唯一图标按钮：须为输入模式按钮，且只是普通按钮（系统因此右键只调用 OnClick，不调用 InitMenu）。
+fn button(manager: &Manager) -> ITfLangBarItemButton {
+    let items = manager.items.borrow();
+    assert_eq!(items.len(), 1);
+    let mut info = TF_LANGBARITEMINFO::default();
+    // SAFETY: 本测试按钮在本线程同步回调。
+    unsafe { items[0].GetInfo(&mut info) }.unwrap();
+    assert_eq!(info.guidItem, GUID_LBI_INPUTMODE);
+    assert_eq!(info.dwStyle & TF_LBI_STYLE_BTN_MENU, 0);
+    items[0].cast().unwrap()
+}
 /// 线程管理器级键盘开闭状态；写入后同步通知已登记的 sink，与系统一致。
 #[implement(ITfCompartment, ITfSource)]
 struct Compartment(Rc<Manager>);
@@ -266,8 +350,15 @@ fn state(buffer: &str, revision: u64) -> InputState {
     }
 }
 
-/// 进程内单槽假后台：真实管道、握手与协议校验；字母累积组合，空格提交首选，选字提交对应候选。
-fn backend(namespace: &str) -> (thread::JoinHandle<Vec<Command>>, mpsc::Receiver<()>) {
+/// 进程内单槽假后台：真实管道、握手与协议校验；字母累积组合，空格提交首选，选字提交对应候选；
+/// 唤起请求记录目标窗口后确认。
+#[allow(clippy::type_complexity)]
+fn backend(
+    namespace: &str,
+) -> (
+    thread::JoinHandle<(Vec<Command>, Vec<Panel>)>,
+    mpsc::Receiver<()>,
+) {
     let label = format!("{namespace}-request-0");
     let (ready, bound) = mpsc::channel();
     let server = thread::spawn(move || {
@@ -285,11 +376,19 @@ fn backend(namespace: &str) -> (thread::JoinHandle<Vec<Command>>, mpsc::Receiver
         };
         pipe.send_frame(&encode(&welcome).unwrap(), later())
             .unwrap();
-        let (mut log, mut buffer, mut revision) = (Vec::new(), String::new(), 1);
+        let (mut log, mut shown, mut buffer, mut revision) =
+            (Vec::new(), Vec::new(), String::new(), 1);
         // 宿主停用即断开管道，读取失败结束服务。
         while let Ok(frame) = pipe.receive_frame(later()) {
-            let Message::Request(request) = decode(&frame).unwrap() else {
-                panic!("宿主只应发送请求");
+            let request = match decode(&frame).unwrap() {
+                Message::Request(request) => request,
+                Message::Show(panel) => {
+                    shown.push(panel);
+                    pipe.send_frame(&encode(&Message::Shown).unwrap(), later())
+                        .unwrap();
+                    continue;
+                }
+                other => panic!("宿主不应发送 {other:?}"),
             };
             log.push(request.command.clone());
             revision += 1;
@@ -335,7 +434,7 @@ fn backend(namespace: &str) -> (thread::JoinHandle<Vec<Command>>, mpsc::Receiver
             pipe.send_frame(&encode(&response).unwrap(), later())
                 .unwrap();
         }
-        log
+        (log, shown)
     });
     (server, bound)
 }
@@ -403,9 +502,11 @@ fn activation_pairs_sinks_and_a_refused_key_sink_rolls_back_the_thread_sink() {
         tip.Deactivate().unwrap();
     }
     assert!(manager.sinks.borrow().is_empty() && manager.keys.get().is_none());
+    // 失败的激活不登记图标；成功激活登记一个，停用时注销。
+    assert!(manager.items.borrow().is_empty());
     assert_eq!(
         *manager.released.borrow(),
-        ["thread", "keys", "thread", "keyboard"]
+        ["thread", "indicator", "keys", "thread", "keyboard"]
     );
 }
 
@@ -451,7 +552,16 @@ fn activation_opens_a_closed_keyboard_and_reopens_it_until_deactivated() {
     assert!(manager.writers.borrow().is_empty());
     assert_eq!(
         *manager.released.borrow(),
-        ["keys", "thread", "keyboard", "keys", "thread", "keyboard"]
+        [
+            "indicator",
+            "keys",
+            "thread",
+            "keyboard",
+            "indicator",
+            "keys",
+            "thread",
+            "keyboard"
+        ]
     );
 }
 
@@ -471,11 +581,13 @@ fn unavailable_backend_or_inactive_service_passes_keys_without_touching_the_docu
             );
         }
     }
-    let (_manager, thread_mgr) = manager();
+    let (manager, thread_mgr) = manager();
     let tip: ITfTextInputProcessorEx = object.to_interface();
     // SAFETY: 合成线程管理器；命名空间内没有后台，连接立即失败。
     unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
     let active = object.active().unwrap();
+    // 后台不在：右键弹出的真实菜单各项置灰（内容见 indicator 测试），Enter 收起菜单但选不中，什么都不发。
+    right_click(&button(&manager), &[VK_DOWN, VK_RETURN]);
     // 后台不在时预判不吃任何键：宿主未必把“预判吃下、处理时放行”的原键交还应用。
     assert!(!active.ready(later()));
     for vk in [VK_U, VK_OEM_COMMA, VK_SPACE] {
@@ -544,6 +656,14 @@ fn activated_service_shows_candidates_selects_by_click_and_refocuses_after_focus
     assert!(active.input(&context, Key::Space, later()).unwrap());
     assert_eq!(text(&doc), "的");
     assert!(shown(&active).is_none() && !popup.showing(serial));
+    // 后台可用：走系统右键的真实入口 OnClick(右键)，真实菜单里选“设置”“查字”，Esc 取消不发；
+    // 再左键单击。都经同一连接唤起，不另开会话（下方请求记录里没有新的 Open）。
+    let button = button(&manager);
+    right_click(&button, &[VK_DOWN, VK_RETURN]);
+    right_click(&button, &[VK_DOWN, VK_DOWN, VK_RETURN]);
+    right_click(&button, &[VK_ESCAPE]);
+    // SAFETY: 本线程同步回调本 TIP 的图标按钮。
+    unsafe { button.OnClick(TF_LBI_CLK_LEFT, POINT::default(), &RECT::default()) }.unwrap();
     let focus: ITfThreadMgrEventSink = object.to_interface();
     // SAFETY: 模拟文档焦点变化；参数为空表示焦点离开本线程文档。
     unsafe { focus.OnSetFocus(None, None) }.unwrap();
@@ -574,13 +694,17 @@ fn activated_service_shows_candidates_selects_by_click_and_refocuses_after_focus
     unsafe { tip.Deactivate() }.unwrap();
     assert_eq!(text(&other), "");
     assert!(active.current_popup().is_none() && !popup.showing(serial));
-    assert_eq!(*manager.released.borrow(), ["keys", "thread", "keyboard"]);
+    assert_eq!(
+        *manager.released.borrow(),
+        ["indicator", "keys", "thread", "keyboard"]
+    );
     let key = |key, epoch| Command::Key { key, epoch };
     let focus = |epoch| Command::Focus {
         epoch,
         focused: true,
     };
-    let log = server.join().unwrap();
+    let (log, panels) = server.join().unwrap();
+    assert_eq!(panels, [Panel::Settings, Panel::Lookup, Panel::Settings]);
     let Command::Select { revision, .. } = log[6] else {
         panic!("第七个请求应是选字：{log:?}");
     };

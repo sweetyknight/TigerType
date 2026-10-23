@@ -3,7 +3,7 @@
 use std::time::Instant;
 use tigertype_contracts::{
     InputState, Key, KeyOutcome, Options,
-    protocol::{Command, Rejection, Reply},
+    protocol::{Command, Panel, Rejection, Reply},
 };
 use tigertype_ipc::Error;
 
@@ -17,6 +17,8 @@ pub trait Channel {
         command: Command,
         deadline: Instant,
     ) -> Result<Reply, Error>;
+    /// 只在本次 ensure 成功后调用：请后台显示查字或设置窗，不占会话；传输错误时实现须作废连接。
+    fn show(&mut self, panel: Panel, deadline: Instant) -> Result<(), Error>;
     /// 释放当前连接；下次 ensure 重新连接。
     fn cancel(&mut self);
 }
@@ -131,6 +133,17 @@ impl<C: Channel> Host<C> {
             }
         }
     }
+    /// 图标菜单请后台显示窗口：与会话无关，成功时会话与输入状态不变；失败作废连接，下一键重建会话。
+    pub fn show(&mut self, panel: Panel, deadline: Instant) -> bool {
+        if !self.ready(deadline) {
+            return false;
+        }
+        let shown = self.channel.show(panel, deadline).is_ok();
+        if !shown {
+            self.fail();
+        }
+        shown
+    }
     /// 停用：立即断开，后台随即移除本宿主的会话。
     pub fn close(&mut self) {
         self.fail();
@@ -214,6 +227,9 @@ mod tests {
         replies: VecDeque<Result<Reply, Error>>,
         log: Vec<(u64, Command)>,
         cancelled: u32,
+        /// 唤起结果，缺省为成功；shown 记录每次唤起的目标窗口。
+        show: VecDeque<Result<(), Error>>,
+        shown: Vec<Panel>,
     }
     #[derive(Clone, Default)]
     struct Fake(Rc<RefCell<Script>>);
@@ -225,6 +241,11 @@ mod tests {
             let mut script = self.0.borrow_mut();
             script.log.push((session, command));
             script.replies.pop_front().expect("脚本缺少回复")
+        }
+        fn show(&mut self, panel: Panel, _: Instant) -> Result<(), Error> {
+            let mut script = self.0.borrow_mut();
+            script.shown.push(panel);
+            script.show.pop_front().unwrap_or(Ok(()))
         }
         fn cancel(&mut self) {
             self.0.borrow_mut().cancelled += 1;
@@ -488,6 +509,43 @@ mod tests {
         fake.0.borrow_mut().fresh.push_back(Ok(true));
         assert!(host.ready(deadline()));
         assert!(!host.state().composing);
+        fake.0.borrow_mut().replies.extend([
+            ok(Reply::Opened),
+            ok(Reply::Focused),
+            Ok(outcome("u")),
+        ]);
+        host.key(Key::Character('u'), deadline()).unwrap();
+        assert_eq!(take_log(&fake), [(2, open()), (2, focus(2)), (2, key(2))]);
+    }
+
+    #[test]
+    fn showing_a_panel_keeps_the_session_and_a_failure_reopens_on_the_next_key() {
+        let fake = Fake::default();
+        let mut host = Host::new(fake.clone());
+        // 后台不在：不发唤起请求。
+        fake.0.borrow_mut().fresh.push_back(Err(Error::Busy));
+        assert!(!host.show(Panel::Settings, deadline()));
+        assert!(fake.0.borrow().shown.is_empty());
+        fake.0.borrow_mut().fresh.push_back(Ok(true));
+        fake.0.borrow_mut().replies.extend([
+            ok(Reply::Opened),
+            ok(Reply::Focused),
+            Ok(outcome("u")),
+            Ok(outcome("uu")),
+        ]);
+        host.key(Key::Character('u'), deadline()).unwrap();
+        take_log(&fake);
+        // 唤起成功不打断组合：下一键仍在原会话上直接发送。
+        assert!(host.show(Panel::Settings, deadline()));
+        assert!(host.state().composing);
+        host.key(Key::Character('u'), deadline()).unwrap();
+        assert_eq!(take_log(&fake), [(1, key(1))]);
+        // 唤起失败作废连接，下一键在新连接上重建会话。
+        fake.0.borrow_mut().show.push_back(Err(Error::TimedOut));
+        assert!(!host.show(Panel::Lookup, deadline()));
+        assert_eq!(fake.0.borrow().cancelled, 2);
+        assert_eq!(fake.0.borrow().shown, [Panel::Settings, Panel::Lookup]);
+        fake.0.borrow_mut().fresh.push_back(Ok(true));
         fake.0.borrow_mut().replies.extend([
             ok(Reply::Opened),
             ok(Reply::Focused),

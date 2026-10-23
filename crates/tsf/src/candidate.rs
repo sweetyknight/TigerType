@@ -53,7 +53,7 @@ const GAP: i32 = 10;
 const FOOTER: i32 = 26;
 const MIN_WIDTH: i32 = 112;
 const MAX_WIDTH: i32 = 480;
-const UI_FACE: &str = "Microsoft YaHei UI";
+pub(crate) const UI_FACE: &str = "Microsoft YaHei UI";
 
 thread_local! {
     // 窗口过程按句柄找回本线程的候选窗；弱引用随候选窗释放自动失效，不经窗口数据传指针。
@@ -139,22 +139,22 @@ pub(crate) fn fallback_caret() -> Option<RECT> {
 /// 绘制用颜色。产品要求界面不得出现蓝色，所以不用系统强调色/选中色，取主题配色；
 /// 仅在用户自己开启高对比度时改用其系统颜色，保证可读性。
 #[derive(Clone, Copy, PartialEq, Debug)]
-struct Colors {
-    window: COLORREF,
+pub(crate) struct Colors {
+    pub(crate) window: COLORREF,
     border: COLORREF,
     line: COLORREF,
     field: COLORREF,
-    text: COLORREF,
+    pub(crate) text: COLORREF,
     label: COLORREF,
-    muted: COLORREF,
+    pub(crate) muted: COLORREF,
     faint: COLORREF,
-    highlight: COLORREF,
-    chosen: COLORREF,
+    pub(crate) highlight: COLORREF,
+    pub(crate) chosen: COLORREF,
     chosen_hint: COLORREF,
-    bar: COLORREF,
+    pub(crate) bar: COLORREF,
 }
 /// 主题颜色为 0xRRGGBB，GDI 的 COLORREF 为 0x00BBGGRR。
-const fn rgb(value: u32) -> COLORREF {
+pub(crate) const fn rgb(value: u32) -> COLORREF {
     COLORREF((value & 0xFF) << 16 | (value & 0xFF00) | (value >> 16 & 0xFF))
 }
 const fn themed(p: Palette) -> Colors {
@@ -173,7 +173,7 @@ const fn themed(p: Palette) -> Colors {
         bar: rgb(p.accent),
     }
 }
-fn colors(palette: Palette) -> Colors {
+pub(crate) fn colors(palette: Palette) -> Colors {
     let mut contrast = HIGHCONTRASTW {
         cbSize: size_of::<HIGHCONTRASTW>() as u32,
         ..Default::default()
@@ -218,7 +218,13 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
 /// 按优先顺序建字体：GDI 找不到字体会静默替换，所以核对实际字体名，不符换下一个。
-fn create_font(dc: HDC, faces: &[&str], point: i32, dpi: u32, weight: i32) -> Result<HFONT> {
+pub(crate) fn create_font(
+    dc: HDC,
+    faces: &[&str],
+    point: i32,
+    dpi: u32,
+    weight: i32,
+) -> Result<HFONT> {
     let mut last = HFONT::default();
     for (index, face) in faces.iter().enumerate() {
         let name: Vec<u16> = face.encode_utf16().chain(Some(0)).collect();
@@ -271,7 +277,7 @@ fn face_is(dc: HDC, font: HFONT, face: &str) -> bool {
     actual.eq_ignore_ascii_case(face)
 }
 /// 用系统 DC 画刷/画笔改色绘制，逐键重绘不新建 GDI 对象。
-fn fill(dc: HDC, rect: &RECT, color: COLORREF) {
+pub(crate) fn fill(dc: HDC, rect: &RECT, color: COLORREF) {
     // SAFETY: DC 画刷为库存对象，无需释放。
     unsafe {
         SetDCBrushColor(dc, color);
@@ -279,7 +285,7 @@ fn fill(dc: HDC, rect: &RECT, color: COLORREF) {
     }
 }
 /// 圆角矩形：fill 为 Some 时实心填充，否则只描边。
-fn round(dc: HDC, rect: &RECT, radius: i32, fill: Option<COLORREF>, line: COLORREF) {
+pub(crate) fn round(dc: HDC, rect: &RECT, radius: i32, fill: Option<COLORREF>, line: COLORREF) {
     // SAFETY: 只选入库存画刷/画笔，绘制后还原。
     unsafe {
         let (brush, pen) = match fill {
@@ -309,7 +315,7 @@ fn round(dc: HDC, rect: &RECT, radius: i32, fill: Option<COLORREF>, line: COLORR
         SelectObject(dc, old_brush);
     }
 }
-fn draw_text(
+pub(crate) fn draw_text(
     dc: HDC,
     font: HFONT,
     color: COLORREF,

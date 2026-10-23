@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
-use tigertype_contracts::protocol::{Command, Message, Reply, Request, Route};
+use tigertype_contracts::protocol::{Command, Message, Panel, Reply, Request, Route};
 pub const HOST_SLOTS: usize = 16;
 
 pub struct Client {
@@ -23,9 +23,24 @@ impl Client {
     pub fn stop_backend(&mut self, deadline: Instant) -> Result<()> {
         self.manage(Message::Stop, Message::Stopped, deadline)
     }
-    /// 请求后台显示查字窗；授权方式与停机相同。调用方应先放行前台切换，否则窗口可能停在后面。
-    pub fn show_lookup(&mut self, deadline: Instant) -> Result<()> {
-        self.manage(Message::Show, Message::Shown, deadline)
+    /// 请求后台显示查字或设置窗：一问一答，不占用会话序号；成功后连接照常用于输入，失败即作废。
+    /// 调用方应先放行前台切换，否则窗口可能停在后面。
+    pub fn show(&mut self, panel: Panel, deadline: Instant) -> Result<()> {
+        if self.closed {
+            return Err(Error::Closed);
+        }
+        let result = (|| {
+            self.pipe
+                .send_frame(&encode(&Message::Show(panel))?, deadline)?;
+            if decode(&self.pipe.receive_frame(deadline)?)? != Message::Shown {
+                return Err(Error::Invalid("唤起回复不符"));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.cancel();
+        }
+        result
     }
     /// 管理请求一问一答后即作废连接，不与输入会话混用。
     fn manage(&mut self, request: Message, expected: Message, deadline: Instant) -> Result<()> {

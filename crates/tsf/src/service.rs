@@ -1,10 +1,12 @@
 //! TIP 组装：激活时登记按键/焦点 sink 并取得进程期驻留传输；按键在同步编辑会话内完成 IPC、写入与取组合位置，
 //! 拿不到编辑锁、后台不可用或结果不确定都放行原键。候选窗在本线程自绘，点击经异步编辑会话选字。
 //! 激活期间保持键盘开闭状态为“开”：TSF 不把按键交给关闭状态下的 TIP。
+//! 激活时登记任务栏输入法图标，其菜单经同一连接请后台显示设置/查字窗。
 use crate::{
     candidate::{Popup, bounded, fallback_caret},
     edit::{EditReport, Editor, Verdict},
     host::{Channel, Host},
+    indicator::Indicator,
     key::{self, Modifiers},
 };
 use std::{
@@ -13,13 +15,13 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     ptr,
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::OnceLock,
     time::{Duration, Instant},
 };
 use tigertype_contracts::{
-    Key,
-    protocol::{Command, Reply},
+    Key, Options, Palette,
+    protocol::{Command, Panel, Reply},
 };
 use tigertype_ipc::{Error as IpcError, pipe::Runtime, service::Link};
 use windows::{
@@ -38,6 +40,7 @@ use windows::{
                 VK_CONTROL, VK_MENU, VK_SHIFT,
             },
             TextServices::*,
+            WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow},
         },
     },
     core::{BOOL, Error, GUID, HRESULT, IUnknown, IUnknownImpl, Interface, Ref, Result, implement},
@@ -133,7 +136,8 @@ fn watch_keyboard(
     let cookie = unsafe { source.AdviseSink(&ITfCompartmentEventSink::IID, sink) }.ok()?;
     Some((compartment, cookie))
 }
-fn guarded(f: impl FnOnce() -> Result<()>) -> Result<()> {
+/// panic 不穿过系统回调。
+pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| Err(E_UNEXPECTED.into()))
 }
 fn busy<T>(_: T) -> Error {
@@ -161,6 +165,12 @@ impl Channel for Backend {
             .ok_or(IpcError::Closed)?
             .request(session, command, deadline)
     }
+    fn show(&mut self, panel: Panel, deadline: Instant) -> std::result::Result<(), IpcError> {
+        self.link
+            .client()
+            .ok_or(IpcError::Closed)?
+            .show(panel, deadline)
+    }
     fn cancel(&mut self) {
         // 直接释放管道：后台立即发现断开，下次 ensure 重新连接。
         self.link.close();
@@ -180,6 +190,29 @@ struct Active {
     quiet: bool,
     /// 键盘开闭状态容器与其 sink cookie。
     keyboard: Option<(ITfCompartment, u32)>,
+    /// 已登记的任务栏输入法图标；登记失败为 None，只是没有图标菜单。
+    indicator: Option<ITfLangBarItemButton>,
+}
+/// 登记任务栏输入法图标；按钮经弱引用回到激活状态，不形成引用环。
+fn indicator(manager: &ITfThreadMgr, owner: &Weak<Active>) -> Option<ITfLangBarItemButton> {
+    let items: ITfLangBarItemMgr = manager.cast().ok()?;
+    let (ready, show) = (owner.clone(), owner.clone());
+    let button: ITfLangBarItemButton = Indicator::new(
+        move || match ready.upgrade() {
+            // 先确认连接：刚重连时状态回到默认，配色随之取默认值，直到下一键拿到后台设置。
+            Some(active) => (active.ready(Instant::now() + BUDGET), active.palette()),
+            None => (false, Options::default().palette()),
+        },
+        move |panel| {
+            if let Some(active) = show.upgrade() {
+                active.show(panel);
+            }
+        },
+    )
+    .into();
+    // SAFETY: 登记本按钮，停用时以同一对象注销。
+    unsafe { items.AddItem(&button) }.ok()?;
+    Some(button)
 }
 impl Active {
     fn reopen(&self) -> Result<()> {
@@ -222,6 +255,13 @@ impl Active {
         self.host
             .try_borrow_mut()
             .is_ok_and(|mut host| host.ready(deadline))
+    }
+    /// 菜单配色：取上次回复里的后台设置，与候选窗一致。
+    fn palette(&self) -> Palette {
+        self.host
+            .try_borrow()
+            .map_or_else(|_| Options::default(), |host| host.state().options)
+            .palette()
     }
     /// 映射本键并按上次状态判断是否吃键；不发输入请求，后台连不上则不吃。
     fn judge(
@@ -366,7 +406,19 @@ impl Active {
             popup.unblock(serial);
         }
     }
-    /// 停用：取消组合、销毁候选窗、断开后台、注销 sink；单项失败不阻止其余释放。
+    /// 图标菜单：放行前台切换后请后台显示窗口。后台不可用时菜单已置灰，失败只作废连接并收起旧候选。
+    fn show(&self, panel: Panel) {
+        // SAFETY: 只放宽下一次前台切换；本进程没有前台权时调用失败，窗口照常显示，只是可能不到前台。
+        let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+        let shown = self
+            .host
+            .try_borrow_mut()
+            .is_ok_and(|mut host| host.show(panel, Instant::now() + BUDGET));
+        if !shown {
+            self.hide();
+        }
+    }
+    /// 停用：取消组合、销毁候选窗、断开后台、注销图标与 sink；单项失败不阻止其余释放。
     fn close(&self) {
         if let Some(editor) = self.current_editor() {
             editor.abandon();
@@ -376,6 +428,12 @@ impl Active {
         drop(popup);
         if let Ok(mut host) = self.host.try_borrow_mut() {
             host.close();
+        }
+        if let (Some(button), Ok(items)) =
+            (&self.indicator, self.manager.cast::<ITfLangBarItemMgr>())
+        {
+            // SAFETY: 以登记时的同一对象注销任务栏图标。
+            let _ = unsafe { items.RemoveItem(button) };
         }
         if let Ok(keystrokes) = self.manager.cast::<ITfKeystrokeMgr>() {
             // SAFETY: 以激活时的同一客户端编号注销，配对释放系统持有的按键 sink 引用。
@@ -474,7 +532,8 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
                 return Err(error);
             }
             let keyboard = watch_keyboard(&manager, tid, &self.to_interface());
-            *self.active.try_borrow_mut().map_err(busy)? = Some(Rc::new(Active {
+            let active = Rc::new_cyclic(|owner| Active {
+                indicator: indicator(&manager, owner),
                 manager,
                 client: tid,
                 cookie,
@@ -487,7 +546,8 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
                 popup: RefCell::new(None),
                 quiet: self.quiet,
                 keyboard,
-            }));
+            });
+            *self.active.try_borrow_mut().map_err(busy)? = Some(active);
             Ok(())
         })
     }

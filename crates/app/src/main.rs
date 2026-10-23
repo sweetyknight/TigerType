@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tigertype_app::{Result, import, installed, project_root};
-use tigertype_contracts::{Key, Options};
+use tigertype_contracts::{Key, Options, protocol::Panel};
 use tigertype_engine::{Dictionary, Session};
 use tigertype_ipc::{pipe::Runtime, service::Client};
 use windows_sys::Win32::{
@@ -16,7 +16,7 @@ use windows_sys::Win32::{
     },
 };
 
-/// 连接本登录会话中与本程序同映像的后台；管理请求同样要求映像一致。
+/// 连接本登录会话中与本程序同映像的后台；停止请求另要求调用方映像一致。
 fn backend(deadline: Instant) -> std::result::Result<Client, tigertype_ipc::Error> {
     let runtime = Runtime::new()?;
     Client::connect(&runtime, &std::env::current_exe()?, "backend", deadline)
@@ -50,7 +50,7 @@ fn run(args: &[std::ffi::OsString]) -> Result<()> {
                     unsafe {
                         AllowSetForegroundWindow(ASFW_ANY);
                     }
-                    client.show_lookup(deadline)?;
+                    client.show(Panel::Lookup, deadline)?;
                 }
                 // 本会话没有后台：本进程即成为后台并立即显示查字窗。
                 Err(tigertype_ipc::Error::Busy) => {

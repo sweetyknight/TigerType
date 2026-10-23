@@ -14,6 +14,7 @@ use std::{
 };
 use tigertype_contracts::{
     CandidateFont, CustomColors, Options, OutputForm, Palette, Theme,
+    protocol::Panel,
     ui::{Reply, Request},
 };
 use windows_sys::Win32::{
@@ -49,6 +50,8 @@ use windows_sys::Win32::{
         WindowsAndMessaging::*,
     },
 };
+
+mod tray;
 
 const ACTION: u32 = WM_APP + 1;
 const CLOSE: u32 = WM_APP + 2;
@@ -1158,10 +1161,12 @@ struct Window {
 }
 impl Window {
     fn create(class: &[u16], title: &str, owner: HWND, style: u32) -> Result<Self, String> {
+        // 设置窗可在查字窗隐藏时单独打开，被拥有窗口默认无任务栏按钮，须显式要一个，免得被挡住后找不回。
+        let extra = if owner.is_null() { 0 } else { WS_EX_APPWINDOW };
         // SAFETY: 字符串 NUL 终止；窗口归当前线程所有，没有传入业务指针。
         let handle = unsafe {
             CreateWindowExW(
-                WS_EX_CONTROLPARENT,
+                WS_EX_CONTROLPARENT | extra,
                 class.as_ptr(),
                 wide(title).as_ptr(),
                 style | WS_CLIPCHILDREN,
@@ -1563,7 +1568,7 @@ fn settings_window(class: &Class, owner: HWND, options: &Options) -> Result<Wind
     window.add(
         SUB,
         "STATIC",
-        "输入选项只影响普通输入；保存后重新启动后台生效。",
+        "输入选项只影响普通输入；保存后即时生效，无需重启后台。",
         SS_NOPREFIX,
     )?;
     for (index, (id, title, _)) in TOGGLES.iter().enumerate() {
@@ -1912,28 +1917,27 @@ fn keyboard(message: &MSG, main: &Window, settings: &Window) {
 }
 
 /// 当前线程专用于原生 UI；事件唤醒回复、系统消息驱动操作，不使用定时轮询。
-/// 后台进程内的固定 UI 线程：关闭主窗只隐藏，show 收到唤起即前置；show 断开（后台停止）才退出。
+/// 后台进程内的固定 UI 线程：启动即挂通知区图标，查字/设置窗等首次唤起（唤起信号或图标操作）才建；
+/// 关闭主窗只隐藏，再次唤起即前置目标窗口；show 断开（后台停止）才退出并删除图标。
 pub fn run(
     requests: SyncSender<Request>,
     inbox: Inbox<Reply>,
-    show: Inbox<()>,
+    show: Inbox<Panel>,
     options: Options,
 ) -> Result<(), String> {
     let _dpi = DpiContext::enter()?;
     PALETTE.with(|palette| palette.set(options.palette()));
+    let _tray = tray::Tray::new()?;
+    let Some(panel) = tray::first(&show)? else {
+        return Ok(());
+    };
     let class = Class::register()?;
     let mut main = lookup_window(&class, &options)?;
     let mut settings = settings_window(&class, main.handle, &options)?;
     let mut model = Model::new(options);
     set_options(&settings, options);
     refresh(&main, &settings, &model);
-    // 首次唤起同样前置：唤起方已放行前台切换，后台进程本身通常不在前台。
-    // SAFETY: 窗口和输入控件均创建成功，只显示本程序窗口，不注册或切换输入法。
-    unsafe {
-        ShowWindow(main.handle, SW_SHOW);
-        SetForegroundWindow(main.handle);
-        SetFocus(main.control(QUERY));
-    }
+    present(&main, &settings, &mut model, panel);
     event_loop(
         &mut main,
         &mut settings,
@@ -1944,13 +1948,38 @@ pub fn run(
     )
 }
 
+/// 显示并前置目标窗口，最小化时先还原。唤起方已放行前台切换；通知区图标被点击时本进程获准切前台。
+/// 设置页可单独打开（输入法图标或通知区图标），不连带显示查字窗；已打开的设置页保留草稿。
+fn present(main: &Window, settings: &Window, model: &mut Model, panel: Panel) {
+    let (window, focus) = match panel {
+        Panel::Lookup => (main, main.control(QUERY)),
+        Panel::Settings => {
+            if model.open_settings() {
+                set_options(settings, model.options);
+            }
+            (settings, settings.control(AUTO))
+        }
+    };
+    // SAFETY: 窗口与控件由调用方持有，只在本线程显示与激活，不注册或切换输入法。
+    unsafe {
+        let mode = if IsIconic(window.handle) != 0 {
+            SW_RESTORE
+        } else {
+            SW_SHOW
+        };
+        ShowWindow(window.handle, mode);
+        SetForegroundWindow(window.handle);
+        SetFocus(focus);
+    }
+}
+
 fn event_loop(
     main: &mut Window,
     settings: &mut Window,
     model: &mut Model,
     requests: &SyncSender<Request>,
     inbox: &Inbox<Reply>,
-    show: &Inbox<()>,
+    show: &Inbox<Panel>,
 ) -> Result<(), String> {
     let events = [inbox.event.as_raw_handle(), show.event.as_raw_handle()];
     let mut main_focus = None;
@@ -1970,22 +1999,7 @@ fn event_loop(
             return Err(error());
         }
         match show.receiver.try_recv() {
-            Ok(()) => {
-                // 唤起方已放行前台切换；最小化时先还原，再把焦点放回查询框。
-                // SAFETY: 主窗口由本函数持有，只在本线程显示与激活。
-                unsafe {
-                    ShowWindow(
-                        main.handle,
-                        if IsIconic(main.handle) != 0 {
-                            SW_RESTORE
-                        } else {
-                            SW_SHOW
-                        },
-                    );
-                    SetForegroundWindow(main.handle);
-                    SetFocus(main.control(QUERY));
-                }
-            }
+            Ok(panel) => present(main, settings, model, panel),
             Err(TryRecvError::Empty) => {}
             // 后台停止：放弃未保存的草稿与窗口，线程退出由调用方 join。
             Err(TryRecvError::Disconnected) => return Ok(()),
@@ -2045,10 +2059,12 @@ fn event_loop(
                     model.settings_open = false;
                     settings_focus = None;
                     set_options(settings, model.options);
-                    // SAFETY: 设置窗仅隐藏，所有权继续由本函数持有。
+                    // SAFETY: 设置窗仅隐藏，所有权继续由本函数持有；单独打开时查字窗仍隐藏，不去激活它。
                     unsafe {
                         ShowWindow(settings.handle, SW_HIDE);
-                        SetFocus(main.control(QUERY));
+                        if IsWindowVisible(main.handle) != 0 {
+                            SetFocus(main.control(QUERY));
+                        }
                     }
                 }
                 LAYOUT => {
@@ -2101,15 +2117,7 @@ fn event_loop(
                             None
                         }
                         SETTINGS => {
-                            if model.open_settings() {
-                                set_options(settings, model.options);
-                            }
-                            // SAFETY: 显示本程序拥有的设置窗，并把焦点放到第一个开关。
-                            unsafe {
-                                ShowWindow(settings.handle, SW_SHOW);
-                                SetForegroundWindow(settings.handle);
-                                SetFocus(settings.control(AUTO));
-                            }
+                            present(main, settings, model, Panel::Settings);
                             None
                         }
                         COPY if model.result.as_ref().is_some_and(|p| !p.items.is_empty()) => {
@@ -2140,6 +2148,8 @@ fn event_loop(
                     }
                     refresh(main, settings, model);
                 }
+                // 通知区图标的单击或菜单选择。
+                tray::OPEN => present(main, settings, model, tray::decode(message.wParam)),
                 _ => keyboard(&message, main, settings),
             }
         }
@@ -2346,7 +2356,7 @@ mod tests {
             main.text(QUERY, "𠀀");
             let mut model = Model::new(Options::default());
             // 唤起邮箱保持连接，代表后台仍在运行。
-            let (show_sender, show) = crate::mailbox::<()>().unwrap();
+            let (show_sender, show) = crate::mailbox::<Panel>().unwrap();
             let (requests, receiver) = std::sync::mpsc::sync_channel(1);
             let (replies, inbox) = crate::mailbox().unwrap();
             let worker = std::thread::spawn(move || {

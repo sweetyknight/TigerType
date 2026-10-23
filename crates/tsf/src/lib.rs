@@ -1,8 +1,10 @@
-//! TSF TIP DLL：类工厂、按键/焦点 sink、组合编辑组件、宿主内候选窗与注册入口；只依赖 contracts/ipc，不加载词表或引擎。
+//! TSF TIP DLL：类工厂、按键/焦点 sink、组合编辑组件、宿主内候选窗、任务栏输入法图标与注册入口；
+//! 只依赖 contracts/ipc，不加载词表或引擎。
 #![cfg(windows)]
 mod candidate;
 mod edit;
 mod host;
+mod indicator;
 mod key;
 mod register;
 mod service;

@@ -2,7 +2,7 @@
 
 use tigertype_contracts::{
     Candidate, Composition, InputState, KeyOutcome, MAX_CANDIDATES, MAX_TEXT_BYTES,
-    protocol::{Command, Message, Rejection, Reply, Request, Response, Route, VERSION},
+    protocol::{Command, Message, Panel, Rejection, Reply, Request, Response, Route, VERSION},
 };
 use tigertype_ipc::{HEADER_LEN, MAX_BODY_LEN, decode, decode_response, encode, frame_len};
 
@@ -121,7 +121,8 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
         Message::Hello,
         Message::Stop,
         Message::Stopped,
-        Message::Show,
+        Message::Show(Panel::Lookup),
+        Message::Show(Panel::Settings),
         Message::Shown,
         Message::Welcome {
             generation: 7,
