@@ -121,6 +121,8 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
         Message::Hello,
         Message::Stop,
         Message::Stopped,
+        Message::Show,
+        Message::Shown,
         Message::Welcome {
             generation: 7,
             host: 8,

@@ -257,9 +257,10 @@ impl IRawElementProviderFragment_Impl for Item_Impl {
     fn BoundingRectangle(&self) -> Result<UiaRect> {
         guarded(|| {
             let rect = self.read(|popup, view| {
-                view.rows
+                view.layout
+                    .rows
                     .get(self.index)
-                    .map(|(rect, _)| popup.screen(*rect))
+                    .map(|rect| popup.screen(*rect))
             })?;
             let rect = rect.ok_or_else(gone)?;
             Ok(UiaRect {

@@ -21,13 +21,21 @@ pub struct Client {
 impl Client {
     /// 仅管理工具可请求停机；服务端会打开调用进程核对映像，不把登录 SID 当作停机授权。
     pub fn stop_backend(&mut self, deadline: Instant) -> Result<()> {
+        self.manage(Message::Stop, Message::Stopped, deadline)
+    }
+    /// 请求后台显示查字窗；授权方式与停机相同。调用方应先放行前台切换，否则窗口可能停在后面。
+    pub fn show_lookup(&mut self, deadline: Instant) -> Result<()> {
+        self.manage(Message::Show, Message::Shown, deadline)
+    }
+    /// 管理请求一问一答后即作废连接，不与输入会话混用。
+    fn manage(&mut self, request: Message, expected: Message, deadline: Instant) -> Result<()> {
         if self.closed {
             return Err(Error::Closed);
         }
         let result = (|| {
-            self.pipe.send_frame(&encode(&Message::Stop)?, deadline)?;
-            if decode(&self.pipe.receive_frame(deadline)?)? != Message::Stopped {
-                return Err(Error::Invalid("停止后台回复不符"));
+            self.pipe.send_frame(&encode(&request)?, deadline)?;
+            if decode(&self.pipe.receive_frame(deadline)?)? != expected {
+                return Err(Error::Invalid("管理请求回复不符"));
             }
             Ok(())
         })();

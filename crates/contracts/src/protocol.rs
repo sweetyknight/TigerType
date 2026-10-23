@@ -1,8 +1,10 @@
 //! v5 删除宿主通知、领取点击和焦点光标矩形；候选位置留在宿主进程。
-//! v6 在输入状态中加入英文标点开关，供 TSF 本地按键判定；旧协议直接拒绝。
+//! v6 在输入状态中加入英文标点开关，供 TSF 本地按键判定。
+//! v7 在选项中加入配色主题与候选字体，随输入状态带给宿主内候选窗；管理端可请求后台唤起查字窗。
+//! 旧协议直接拒绝。
 use crate::{InputState, Key, KeyOutcome, Options};
 use serde::{Deserialize, Serialize};
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,6 +100,9 @@ pub enum Message {
     Hello,
     Stop,
     Stopped,
+    // 管理端请求后台在其 UI 线程显示查字窗；与 Stop 一样核对调用进程映像。
+    Show,
+    Shown,
     Welcome { generation: u64, host: u64 },
     Request(Request),
     Response(Response),

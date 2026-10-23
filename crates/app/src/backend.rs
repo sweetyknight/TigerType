@@ -1,14 +1,19 @@
 //! 每登录会话一后台：固定反应器/引擎线程，16 个预建请求管道，不按连接创建线程。
 //! 宿主只凭 DACL 与同会话接纳，不打开宿主进程；断开由常驻读失败发现，始终保留至少一个空闲监听槽。
-use crate::{Result, data::Data, dispatch::Dispatcher, import};
+//! 查字/设置窗在同进程的固定 UI 线程，保存后的设置经交接槽热重载到引擎线程，输入路径不读盘。
+use crate::{Result, data::Data, dispatch::Dispatcher, import, lookup::Controller};
 use std::{
-    os::windows::io::AsRawHandle,
+    io,
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     path::Path,
+    sync::{Arc, Mutex, mpsc},
+    thread,
     time::{Duration, Instant},
 };
 use tigertype_contracts::{
     Options,
     protocol::{Command, Message},
+    ui::Reply as UiReply,
 };
 use tigertype_engine::Dictionary;
 use tigertype_ipc::{
@@ -16,11 +21,43 @@ use tigertype_ipc::{
     pipe::{Listener, Pending, Pipe, Runtime, grant_app_container_query},
     service::HOST_SLOTS,
 };
+use tigertype_ui::ReplySender;
 use windows_sys::Win32::{
     Foundation::WAIT_FAILED,
     Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
-    System::Threading::{INFINITE, SetEvent, WaitForSingleObject},
+    System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects},
 };
+
+/// 查字工作线程保存设置后交给引擎线程的最新设置：只留最后一份，事件唤醒引擎，不排队、不轮询。
+struct Reload {
+    latest: Mutex<Option<Options>>,
+    event: OwnedHandle,
+}
+impl Reload {
+    fn new() -> Result<Self> {
+        // SAFETY: 无命名、不可继承的自动复位事件；成功后立即交给 OwnedHandle 配对释放。
+        let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+        if event.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(Self {
+            latest: Mutex::new(None),
+            // SAFETY: 句柄刚创建，尚无其他所有者。
+            event: unsafe { OwnedHandle::from_raw_handle(event) },
+        })
+    }
+    fn set(&self, options: Options) -> Result<()> {
+        *self.latest.lock().map_err(|_| "设置交接锁已损坏")? = Some(options);
+        // SAFETY: self 持有事件句柄；失败必须报错，不能让已保存的设置静默不生效。
+        if unsafe { SetEvent(self.event.as_raw_handle()) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+    fn take(&self) -> Result<Option<Options>> {
+        Ok(self.latest.lock().map_err(|_| "设置交接锁已损坏")?.take())
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Phase {
@@ -153,6 +190,7 @@ impl Slot {
         options: Options,
         image: &Path,
         clock: &mut u64,
+        show: Option<&ReplySender<()>>,
     ) -> Result<()> {
         let Some(event) = self.end.tick()? else {
             return Ok(());
@@ -172,6 +210,12 @@ impl Slot {
                 self.end.pipe.verify_client_image(image)?;
                 self.stopping = true;
                 tigertype_ipc::encode(&Message::Stopped)?
+            }
+            Message::Show if self.host.is_some() => {
+                // 与停止同样核对调用进程映像；窗口由 UI 线程创建，这里只投递唤起信号。
+                self.end.pipe.verify_client_image(image)?;
+                show.ok_or("此后台未提供查字窗")?.send(())?;
+                tigertype_ipc::encode(&Message::Shown)?
             }
             Message::Hello if self.host.is_none() => {
                 let host = dispatch.add_host()?;
@@ -203,6 +247,9 @@ pub struct Server<'a> {
     options: Options,
     image: std::path::PathBuf,
     clock: u64,
+    reload: Arc<Reload>,
+    // 正式后台才有查字 UI 线程；随 Server 释放而断开，UI 线程据此退出。
+    show: Option<ReplySender<()>>,
 }
 impl<'a> Server<'a> {
     /// namespace 在正式入口固定为 backend；测试使用新建独立标签，不连接现用后台。
@@ -240,6 +287,8 @@ impl<'a> Server<'a> {
             options,
             image: std::env::current_exe()?,
             clock: 0,
+            reload: Arc::new(Reload::new()?),
+            show: None,
         })
     }
     fn remove(&mut self, index: usize) {
@@ -290,6 +339,12 @@ impl<'a> Server<'a> {
     }
     fn serve(&mut self) -> Result<()> {
         loop {
+            // 热重载先于本轮请求生效：保存完成之后发出的请求一定用上新设置。
+            // 新会话随 Open 拿到新设置，已打开的会话等组合结束再换。
+            if let Some(options) = self.reload.take()? {
+                self.options = options;
+                self.dispatch.reconfigure(options);
+            }
             // 每次事件只访问固定 16 槽；空闲等待内核事件，不遍历词表、不忙轮询。
             for index in 0..HOST_SLOTS {
                 if let Some(slot) = self.slots[index].as_mut() {
@@ -300,6 +355,7 @@ impl<'a> Server<'a> {
                             self.options,
                             &self.image,
                             &mut self.clock,
+                            self.show.as_ref(),
                         )
                         .is_err()
                     {
@@ -326,33 +382,154 @@ impl<'a> Server<'a> {
                     .div_ceil(1_000_000)
                     .min((u32::MAX - 1) as u128) as u32
             });
-            // SAFETY: Runtime 持有完成事件；完成与最近期限共用一次等待，不等待宿主进程句柄。
-            if unsafe {
-                WaitForSingleObject(self.runtime.completion_event().as_raw_handle(), timeout)
-            } == WAIT_FAILED
-            {
+            let events = [
+                self.runtime.completion_event().as_raw_handle(),
+                self.reload.event.as_raw_handle(),
+            ];
+            // SAFETY: Runtime 与 Reload 持有两个事件；完成、热重载与最近期限共用一次等待，不等待宿主进程句柄。
+            if unsafe { WaitForMultipleObjects(2, events.as_ptr(), 0, timeout) } == WAIT_FAILED {
                 return Err(std::io::Error::last_os_error().into());
             }
         }
     }
 }
 
-/// 前台线程即固定反应器/引擎线程；不显示后台候选窗，用 stop 命令停止。
-pub fn run(package: &Path, directory: &Path) -> Result<()> {
+/// 前台线程即固定反应器/引擎线程；查字/设置另有固定 UI 线程与工作线程，三者共用只读词表，
+/// 用 stop 命令停止。show 为真时启动即显示查字窗（用户唤起时后台尚未运行）。
+pub fn run(package: &Path, directory: &Path, show: bool) -> Result<()> {
     let dictionary = Dictionary::new(import::load(package)?.data)?;
-    // 受管目录租约在后台运行期间保持，退出后才释放。
+    // 受管目录租约归查字工作线程，在后台运行期间保持，退出后才释放。
     let data = if directory.try_exists()? {
         Data::open(directory)?
     } else {
         Data::create(directory)?
     };
-    let options = data
-        .settings()?
-        .as_deref()
-        .map(serde_json::from_slice)
-        .transpose()?
-        .unwrap_or_default();
-    let result = Server::new(&dictionary, "backend", options)?.run();
-    drop(data);
-    result
+    // 设置文件可能被外部改动；控制器载入时校验，不把偏蓝或不可读的配色发给宿主候选窗。
+    let mut controller = Controller::new(&dictionary, data)?;
+    let options = controller.options();
+    let mut server = Server::new(&dictionary, "backend", options)?;
+    let reload = server.reload.clone();
+    let (show_sender, show_inbox) = tigertype_ui::mailbox()?;
+    if show {
+        show_sender.send(())?;
+    }
+    server.show = Some(show_sender);
+    let (requests, receiver) = mpsc::sync_channel(1);
+    let (replies, inbox) = tigertype_ui::mailbox()?;
+    thread::scope(|scope| {
+        let worker = thread::Builder::new()
+            .name("tiger-lookup-engine".into())
+            .spawn_scoped(scope, move || {
+                while let Ok(request) = receiver.recv() {
+                    let mut reply = controller.execute(request);
+                    let failed = match &reply {
+                        UiReply::Saved(Ok(options)) => reload.set(*options).err(),
+                        _ => None,
+                    };
+                    if let Some(error) = failed {
+                        reply = UiReply::Saved(Err(format!(
+                            "设置已写入，但未能交给输入后台（{error}）；请重新启动后台"
+                        )));
+                    }
+                    if replies.send(reply).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        let ui = thread::Builder::new()
+            .name("tiger-lookup-ui".into())
+            .spawn_scoped(scope, move || {
+                // 首次唤起前不建窗口；后台停止时唤起邮箱断开，UI 线程随之退出。
+                if show_inbox.receive().is_err() {
+                    return Ok(());
+                }
+                tigertype_ui::run(requests, inbox, show_inbox, options)
+            })?;
+        // run 结束即释放 Server 与唤起邮箱：UI 退出并断开请求通道，工作线程随之结束。
+        let result = server.run();
+        // 真正 join 后才确认线程与目录租约已释放，不用超时冒充终止。
+        let ui = ui.join().map_err(|_| "查字界面线程异常退出")?;
+        worker.join().map_err(|_| "查字工作线程异常退出")?;
+        result?;
+        ui.map_err(Into::into)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as ProcessCommand;
+    use tigertype_contracts::{OutputForm, protocol::Reply};
+    use tigertype_engine::{Data as EngineData, Entry};
+    use tigertype_ipc::service::Client;
+
+    /// 真实管道与引擎线程在限时子进程内运行：任何一步卡住都由父测试到期终止，不会挂起整轮测试。
+    #[test]
+    fn show_requests_and_saved_settings_reach_a_running_backend() -> Result<()> {
+        let status = crate::process::run(
+            ProcessCommand::new(std::env::current_exe()?).args([
+                "--ignored",
+                "--exact",
+                "backend::tests::show_and_reload_worker",
+            ]),
+            Duration::from_secs(20),
+        )?;
+        assert!(status.success());
+        Ok(())
+    }
+    #[test]
+    #[ignore = "只由限时父测试在子进程中运行，使用合成词表与独立命名空间"]
+    fn show_and_reload_worker() -> Result<()> {
+        let dictionary = Dictionary::new(EngineData {
+            entries: vec![Entry {
+                character: '的',
+                code: "u".into(),
+                weight: 1,
+            }],
+            common: vec!['的'],
+            ..Default::default()
+        })?;
+        let namespace = format!("reload-test-{}", std::process::id());
+        let mut server = Server::new(&dictionary, &namespace, Options::default())?;
+        let reload = server.reload.clone();
+        let (show, shown) = tigertype_ui::mailbox()?;
+        server.show = Some(show);
+        let changed = Options {
+            output_form: OutputForm::Traditional,
+            ..Default::default()
+        };
+        thread::scope(|scope| {
+            let client = scope.spawn(move || {
+                let deadline = || Instant::now() + Duration::from_secs(3);
+                let runtime = Runtime::new().unwrap();
+                let image = std::env::current_exe().unwrap();
+                // 管理端唤起：后台核对映像后先把信号投进 UI 邮箱，再回复 Shown。
+                Client::connect(&runtime, &image, &namespace, deadline())
+                    .unwrap()
+                    .show_lookup(deadline())
+                    .unwrap();
+                assert!(shown.try_receive().is_ok());
+                // 保存交接之后发出的 Open 一定拿到新设置，无需重启后台。
+                reload.set(changed).unwrap();
+                let mut client = Client::connect(&runtime, &image, &namespace, deadline()).unwrap();
+                let Reply::Opened(state) = client
+                    .request(
+                        1,
+                        Command::Open {
+                            options: Options::default(),
+                        },
+                        deadline(),
+                    )
+                    .unwrap()
+                else {
+                    panic!("需要 Opened 回复");
+                };
+                assert_eq!(state.options, changed);
+                client.stop_backend(deadline()).unwrap();
+            });
+            server.run()?;
+            client.join().map_err(|_| "客户端线程断言失败")?;
+            Ok(())
+        })
+    }
 }

@@ -1,5 +1,6 @@
 //! 隐藏候选窗：不在桌面显示、不注入系统输入，鼠标消息直接发给本测试线程的窗口。
 use super::*;
+use tigertype_contracts::{Candidate, Theme};
 use windows::{
     Win32::{
         System::{
@@ -57,29 +58,85 @@ fn press(popup: &Popup, down: &RECT, up: &RECT) {
     pump(popup);
 }
 
-#[test]
-fn default_palette_is_neutral_gray_without_any_blue_and_highlight_stays_readable() {
-    // 产品要求界面不得有蓝色：默认配色每个颜色的 R、G、B 必须相等。
-    let colors = [
-        NEUTRAL.back,
-        NEUTRAL.border,
-        NEUTRAL.text,
-        NEUTRAL.hint,
-        NEUTRAL.chosen_back,
-        NEUTRAL.chosen_text,
-        NEUTRAL.chosen_hint,
-    ];
-    for color in colors {
-        let [red, green, blue, _] = color.0.to_le_bytes();
-        assert!(red == green && green == blue, "{color:?}");
+/// 在内存位图上调用真实绘制并读像素，不显示窗口、不碰桌面。
+fn render(popup: &Popup, size: SIZE) -> impl Fn(i32, i32) -> COLORREF {
+    // SAFETY: 内存 DC 与位图只在本测试内使用，读完像素后由闭包持有直到测试结束（测试进程退出回收）。
+    unsafe {
+        let screen = GetDC(None);
+        let dc = CreateCompatibleDC(Some(screen));
+        let bitmap = CreateCompatibleBitmap(screen, size.cx, size.cy);
+        ReleaseDC(None, screen);
+        SelectObject(dc, bitmap.into());
+        let client = RECT {
+            right: size.cx,
+            bottom: size.cy,
+            ..Default::default()
+        };
+        popup.draw(dc, &client);
+        move |x, y| GetPixel(dc, x, y)
     }
 }
-// 编译期核对：高亮行与普通行可区分，正文比注释更深、注释比背景更深。
-const _: () = assert!(
-    NEUTRAL.chosen_back.0 != NEUTRAL.back.0
-        && NEUTRAL.text.0 < NEUTRAL.hint.0
-        && NEUTRAL.hint.0 < NEUTRAL.back.0
-);
+
+#[test]
+fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_needed() {
+    // 主题为 0xRRGGBB，GDI 为 0x00BBGGRR；字节序错会把琥珀画成蓝色。
+    assert_eq!(rgb(0xB45309), COLORREF(0x0953B4));
+    for theme in Theme::ALL {
+        let palette = Options {
+            theme,
+            ..Default::default()
+        }
+        .palette();
+        let c = themed(palette);
+        for color in [c.window, c.highlight, c.bar, c.text, c.border, c.accent] {
+            let [red, green, blue, _] = color.0.to_le_bytes();
+            assert!(blue <= red && blue <= green, "{theme:?} {color:?}");
+        }
+    }
+    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let mut shown = state(3, 1);
+    shown.options.theme = Theme::Bamboo;
+    shown.notice = "已到候选页边界".into();
+    shown.is_last_page = true;
+    popup.show(&shown, CARET, HWND::default()).unwrap();
+    let layout = popup.view.borrow().layout.clone();
+    assert!(layout.notice.is_some() && layout.footer.is_none());
+    assert!(layout.text_x < layout.comment_x && layout.comment_x < layout.size.cx);
+    let palette = shown.options.palette();
+    // 用户开启高对比度时改用系统色，不核对主题像素。
+    if colors(palette) == themed(palette) {
+        let c = themed(palette);
+        let pixel = render(&popup, layout.size);
+        let (normal, chosen) = (layout.rows[0], layout.rows[1]);
+        assert_eq!(pixel(normal.right - 3, normal.top + 2), c.window);
+        assert_eq!(pixel(chosen.left + 10, chosen.top + 2), c.highlight);
+        assert_eq!(
+            pixel(chosen.left + 1, (chosen.top + chosen.bottom) / 2),
+            c.bar
+        );
+    }
+    // 还有下一页或拼音反查时才出现页脚。
+    shown.is_last_page = false;
+    popup.show(&shown, CARET, HWND::default()).unwrap();
+    assert!(popup.view.borrow().layout.footer.is_some());
+    shown.is_last_page = true;
+    shown.mode = InputMode::Pinyin;
+    popup.show(&shown, CARET, HWND::default()).unwrap();
+    assert!(popup.view.borrow().layout.footer.is_some());
+}
+
+#[test]
+fn missing_font_falls_back_to_the_next_face_in_priority_order() {
+    // SAFETY: 屏幕 DC 只用于核对字体名，结束前归还；字体用后删除。
+    unsafe {
+        let dc = GetDC(None);
+        let font = create_font(dc, &["TigerType 不存在的字体", UI_FACE], 15, 96, 400).unwrap();
+        assert!(face_is(dc, font, UI_FACE));
+        assert!(!face_is(dc, font, "TigerType 不存在的字体"));
+        let _ = DeleteObject(font.into());
+        ReleaseDC(None, dc);
+    }
+}
 
 #[test]
 fn position_stays_inside_a_negative_coordinate_monitor_and_flips_above_the_bottom_edge() {
@@ -140,12 +197,12 @@ fn hidden_popup_lays_out_rows_and_turns_matching_press_release_into_one_stamped_
     }
     let (serial, rows) = {
         let view = popup.view.borrow();
-        (view.serial, view.rows.clone())
+        (view.serial, view.layout.rows.clone())
     };
     assert_eq!(rows.len(), 3);
     assert!(
         rows.windows(2)
-            .all(|pair| pair[0].0.bottom == pair[1].0.top && pair[0].0.top < pair[0].0.bottom)
+            .all(|pair| pair[0].bottom == pair[1].top && pair[0].top < pair[0].bottom)
     );
     let mut window = RECT::default();
     // SAFETY: 只读本窗口矩形。
@@ -154,11 +211,11 @@ fn hidden_popup_lays_out_rows_and_turns_matching_press_release_into_one_stamped_
     assert!(window.top == CARET.bottom || window.bottom == CARET.top);
     assert!(
         rows.iter()
-            .all(|(row, _)| row.right < window.right - window.left)
+            .all(|row| row.right < window.right - window.left)
     );
-    press(&popup, &rows[1].0, &rows[1].0);
+    press(&popup, &rows[1], &rows[1]);
     // 按下与抬起不在同一行不算点击。
-    press(&popup, &rows[0].0, &rows[2].0);
+    press(&popup, &rows[0], &rows[2]);
     assert_eq!(*clicks.borrow(), [(serial, 1)]);
     // SAFETY: 本线程不再持有捕获。
     assert_ne!(unsafe { GetCapture() }, popup.hwnd);
@@ -173,7 +230,7 @@ fn hidden_popup_lays_out_rows_and_turns_matching_press_release_into_one_stamped_
     assert!(!popup.showing(serial) && popup.selectable(serial, 0).is_none());
     popup.hide();
     let view = popup.view.borrow();
-    assert!(view.state.is_none() && view.rows.is_empty() && view.serial == serial + 2);
+    assert!(view.state.is_none() && view.layout.rows.is_empty() && view.serial == serial + 2);
 }
 
 fn string(value: &VARIANT) -> String {

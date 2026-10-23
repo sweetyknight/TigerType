@@ -56,9 +56,13 @@ pub fn reject_links(path: &Path) -> Result<()> {
 }
 
 pub fn sha256(path: &Path) -> Result<String> {
-    let mut hash = Sha256::new();
-    hash.update(crate::data::read_file(path, 128 * 1024 * 1024)?);
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(sha256_bytes(&crate::data::read_file(
+        path,
+        128 * 1024 * 1024,
+    )?))
+}
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 pub fn new_directory(parent: &Path, prefix: &str) -> Result<PathBuf> {

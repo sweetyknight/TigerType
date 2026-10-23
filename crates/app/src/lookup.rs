@@ -1,28 +1,29 @@
-//! 独立查字工具组装：固定 UI/工作线程；不连接 IPC、不创建输入会话、不接管 APPDATA。
-use crate::{Result, data::Data, import};
+//! 后台进程内查字/设置的固定工作线程控制器：与引擎线程共用只读词表，独占受管目录租约；
+//! 不创建输入会话，查询不产生上屏提交。
+use crate::{Result, data::Data};
 use sha2::{Digest, Sha256};
-use std::{path::Path, sync::mpsc, thread};
 use tigertype_contracts::{
     Options,
     ui::{Reply, Request},
 };
 use tigertype_engine::Dictionary;
 
-/// 引擎和受管设置独占归工作线程；窗口只接收拥有所有权的 contracts 数据。
-struct Controller {
-    dictionary: Dictionary,
+/// 受管设置独占归工作线程；窗口只接收拥有所有权的 contracts 数据。
+pub(crate) struct Controller<'a> {
+    dictionary: &'a Dictionary,
     data: Data,
     options: Options,
     digest: Option<String>,
 }
-impl Controller {
-    fn new(dictionary: Dictionary, data: Data) -> Result<Self> {
+impl<'a> Controller<'a> {
+    pub(crate) fn new(dictionary: &'a Dictionary, data: Data) -> Result<Self> {
         let bytes = data.settings()?;
-        let options = bytes
+        let options: Options = bytes
             .as_deref()
             .map(serde_json::from_slice)
             .transpose()?
             .unwrap_or_default();
+        options.validate()?;
         let digest = bytes.map(|bytes| format!("{:x}", Sha256::digest(bytes)));
         Ok(Self {
             dictionary,
@@ -31,10 +32,10 @@ impl Controller {
             digest,
         })
     }
-    fn options(&self) -> Options {
+    pub(crate) fn options(&self) -> Options {
         self.options
     }
-    fn execute(&mut self, request: Request) -> Reply {
+    pub(crate) fn execute(&mut self, request: Request) -> Reply {
         match request {
             Request::Lookup { query, page } => Reply::Lookup(
                 self.dictionary
@@ -54,33 +55,6 @@ impl Controller {
         self.options = options;
         Ok(options)
     }
-}
-
-pub fn run(package: &Path, directory: &Path) -> Result<()> {
-    // 启动时完成包校验和索引构建；显式目录不存在才创建，已有目录必须通过所有权检查。
-    let dictionary = Dictionary::new(import::load(package)?.data)?;
-    let data = if directory.try_exists()? {
-        Data::open(directory)?
-    } else {
-        Data::create(directory)?
-    };
-    let mut controller = Controller::new(dictionary, data)?;
-    let options = controller.options();
-    let (requests, receiver) = mpsc::sync_channel(1);
-    let (replies, inbox) = tigertype_ui::mailbox()?;
-    let worker = thread::Builder::new()
-        .name("tiger-lookup-engine".into())
-        .spawn(move || {
-            while let Ok(request) = receiver.recv() {
-                if replies.send(controller.execute(request)).is_err() {
-                    break;
-                }
-            }
-        })?;
-    let result = tigertype_ui::run(requests, inbox, options);
-    // UI 退出先断开有界请求通道；真正 join 后才确认线程/租约释放，不用超时冒充终止。
-    worker.join().map_err(|_| "查字工作线程异常退出")?;
-    result.map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -103,9 +77,10 @@ mod tests {
     }
     #[test]
     fn queries_and_transactional_settings_roundtrip_without_input_session() -> Result<()> {
+        let dictionary = dictionary()?;
         let root =
             resources::new_directory(&std::env::temp_dir(), "tiger-lookup-test")?.join("data");
-        let mut controller = Controller::new(dictionary()?, Data::create(&root)?)?;
+        let mut controller = Controller::new(&dictionary, Data::create(&root)?)?;
         let options = Options {
             output_form: OutputForm::Traditional,
             auto_commit_four: true,
@@ -115,7 +90,7 @@ mod tests {
             matches!(controller.execute(Request::SaveSettings(options)), Reply::Saved(Ok(saved)) if saved == options)
         );
         drop(controller);
-        let mut controller = Controller::new(dictionary()?, Data::open(&root)?)?;
+        let mut controller = Controller::new(&dictionary, Data::open(&root)?)?;
         assert_eq!(controller.options(), options);
         let Reply::Lookup(Ok(page)) = controller.execute(Request::Lookup {
             query: "𠀀".into(),
@@ -142,17 +117,18 @@ mod tests {
         assert_eq!(controller.options(), options);
         assert_eq!(std::fs::read(root.join("config/settings.json"))?, changed);
         drop(controller);
-        let reopened = Controller::new(dictionary()?, Data::open(&root)?)?;
+        let reopened = Controller::new(&dictionary, Data::open(&root)?)?;
         assert_eq!(reopened.options(), Options::default());
         Ok(())
     }
     #[test]
     fn invalid_saved_settings_are_not_silently_replaced() -> Result<()> {
+        let dictionary = dictionary()?;
         let root =
             resources::new_directory(&std::env::temp_dir(), "tiger-lookup-invalid")?.join("data");
         let data = Data::create(&root)?;
         std::fs::write(root.join("config/settings.json"), b"not json")?;
-        assert!(Controller::new(dictionary()?, data).is_err());
+        assert!(Controller::new(&dictionary, data).is_err());
         assert_eq!(
             std::fs::read(root.join("config/settings.json"))?,
             b"not json"

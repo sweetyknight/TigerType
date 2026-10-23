@@ -1,5 +1,6 @@
 //! TIP 组装：激活时登记按键/焦点 sink 并取得进程期驻留传输；按键在同步编辑会话内完成 IPC、写入与取组合位置，
 //! 拿不到编辑锁、后台不可用或结果不确定都放行原键。候选窗在本线程自绘，点击经异步编辑会话选字。
+//! 激活期间保持键盘开闭状态为“开”：TSF 不把按键交给关闭状态下的 TIP。
 use crate::{
     candidate::{Popup, bounded, fallback_caret},
     edit::{EditReport, Editor, Verdict},
@@ -27,7 +28,10 @@ use windows::{
             CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_FAIL, E_INVALIDARG, E_POINTER,
             E_UNEXPECTED, LPARAM, S_FALSE, WPARAM,
         },
-        System::Com::{IClassFactory, IClassFactory_Impl},
+        System::{
+            Com::{IClassFactory, IClassFactory_Impl},
+            Variant::VARIANT,
+        },
         UI::{
             Input::KeyboardAndMouse::{
                 GetKeyState, GetKeyboardLayout, GetKeyboardState, ToUnicodeEx, VIRTUAL_KEY,
@@ -102,6 +106,33 @@ fn shielded(f: impl FnOnce() -> Result<bool>) -> BOOL {
         .unwrap_or(false)
         .into()
 }
+/// 新线程管理器的开闭状态为空即关闭，此时宿主只把原键交给应用（只出英文）；宿主切换输入上下文或开关热键也会关上它。
+/// 中英文由本输入法自己的状态切换，所以激活与每次被关闭时都重新打开。
+fn open_keyboard(compartment: &ITfCompartment, client: u32) -> Result<()> {
+    // SAFETY: 读取线程管理器级开闭状态；VT_EMPTY 或 0 都是关闭。
+    let value = unsafe { compartment.GetValue()? };
+    if i32::try_from(&value).is_ok_and(|open| open != 0) {
+        return Ok(());
+    }
+    // SAFETY: 以本 TIP 客户端编号写入 VT_I4 1，值在调用期间有效。
+    unsafe { compartment.SetValue(client, &VARIANT::from(1i32)) }
+}
+/// 打开键盘并监听其被关闭；返回状态容器与 sink cookie 供停用时注销。取不到时照常激活，只是本线程可能收不到按键。
+fn watch_keyboard(
+    manager: &ITfThreadMgr,
+    client: u32,
+    sink: &ITfCompartmentEventSink,
+) -> Option<(ITfCompartment, u32)> {
+    let compartments: ITfCompartmentMgr = manager.cast().ok()?;
+    // SAFETY: 系统定义的开闭状态 GUID，取线程管理器级容器。
+    let compartment =
+        unsafe { compartments.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE) }.ok()?;
+    let _ = open_keyboard(&compartment, client);
+    let source: ITfSource = compartment.cast().ok()?;
+    // SAFETY: 登记本对象的开闭状态 sink，停用时以同一 cookie 注销。
+    let cookie = unsafe { source.AdviseSink(&ITfCompartmentEventSink::IID, sink) }.ok()?;
+    Some((compartment, cookie))
+}
 fn guarded(f: impl FnOnce() -> Result<()>) -> Result<()> {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| Err(E_UNEXPECTED.into()))
 }
@@ -147,8 +178,16 @@ struct Active {
     epoch: Cell<u64>,
     popup: RefCell<Option<Rc<Popup>>>,
     quiet: bool,
+    /// 键盘开闭状态容器与其 sink cookie。
+    keyboard: Option<(ITfCompartment, u32)>,
 }
 impl Active {
+    fn reopen(&self) -> Result<()> {
+        match &self.keyboard {
+            Some((compartment, _)) => open_keyboard(compartment, self.client),
+            None => Ok(()),
+        }
+    }
     fn current_popup(&self) -> Option<Rc<Popup>> {
         self.popup.try_borrow().ok()?.clone()
     }
@@ -347,10 +386,21 @@ impl Active {
             // SAFETY: 以激活时返回的 cookie 注销线程管理器 sink。
             let _ = unsafe { source.UnadviseSink(self.cookie) };
         }
+        if let Some((compartment, cookie)) = &self.keyboard
+            && let Ok(source) = compartment.cast::<ITfSource>()
+        {
+            // SAFETY: 以登记时的 cookie 注销开闭状态 sink；停用后不再干预该状态。
+            let _ = unsafe { source.UnadviseSink(*cookie) };
+        }
     }
 }
 
-#[implement(ITfTextInputProcessorEx, ITfKeyEventSink, ITfThreadMgrEventSink)]
+#[implement(
+    ITfTextInputProcessorEx,
+    ITfKeyEventSink,
+    ITfThreadMgrEventSink,
+    ITfCompartmentEventSink
+)]
 pub struct TextService {
     active: RefCell<Option<Rc<Active>>>,
     // 单击 Shift 切换中英；期间按下其他键或带 Ctrl/Alt 即作废。
@@ -424,6 +474,7 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
                 let _ = unsafe { source.UnadviseSink(cookie) };
                 return Err(error);
             }
+            let keyboard = watch_keyboard(&manager, tid, &self.to_interface());
             *self.active.try_borrow_mut().map_err(busy)? = Some(Rc::new(Active {
                 manager,
                 client: tid,
@@ -436,6 +487,7 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
                 epoch: Cell::new(0),
                 popup: RefCell::new(None),
                 quiet: self.quiet,
+                keyboard,
             }));
             Ok(())
         })
@@ -512,6 +564,18 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
     }
     fn OnPopContext(&self, _: Ref<ITfContext>) -> Result<()> {
         Ok(())
+    }
+}
+
+impl ITfCompartmentEventSink_Impl for TextService_Impl {
+    fn OnChange(&self, guid: *const GUID) -> Result<()> {
+        guarded(|| {
+            // SAFETY: 系统传入有效 GUID 指针，只比较值；重新打开引起的再次通知读到“开”即返回。
+            if guid.is_null() || unsafe { *guid } != GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
+                return Ok(());
+            }
+            self.active().map_or(Ok(()), |active| active.reopen())
+        })
     }
 }
 

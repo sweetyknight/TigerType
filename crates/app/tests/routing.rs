@@ -1,7 +1,7 @@
 //! 多宿主序号/焦点隔离与回收判定；合成数据，不注册或向真实应用写字。
 use tigertype_app::{Result, dispatch::Dispatcher};
 use tigertype_contracts::{
-    InputState, Key, Options,
+    InputState, Key, Options, OutputForm,
     protocol::{Command, Message, Rejection, Reply, Request, Route},
 };
 use tigertype_engine::{Data, Dictionary, Entry};
@@ -299,6 +299,51 @@ fn global_capacity_old_generations_and_session_reuse_are_rejected() -> Result<()
     assert_eq!(
         exchange(&mut dispatch, host, 101, 2, Command::Clear)?,
         Reply::Rejected(Rejection::Unavailable)
+    );
+    Ok(())
+}
+#[test]
+fn reloaded_settings_wait_until_the_composition_ends() -> Result<()> {
+    let dictionary = dictionary();
+    let mut dispatch = Dispatcher::new(&dictionary, 7)?;
+    let host = dispatch.add_host()?;
+    open(&mut dispatch, host)?;
+    assert!(
+        state(exchange(
+            &mut dispatch,
+            host,
+            3,
+            1,
+            key(1, Key::Character('u'))
+        )?)
+        .composing
+    );
+    let changed = Options {
+        output_form: OutputForm::Traditional,
+        auto_commit_four: true,
+        ..Default::default()
+    };
+    dispatch.reconfigure(changed);
+    // 组合中保持旧设置：宿主已显示的候选与编号不能被热重载改掉。
+    let Reply::Key(committed) = exchange(&mut dispatch, host, 4, 1, key(1, Key::Space))? else {
+        panic!("需要按键回复");
+    };
+    assert_eq!(committed.commit.as_deref(), Some("的"));
+    assert_eq!(committed.state.options, Options::default());
+    // 组合结束后的下一键换上新设置，回复随之把新外观带给候选窗。
+    let next = state(exchange(
+        &mut dispatch,
+        host,
+        5,
+        1,
+        key(1, Key::Character('u')),
+    )?);
+    assert!(next.composing);
+    assert_eq!(next.options, changed);
+    // 重新取得焦点的回复也携带已换上的设置。
+    assert_eq!(
+        state(exchange(&mut dispatch, host, 6, 1, focus(2, true))?).options,
+        changed
     );
     Ok(())
 }

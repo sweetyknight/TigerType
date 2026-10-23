@@ -1,0 +1,6 @@
+# 安装包要在没装 VC++ 运行库的电脑上加载 TIP DLL 并运行后台：两种 MSVC 目标一律静态链接 CRT。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

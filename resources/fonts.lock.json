@@ -1,0 +1,27 @@
+{
+  "format_version": 1,
+  "license_status": "personal-use-only; LXGW WenKai and Cascadia Mono are SIL OFL 1.1, TumanPUA unconfirmed",
+  "fonts": [
+    {
+      "path": "LXGWWenKaiGBScreen.ttf",
+      "size": 26234636,
+      "sha256": "e97e35272d8eaf4f281e093c5a6c2cc8083f1c34b7a60e0134251d2c9d15753d",
+      "family": "LXGW WenKai GB Screen",
+      "source": "https://huma.ysepan.com/ 06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z（融合虎码字根版，7z SHA256 d80340c88cb67b4881a4057b3c2fa4fb5f1ad3de2696a61f2be4bdac03cabcb7）"
+    },
+    {
+      "path": "CascadiaMono.ttf",
+      "size": 714804,
+      "sha256": "08026f617eea315caca59898784e999f6cdb2d0c34d2040deeb042bcdc359fa2",
+      "family": "Cascadia Mono",
+      "source": "https://github.com/microsoft/cascadia-code/releases/download/v2407.24/CascadiaCode-2407.24.zip ttf/CascadiaMono.ttf（zip SHA256 e67a68ee3386db63f48b9054bd196ea752bc6a4ebb4df35adce6733da50c8474）"
+    },
+    {
+      "path": "TumanPUA.ttf",
+      "size": 204112,
+      "sha256": "9239f5a7c00a5301a713237975c7b3b4f746f8c07647fb2dc003e1603fa00b00",
+      "family": "TumanPUA",
+      "source": "https://huma.ysepan.com/ 06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z"
+    }
+  ]
+}

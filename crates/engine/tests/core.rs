@@ -199,6 +199,7 @@ fn tsf_local_key_judgment_matches_engine_handling_in_every_reachable_state() {
             common_only: false,
             show_learning: true,
             output_form: OutputForm::Traditional,
+            ..Default::default()
         },
     ] {
         for prefix in &prefixes {

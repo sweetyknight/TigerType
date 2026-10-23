@@ -34,9 +34,68 @@ struct Manager {
     keys: Cell<Option<u32>>,
     refuse_keys: Cell<bool>,
     released: RefCell<Vec<&'static str>>,
+    /// 键盘开闭状态：None 为 VT_EMPTY（新线程管理器的初值）；writers 记录每次写入的客户端编号。
+    open: Cell<Option<i32>>,
+    writers: RefCell<Vec<u32>>,
+    watcher: RefCell<Option<ITfCompartmentEventSink>>,
 }
-#[implement(ITfThreadMgr, ITfSource, ITfKeystrokeMgr)]
+#[implement(ITfThreadMgr, ITfSource, ITfKeystrokeMgr, ITfCompartmentMgr)]
 struct ThreadMgr(Rc<Manager>);
+/// 线程管理器级键盘开闭状态；写入后同步通知已登记的 sink，与系统一致。
+#[implement(ITfCompartment, ITfSource)]
+struct Compartment(Rc<Manager>);
+impl ITfCompartmentMgr_Impl for ThreadMgr_Impl {
+    fn GetCompartment(&self, guid: *const GUID) -> Result<ITfCompartment> {
+        // SAFETY: 调用方传入有效 GUID 指针。
+        if unsafe { *guid } != GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
+            return Err(E_INVALIDARG.into());
+        }
+        Ok(Compartment(self.0.clone()).into())
+    }
+    fn ClearCompartment(&self, _: u32, _: *const GUID) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn EnumCompartments(&self) -> Result<windows::Win32::System::Com::IEnumGUID> {
+        Err(E_NOTIMPL.into())
+    }
+}
+impl ITfCompartment_Impl for Compartment_Impl {
+    fn SetValue(&self, tid: u32, value: *const VARIANT) -> Result<()> {
+        // SAFETY: 调用方传入有效 VARIANT 指针。
+        self.0.open.set(Some(i32::try_from(unsafe { &*value })?));
+        self.0.writers.borrow_mut().push(tid);
+        let watcher = self.0.watcher.borrow().clone();
+        if let Some(watcher) = watcher {
+            // SAFETY: 本线程同步通知；sink 可在回调内再次写入。
+            unsafe { watcher.OnChange(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)? };
+        }
+        Ok(())
+    }
+    fn GetValue(&self) -> Result<VARIANT> {
+        Ok(self
+            .0
+            .open
+            .get()
+            .map_or_else(VARIANT::default, VARIANT::from))
+    }
+}
+impl ITfSource_Impl for Compartment_Impl {
+    fn AdviseSink(&self, iid: *const GUID, sink: Ref<IUnknown>) -> Result<u32> {
+        // SAFETY: 调用方传入有效 IID 指针。
+        if unsafe { *iid } != ITfCompartmentEventSink::IID || self.0.watcher.borrow().is_some() {
+            return Err(E_INVALIDARG.into());
+        }
+        *self.0.watcher.borrow_mut() = Some(sink.ok()?.cast()?);
+        Ok(99)
+    }
+    fn UnadviseSink(&self, cookie: u32) -> Result<()> {
+        if cookie != 99 || self.0.watcher.take().is_none() {
+            return Err(E_INVALIDARG.into());
+        }
+        self.0.released.borrow_mut().push("keyboard");
+        Ok(())
+    }
+}
 impl ITfSource_Impl for ThreadMgr_Impl {
     fn AdviseSink(&self, iid: *const GUID, sink: Ref<IUnknown>) -> Result<u32> {
         // SAFETY: 调用方传入有效 IID 指针；只核对类型，不保存未知接口。
@@ -344,7 +403,56 @@ fn activation_pairs_sinks_and_a_refused_key_sink_rolls_back_the_thread_sink() {
         tip.Deactivate().unwrap();
     }
     assert!(manager.sinks.borrow().is_empty() && manager.keys.get().is_none());
-    assert_eq!(*manager.released.borrow(), ["thread", "keys", "thread"]);
+    assert_eq!(
+        *manager.released.borrow(),
+        ["thread", "keys", "thread", "keyboard"]
+    );
+}
+
+#[test]
+fn activation_opens_a_closed_keyboard_and_reopens_it_until_deactivated() {
+    let (manager, thread_mgr) = manager();
+    let tip: ITfTextInputProcessorEx = service().to_interface();
+    let close = || {
+        let compartments: ITfCompartmentMgr = thread_mgr.cast().unwrap();
+        // SAFETY: 合成容器在本线程同步回调；模拟宿主或开关热键以其他客户端编号关闭键盘。
+        unsafe {
+            compartments
+                .GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)
+                .unwrap()
+                .SetValue(3, &VARIANT::from(0i32))
+                .unwrap();
+        }
+    };
+    // 新线程管理器的开闭状态为空：激活即以本客户端编号打开，否则宿主不把按键交给 TIP。
+    // SAFETY: 合成线程管理器在本线程同步回调。
+    unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
+    assert_eq!(
+        (manager.open.get(), manager.writers.take()),
+        (Some(1), vec![7])
+    );
+    close();
+    assert_eq!(
+        (manager.open.get(), manager.writers.take()),
+        (Some(1), vec![3, 7])
+    );
+    // SAFETY: 停用注销开闭状态 sink，之后不再干预。
+    unsafe { tip.Deactivate() }.unwrap();
+    close();
+    assert_eq!(manager.open.get(), Some(0));
+    // 已经打开时激活不重复写入。
+    manager.open.set(Some(1));
+    manager.writers.take();
+    // SAFETY: 同上。
+    unsafe {
+        tip.ActivateEx(&thread_mgr, 7, 0).unwrap();
+        tip.Deactivate().unwrap();
+    }
+    assert!(manager.writers.borrow().is_empty());
+    assert_eq!(
+        *manager.released.borrow(),
+        ["keys", "thread", "keyboard", "keys", "thread", "keyboard"]
+    );
 }
 
 #[test]
@@ -391,7 +499,7 @@ fn shown(active: &Active) -> Option<(u32, Vec<RECT>)> {
     let popup = active.current_popup()?;
     let view = popup.view.borrow();
     view.state.as_ref()?;
-    Some((view.serial, view.rows.iter().map(|(row, _)| *row).collect()))
+    Some((view.serial, view.layout.rows.clone()))
 }
 /// 经真实窗口消息点击候选：按下/抬起发给候选窗，再派发它投递给自己的点击通知。
 fn click(active: &Active, row: &RECT) {
@@ -466,7 +574,7 @@ fn activated_service_shows_candidates_selects_by_click_and_refocuses_after_focus
     unsafe { tip.Deactivate() }.unwrap();
     assert_eq!(text(&other), "");
     assert!(active.current_popup().is_none() && !popup.showing(serial));
-    assert_eq!(*manager.released.borrow(), ["keys", "thread"]);
+    assert_eq!(*manager.released.borrow(), ["keys", "thread", "keyboard"]);
     let key = |key, epoch| Command::Key { key, epoch };
     let focus = |epoch| Command::Focus {
         epoch,

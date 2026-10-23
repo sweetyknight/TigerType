@@ -135,7 +135,8 @@ impl Data {
         if contents.len() as u64 > MAX_CONFIG || contents.contains(&0) {
             return Err("设置补丁长度或内容不符".into());
         }
-        let _: tigertype_contracts::Options = serde_json::from_slice(contents)?;
+        // 外观颜色同样是写入边界：偏蓝或不可读的自定义配色不落盘。
+        serde_json::from_slice::<tigertype_contracts::Options>(contents)?.validate()?;
         let _config = Directories::pin(&self.root.join("config"))?;
         let _backups = Directories::pin(&self.root.join("backups"))?;
         let target = self.root.join("config/settings.json");
@@ -243,6 +244,17 @@ mod tests {
         let old = data.settings()?.unwrap();
         let digest = format!("{:x}", Sha256::digest(&old));
         assert!(data.replace_settings(None, b"bad").is_err());
+        // 偏蓝的自定义配色在写入边界被拒绝，旧设置保持不变。
+        let blue = serde_json::to_vec(&tigertype_contracts::Options {
+            theme: tigertype_contracts::Theme::Custom,
+            custom: tigertype_contracts::CustomColors {
+                accent: 0x0078D4,
+                ..Default::default()
+            },
+            ..Default::default()
+        })?;
+        assert!(data.replace_settings(Some(&digest), &blue).is_err());
+        assert_eq!(data.settings()?, Some(old.clone()));
         let lock = OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ)

@@ -180,6 +180,12 @@ fn real_backend_singleton_image_check_reclaims_idle_hosts_and_reconnects_without
         Reply::Cleared(_)
     ));
 
+    // 反例：未接查字 UI 的后台拒绝唤起请求，管理连接作废，后台继续服务。
+    assert!(
+        Client::connect(&runtime, &image, &namespace, deadline())?
+            .show_lookup(deadline())
+            .is_err()
+    );
     Client::connect(&runtime, &image, &namespace, deadline())?.stop_backend(deadline())?;
     drop((a, b, others, extra));
     runtime.shutdown(deadline())?;
