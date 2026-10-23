@@ -314,9 +314,8 @@ impl Active {
             }
             Err(_) => return self.hide(),
         };
-        let visible = report.error.is_none()
-            && state.composing
-            && (!state.candidates.is_empty() || !state.notice.is_empty());
+        // 空码等无候选时不显示候选窗，编码只留在宿主内的组合下划线里。
+        let visible = report.error.is_none() && state.composing && !state.candidates.is_empty();
         let place = report.caret.filter(bounded).or_else(fallback_caret);
         match (visible, place, visible.then(|| self.popup()).flatten()) {
             (true, Some(caret), Some(popup)) => {

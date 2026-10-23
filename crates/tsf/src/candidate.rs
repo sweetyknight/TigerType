@@ -50,9 +50,7 @@ const ROW: i32 = 32;
 const ROW_LEFT: i32 = 12;
 const ROW_RIGHT: i32 = 14;
 const GAP: i32 = 10;
-const NOTICE: i32 = 30;
 const FOOTER: i32 = 26;
-const ICON: i32 = 16;
 const MIN_WIDTH: i32 = 112;
 const MAX_WIDTH: i32 = 480;
 const UI_FACE: &str = "Microsoft YaHei UI";
@@ -154,8 +152,6 @@ struct Colors {
     chosen: COLORREF,
     chosen_hint: COLORREF,
     bar: COLORREF,
-    accent: COLORREF,
-    on_accent: COLORREF,
 }
 /// 主题颜色为 0xRRGGBB，GDI 的 COLORREF 为 0x00BBGGRR。
 const fn rgb(value: u32) -> COLORREF {
@@ -175,8 +171,6 @@ const fn themed(p: Palette) -> Colors {
         chosen: rgb(p.text),
         chosen_hint: rgb(p.highlight_text),
         bar: rgb(p.accent),
-        accent: rgb(p.accent),
-        on_accent: rgb(p.on_accent),
     }
 }
 fn colors(palette: Palette) -> Colors {
@@ -218,8 +212,6 @@ fn colors(palette: Palette) -> Colors {
         chosen: system(COLOR_HIGHLIGHTTEXT),
         chosen_hint: system(COLOR_HIGHLIGHTTEXT),
         bar: system(COLOR_HIGHLIGHTTEXT),
-        accent: text,
-        on_accent: window,
     }
 }
 fn wide(text: &str) -> Vec<u16> {
@@ -367,11 +359,10 @@ fn set_owner(hwnd: HWND, owner: HWND) {
     }
 }
 
-/// 测量结果：候选行、提示行、页脚的客户区矩形，以及候选字与注释列的起点。
+/// 测量结果：候选行、页脚的客户区矩形，以及候选字与注释列的起点。
 #[derive(Default, Clone, Debug, PartialEq)]
 pub(crate) struct Layout {
     pub rows: Vec<RECT>,
-    pub notice: Option<RECT>,
     pub footer: Option<RECT>,
     pub text_x: i32,
     pub comment_x: i32,
@@ -607,7 +598,7 @@ impl Popup {
             let _ = EndPaint(self.hwnd, &paint);
         }
     }
-    /// 按设计稿绘制：高亮行为圆角底色加左侧指示条，注释列对齐，提示行与页脚以分隔线隔开。
+    /// 按设计稿绘制：高亮行为圆角底色加左侧指示条，注释列对齐，页脚以分隔线隔开。
     pub(crate) fn draw(&self, dc: HDC, client: &RECT) {
         let Ok(view) = self.view.try_borrow() else {
             return;
@@ -683,7 +674,7 @@ impl Popup {
                 );
             }
         }
-        let divider = |rect: &RECT| {
+        if let Some(rect) = &layout.footer {
             let line = RECT {
                 left: rect.left + s(6),
                 top: rect.top,
@@ -691,29 +682,6 @@ impl Popup {
                 bottom: rect.top + s(1).max(1),
             };
             fill(dc, &line, c.line);
-        };
-        if let Some(rect) = &layout.notice {
-            if !layout.rows.is_empty() {
-                divider(rect);
-            }
-            let top = (rect.top + rect.bottom - s(ICON)) / 2;
-            let icon = RECT {
-                left: rect.left + s(10),
-                top,
-                right: rect.left + s(10 + ICON),
-                bottom: top + s(ICON),
-            };
-            round(dc, &icon, s(ICON) / 2, Some(c.accent), c.accent);
-            draw_text(dc, fonts.small, c.on_accent, "!", icon, DT_CENTER);
-            let text = RECT {
-                left: icon.right + s(8),
-                right: rect.right - s(10),
-                ..*rect
-            };
-            draw_text(dc, fonts.ui, c.muted, &state.notice, text, DT_END_ELLIPSIS);
-        }
-        if let Some(rect) = &layout.footer {
-            divider(rect);
             let body = RECT {
                 top: rect.top + s(1),
                 ..*rect
@@ -846,10 +814,6 @@ impl Popup {
             text_x + text
         };
         let mut width = s(MIN_WIDTH).max(content + s(ROW_RIGHT + PAD));
-        if !state.notice.is_empty() {
-            let notice = self.extent(dc, fonts.ui, &state.notice);
-            width = width.max(s(PAD + 10 + ICON + 8 + 10 + PAD) + notice);
-        }
         let footer = has_footer(state);
         if footer {
             let tag = self.extent(dc, fonts.ui, "拼音") + s(12);
@@ -873,21 +837,18 @@ impl Popup {
             .map(|index| band(s(PAD) + index as i32 * line, line))
             .collect();
         let mut bottom = s(PAD) + rows.len() as i32 * line;
-        // 提示行与页脚和上方内容之间留 4px，再画分隔线。
-        let mut next = |height| {
+        // 页脚和上方候选之间留 4px，再画分隔线。
+        let footer = footer.then(|| {
             let top = if bottom > s(PAD) {
                 bottom + s(4)
             } else {
                 bottom
             };
-            bottom = top + height;
-            band(top, height)
-        };
-        let notice = (!state.notice.is_empty()).then(|| next(s(NOTICE)));
-        let footer = footer.then(|| next(s(FOOTER)));
+            bottom = top + s(FOOTER);
+            band(top, s(FOOTER))
+        });
         Ok(Layout {
             rows,
-            notice,
             footer,
             text_x,
             comment_x,

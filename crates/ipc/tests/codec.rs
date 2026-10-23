@@ -315,7 +315,7 @@ fn rejects_invalid_composition_and_candidate_boundaries() {
         ..Default::default()
     });
     rejects_state(InputState {
-        notice: "a".repeat(MAX_TEXT_BYTES + 1),
+        commit_preview: "a".repeat(MAX_TEXT_BYTES + 1),
         ..Default::default()
     });
 }

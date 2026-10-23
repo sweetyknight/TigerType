@@ -430,8 +430,6 @@ pub struct InputState {
     pub ascii_punctuation: bool,
     pub composing: bool,
     pub revision: u64,
-    /// 空码、越界等可恢复情况对用户可见，不能伪装成成功选字。
-    pub notice: String,
 }
 impl InputState {
     /// TSF 的 OnTestKeyDown 不发 IPC，只凭上次状态判断是否吃键；

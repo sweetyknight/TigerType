@@ -313,17 +313,23 @@ fn lookup_is_read_only_handles_missing_and_multiple_characters_and_bounds() {
     assert!(dictionary.lookup("han", usize::MAX).is_err());
 }
 #[test]
-fn empty_code_cannot_commit_overflow_or_consume_a_missing_candidate_silently() {
+fn empty_code_never_commits_and_full_empty_code_is_replaced_by_the_next_key() {
     let dictionary = Dictionary::new(data()).unwrap();
     let mut session = Session::new(&dictionary, Options::default());
     type_code(&mut session, "zzzz");
+    // 满码空码时后码顶上：清掉无效编码、不上屏，本键开始新编码。
     let extra = session.process(Key::Character('u')).unwrap();
-    assert_eq!(extra.state.composition.text, "zzzz");
-    assert!(extra.commit.is_none());
-    assert!(!extra.state.notice.is_empty());
-    assert!(session.process(Key::Space).unwrap().commit.is_none());
+    assert!(extra.handled && extra.commit.is_none());
+    assert_eq!(extra.state.composition.text, "u");
+    assert!(!extra.state.candidates.is_empty());
+    type_code(&mut session, "zzz");
+    let space = session.process(Key::Space).unwrap();
+    assert!(space.handled && space.commit.is_none());
+    assert_eq!(space.state.composition.text, "uzzz");
+    let digit = session.process(Key::Character('1')).unwrap();
+    assert!(digit.handled && digit.commit.is_none());
     session.process(Key::Backspace).unwrap();
-    assert_eq!(session.snapshot().composition.text, "zzz");
+    assert_eq!(session.snapshot().composition.text, "uzz");
     session.process(Key::Tab).unwrap();
     assert!(!session.snapshot().composing);
     type_code(&mut session, "u");

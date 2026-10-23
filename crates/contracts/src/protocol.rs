@@ -1,10 +1,11 @@
 //! v5 删除宿主通知、领取点击和焦点光标矩形；候选位置留在宿主进程。
 //! v6 在输入状态中加入英文标点开关，供 TSF 本地按键判定。
 //! v7 在选项中加入配色主题与候选字体，随输入状态带给宿主内候选窗；管理端可请求后台唤起查字窗。
+//! v8 删除输入状态中的提示文字：空码等情况不再弹提示，候选窗只显示候选。
 //! 旧协议直接拒绝。
 use crate::{InputState, Key, KeyOutcome, Options};
 use serde::{Deserialize, Serialize};
-pub const VERSION: u16 = 7;
+pub const VERSION: u16 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

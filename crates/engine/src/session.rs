@@ -17,7 +17,6 @@ pub struct Session<'a> {
     candidates: Vec<Candidate>,
     selected: usize,
     revision: u64,
-    notice: String,
 }
 impl<'a> Session<'a> {
     pub fn new(dictionary: &'a Dictionary, options: Options) -> Self {
@@ -33,7 +32,6 @@ impl<'a> Session<'a> {
             candidates: Vec::new(),
             selected: 0,
             revision: 1,
-            notice: String::new(),
         }
     }
     fn advance(&mut self) -> Result<()> {
@@ -48,9 +46,6 @@ impl<'a> Session<'a> {
             .dictionary
             .candidates(&self.buffer, self.mode, self.options);
         self.selected = 0;
-        if !self.buffer.is_empty() && self.candidates.is_empty() {
-            self.notice = "暂无候选，可继续输入或退格".into();
-        }
     }
     fn reset(&mut self) {
         self.buffer.clear();
@@ -61,13 +56,11 @@ impl<'a> Session<'a> {
     pub fn clear(&mut self) -> Result<InputState> {
         self.advance()?;
         self.reset();
-        self.notice.clear();
         Ok(self.snapshot())
     }
     pub fn configure(&mut self, options: Options) -> Result<InputState> {
         self.advance()?;
         self.options = options;
-        self.notice.clear();
         self.rebuild();
         Ok(self.snapshot())
     }
@@ -134,18 +127,13 @@ impl<'a> Session<'a> {
             ascii_punctuation: self.ascii_punctuation,
             composing: self.composing(),
             revision: self.revision,
-            notice: self.notice.clone(),
         }
     }
+    /// 无对应候选时不上屏、组合不变，同主流输入法静默忽略。
     fn commit(&mut self, index: usize) -> Option<String> {
-        if let Some(value) = self.candidates.get(index) {
-            let text = value.text.clone();
-            self.reset();
-            Some(text)
-        } else {
-            self.notice = "当前没有对应候选，请退格或清屏".into();
-            None
-        }
+        let text = self.candidates.get(index)?.text.clone();
+        self.reset();
+        Some(text)
     }
     pub fn select(&mut self, revision: u64, index: u8) -> Result<KeyOutcome> {
         if revision != self.revision {
@@ -157,7 +145,6 @@ impl<'a> Session<'a> {
             return Err(Error("候选索引越界"));
         }
         self.advance()?;
-        self.notice.clear();
         let commit = self.commit(self.selected / PAGE_SIZE * PAGE_SIZE + index as usize);
         Ok(KeyOutcome {
             handled: true,
@@ -167,7 +154,6 @@ impl<'a> Session<'a> {
     }
     pub fn process(&mut self, key: Key) -> Result<KeyOutcome> {
         self.advance()?;
-        self.notice.clear();
         let mut handled = true;
         let mut commit = None;
         match key {
@@ -220,8 +206,6 @@ impl<'a> Session<'a> {
                 if c == '`' {
                     if !self.composing() {
                         self.mode = InputMode::Pinyin;
-                    } else {
-                        self.notice = "请先确认或清空当前编码".into();
                     }
                 } else if self.composing() && ('1'..='9').contains(&c) {
                     commit = self.commit(
@@ -235,19 +219,15 @@ impl<'a> Session<'a> {
                     self.page(c == '=', &mut handled);
                 } else if c.is_ascii_lowercase() || (self.mode == InputMode::Pinyin && c == 'ü') {
                     if self.mode == InputMode::Tiger && self.buffer.len() == 4 {
+                        // 满码后码顶上：有候选先上屏首选，空码则清掉无效编码，本键开始新编码（同小狼毫 auto_clear: max_length）。
                         if self.candidates.is_empty() {
-                            self.notice = "空码已满，请退格或清屏；本键未加入".into();
-                            return Ok(KeyOutcome {
-                                handled,
-                                commit,
-                                state: self.snapshot(),
-                            });
+                            self.reset();
+                        } else {
+                            commit = self.commit(self.selected);
                         }
-                        commit = self.commit(self.selected);
                     }
-                    if self.mode == InputMode::Pinyin && self.buffer.len() >= MAX_PINYIN_BYTES {
-                        self.notice = "拼音长度已满，请退格或清屏；本键未加入".into();
-                    } else {
+                    // 拼音单音节最长 6 字母，再多的键不加入组合。
+                    if self.mode != InputMode::Pinyin || self.buffer.len() < MAX_PINYIN_BYTES {
                         self.buffer.push(if c == 'ü' { 'v' } else { c });
                         self.rebuild();
                         if self.mode == InputMode::Tiger
@@ -305,7 +285,6 @@ impl<'a> Session<'a> {
     fn page(&mut self, down: bool, handled: &mut bool) {
         *handled = self.composing();
         if self.candidates.is_empty() {
-            self.notice = "暂无可翻页的候选".into();
             return;
         }
         let current = self.selected / PAGE_SIZE;
@@ -316,9 +295,6 @@ impl<'a> Session<'a> {
             current.saturating_sub(1)
         };
         self.selected = next * PAGE_SIZE;
-        if current == next {
-            self.notice = "已到候选页边界".into();
-        }
     }
 }
 

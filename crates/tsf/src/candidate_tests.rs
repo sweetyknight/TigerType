@@ -88,7 +88,7 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
         }
         .palette();
         let c = themed(palette);
-        for color in [c.window, c.highlight, c.bar, c.text, c.border, c.accent] {
+        for color in [c.window, c.highlight, c.bar, c.text, c.border] {
             let [red, green, blue, _] = color.0.to_le_bytes();
             assert!(blue <= red && blue <= green, "{theme:?} {color:?}");
         }
@@ -96,11 +96,12 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
     let popup = Popup::new(|_, _| {}, true).unwrap();
     let mut shown = state(3, 1);
     shown.options.theme = Theme::Bamboo;
-    shown.notice = "已到候选页边界".into();
     shown.is_last_page = true;
     popup.show(&shown, CARET, HWND::default()).unwrap();
     let layout = popup.view.borrow().layout.clone();
-    assert!(layout.notice.is_some() && layout.footer.is_none());
+    assert!(layout.footer.is_none());
+    // 无提示行：窗口高度恰为候选行加上下内边距。
+    assert_eq!(layout.size.cy, layout.rows[2].bottom + layout.rows[0].top);
     assert!(layout.text_x < layout.comment_x && layout.comment_x < layout.size.cx);
     let palette = shown.options.palette();
     // 用户开启高对比度时改用系统色，不核对主题像素。

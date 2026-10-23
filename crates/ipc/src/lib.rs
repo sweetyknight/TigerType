@@ -193,9 +193,7 @@ fn state(state: &InputState) -> Result<()> {
     {
         return Err(Error::Invalid("协议候选页或高亮位置不符"));
     }
-    for value in [&state.commit_preview, &state.notice] {
-        text(value)?;
-    }
+    text(&state.commit_preview)?;
     for candidate in &state.candidates {
         for value in [&candidate.text, &candidate.comment, &candidate.label] {
             text(value)?;
