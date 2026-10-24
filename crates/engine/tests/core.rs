@@ -1,6 +1,6 @@
 //! 合成词表覆盖状态机与学习契约，不读取真实资源、文件或个人输入。
-use tigertype_contracts::{InputMode, Key, Options, OutputForm};
-use tigertype_engine::{Data, Detail, Dictionary, Entry, Mapping, Pronunciation, Session};
+use tigertype_contracts::{InputMode, Key, Options, OutputForm, PAGE_SIZE};
+use tigertype_engine::{Data, Detail, Dictionary, Entry, Mapping, Phrase, Pronunciation, Session};
 
 fn data() -> Data {
     Data {
@@ -46,6 +46,11 @@ fn data() -> Data {
                 weight: 0,
             },
         ],
+        phrases: vec![Phrase {
+            text: "我们".into(),
+            code: "tuja".into(),
+            weight: 10,
+        }],
         common: vec!['的', '发', '女', '行'],
         pinyin: vec![
             Pronunciation {
@@ -92,6 +97,26 @@ fn data() -> Data {
             variants: vec!['發', '髮', '發'],
         }],
     }
+}
+
+#[test]
+fn word_mode_uses_tigress_codes_and_lookup_returns_phrase_text() {
+    let dictionary = Dictionary::new(data()).unwrap();
+    let mut session = Session::new(
+        &dictionary,
+        Options {
+            typing_mode: tigertype_contracts::TypingMode::Word,
+            ..Options::default()
+        },
+    );
+    let outcome = ["tuja".chars().map(Key::Character).collect::<Vec<_>>()]
+        .concat()
+        .into_iter()
+        .map(|key| session.process(key).unwrap())
+        .last()
+        .unwrap();
+    assert_eq!(outcome.state.candidates[0].text, "我们");
+    assert_eq!(dictionary.lookup("我们", 0).unwrap().items[0].text, "我们");
 }
 
 #[test]
@@ -150,6 +175,62 @@ fn punctuation_pairs_and_ascii_punctuation_do_not_change_candidate_selection() {
             .commit
             .as_deref(),
         Some("的,")
+    );
+}
+
+#[test]
+fn large_code_bucket_rebuild_stays_bounded_under_pressure() {
+    const MATCHES: usize = 8_192;
+    let entries: Vec<_> = (0..MATCHES)
+        .map(|index| Entry {
+            character: char::from_u32(0x4E00 + index as u32).unwrap(),
+            code: "u".into(),
+            weight: index as u64,
+        })
+        .collect();
+    let common = entries.iter().map(|entry| entry.character).collect();
+    let dictionary = Dictionary::new(Data {
+        entries,
+        common,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut session = Session::new(&dictionary, Options::default());
+    let first = session.process(Key::Character('u')).unwrap().state;
+    assert_eq!(first.page_index, 0);
+    let expected_first = char::from_u32(0x4E00 + MATCHES as u32 - 1)
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        first.candidates.first().map(|item| item.text.as_str()),
+        Some(expected_first.as_str())
+    );
+    assert!(!first.is_last_page, "大桶首屏不能被错误标记为末页");
+    let last_page = (MATCHES - 1) / PAGE_SIZE;
+    for _ in 0..last_page {
+        session.process(Key::PageDown).unwrap();
+    }
+    let last = session.snapshot();
+    assert_eq!(last.page_index, last_page);
+    assert!(last.is_last_page);
+    assert_eq!(last.candidates.len(), MATCHES % PAGE_SIZE);
+    let expected_last = char::from_u32(0x4E00).unwrap().to_string();
+    assert_eq!(
+        last.candidates.last().map(|item| item.text.as_str()),
+        Some(expected_last.as_str())
+    );
+    session.process(Key::Backspace).unwrap();
+    let started = std::time::Instant::now();
+    for _ in 0..100 {
+        // 覆盖真实短码桶的最坏分支：每次重建仍保留完整分页集合，不静默截断候选。
+        session.process(Key::Character('u')).unwrap();
+        session.process(Key::Backspace).unwrap();
+    }
+    let elapsed = started.elapsed();
+    eprintln!("large bucket pressure: n=100 rebuilds={elapsed:?}");
+    assert!(
+        elapsed <= std::time::Duration::from_secs(1),
+        "短码桶重建过慢: {elapsed:?}"
     );
 }
 fn type_code(session: &mut Session<'_>, code: &str) -> Vec<String> {
@@ -397,7 +478,7 @@ fn lookup_is_read_only_handles_missing_and_multiple_characters_and_bounds() {
     let mut session = Session::new(&dictionary, Options::default());
     type_code(&mut session, "u");
     let before = session.snapshot();
-    assert_eq!(dictionary.lookup("NÜ", 0).unwrap().items[0].character, '女');
+    assert_eq!(dictionary.lookup("NÜ", 0).unwrap().items[0].text, "女");
     let results = dictionary.lookup("的𠀀☃的", 0).unwrap();
     assert_eq!(results.items.len(), 3);
     assert!(results.items[2].learning.codes.is_empty());

@@ -1,7 +1,7 @@
 //! 完整锁定文本资源验收单列；不加载 DLL，不运行脚本，不接触个人词库。
 use serde_json::json;
 use tigertype_app::{Result, import, project_root, resources};
-use tigertype_contracts::{Key, Options, OutputForm};
+use tigertype_contracts::{Key, Options, OutputForm, TypingMode};
 use tigertype_engine::{Dictionary, Session};
 
 fn verify(root: &std::path::Path, work: &std::path::Path) -> Result<serde_json::Value> {
@@ -57,9 +57,27 @@ fn verify(root: &std::path::Path, work: &std::path::Path) -> Result<serde_json::
             .lookup("nv", 0)?
             .items
             .iter()
-            .any(|item| item.character == '女')
+            .any(|item| item.text == "女")
     );
     assert_eq!(dictionary.lookup("nü", 0)?, dictionary.lookup("nv", 0)?);
+    let mut words = Session::new(
+        &dictionary,
+        Options {
+            typing_mode: TypingMode::Word,
+            ..Default::default()
+        },
+    );
+    for character in "tuja".chars() {
+        words.process(Key::Character(character))?;
+    }
+    assert_eq!(words.snapshot().candidates[0].text, "我们");
+    assert!(
+        dictionary
+            .lookup("我们", 0)?
+            .items
+            .iter()
+            .any(|item| item.text == "我们")
+    );
     assert!(!dictionary.learning('𠀀').codes.is_empty());
     let target = work.join("tiger.json");
     import::save(&package, &target)?;

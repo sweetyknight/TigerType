@@ -6,13 +6,15 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
-use tigertype_engine::{Data, Detail, Dictionary, Mapping, Pronunciation};
+use tigertype_engine::{Data, Detail, Dictionary, Mapping, Phrase, Pronunciation};
 
 // 2：去掉无人消费的旧 Win11Light 外观段，旧包不兼容。
 const VERSION: u32 = 2;
 const LIMIT: u64 = 128 * 1024 * 1024;
 const SOURCES: &[&str] = &[
     "tiger.dict.yaml",
+    "tigress_ci.dict.yaml",
+    "tigress_simp_ci.dict.yaml",
     "core2022.dict.yaml",
     "PY_c.dict.yaml",
     "opencc/hu_cf.txt",
@@ -108,6 +110,17 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
             code: row[1].into(),
             weight: row[2].parse()?,
         });
+    }
+    // 两张 tigress 词表已包含按虎码编码器生成的词码，导入最终四码而不执行 Lua。
+    for name in ["tigress_ci.dict.yaml", "tigress_simp_ci.dict.yaml"] {
+        for line in lines(dictionary_body(&files[name])?) {
+            let row = fields(line, 4)?;
+            data.phrases.push(Phrase {
+                text: row[0].to_owned(),
+                weight: row[1].parse()?,
+                code: row[2].to_owned(),
+            });
+        }
     }
     for line in lines(dictionary_body(&files["core2022.dict.yaml"])?) {
         let row = fields(line, 2)?;

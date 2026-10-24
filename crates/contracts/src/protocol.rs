@@ -5,10 +5,11 @@
 //! v9 唤起消息带目标窗口（查字/设置），已握手的宿主也可请求，供任务栏输入法图标菜单打开设置页。
 //! v10 宿主报告其线程是否持有输入焦点（任务栏正显示本输入法图标），后台据此隐藏通知区图标，两处只显示一个。
 //! v11 配色主题加入玫红（高亮候选只换字色）；加入全角开关（`ToggleFullShape` 键与输入状态 `full_shape`）。旧 DLL 无法解析，所以升版。
+//! v12 选项加入单字/词输入模式；旧 DLL 无法解析，所以升版。
 //! 旧协议直接拒绝。
 use crate::{InputState, Key, KeyOutcome, Options};
 use serde::{Deserialize, Serialize};
-pub const VERSION: u16 = 11;
+pub const VERSION: u16 = 12;
 
 /// 后台 UI 线程可唤起的窗口。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

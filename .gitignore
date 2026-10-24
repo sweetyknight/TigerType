@@ -3,6 +3,9 @@
 /vendor/
 /target/
 /artifacts/
+# 本地隔离压测使用的临时 target 与临时目录，不应作为源码或证据提交。
+/.target-*/
+/.tmp-*/
 *.userdb/
 *.userdb.txt
 *.log

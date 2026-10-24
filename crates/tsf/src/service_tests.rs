@@ -815,7 +815,7 @@ fn taskbar_icon_follows_the_chinese_english_toggle_from_the_backend() {
             .input(&context, Key::Character('u'), later())
             .unwrap()
     );
-    // 右键菜单第三项切换全角：只翻开关，不碰文档、不唤起窗口；再打开菜单时该项写成“切换到半角”（见 indicator 测试）。
+    // 右键菜单第三项固定显示“全角/半角”：只翻开关，不碰文档、不唤起窗口。
     assert!(!active.look().1);
     right_click(&button, &[VK_DOWN, VK_DOWN, VK_DOWN, VK_RETURN]);
     assert!(active.look().1);

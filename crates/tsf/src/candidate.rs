@@ -1,5 +1,5 @@
 //! 宿主进程内候选窗：TSF 线程惰性创建、停用时销毁；以上下文视图窗口为 owner，与宿主处于同一 z-order 层级。
-//! 自绘与命中测试，不建标准控件，避免同线程控件取得焦点而终止组合；不声明 DPI 感知，跟随宿主进程。
+//! 自绘与命中测试，不建标准控件，避免同线程控件取得焦点而终止组合；窗口创建时临时启用逐显示器 DPI，避免系统位图缩放文字。
 //! 窗口过程只经本线程登记表以弱引用找回候选窗，窗口数据里不存业务指针。
 //! 配色与字体随快照中的选项切换；Win11 由 DWM 画圆角与边框，Win10 退回直角自绘外框。
 use crate::uia;
@@ -30,7 +30,10 @@ use windows::{
                 UIA_SelectionItem_ElementSelectedEventId, UiaClientsAreListening,
                 UiaRaiseAutomationEvent, UiaReturnRawElementProvider, UiaRootObjectId,
             },
-            HiDpi::GetDpiForWindow,
+            HiDpi::{
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
+                SetThreadDpiAwarenessContext,
+            },
             Input::KeyboardAndMouse::{GetCapture, GetFocus, ReleaseCapture, SetCapture},
             WindowsAndMessaging::*,
         },
@@ -458,9 +461,12 @@ impl Popup {
                 return Err(error);
             }
         }
+        // SAFETY: 只改变当前 TSF 线程的 DPI 上下文；窗口创建完成后立即恢复宿主设置，避免影响宿主控件。
+        let previous_dpi =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
         // SAFETY: NOACTIVATE/TOOLWINDOW 不抢宿主焦点、不进任务栏；未传入创建参数指针。
         let hwnd = unsafe {
-            CreateWindowExW(
+            let result = CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 CLASS,
                 w!("TigerType 候选"),
@@ -473,7 +479,12 @@ impl Popup {
                 None,
                 Some(instance.into()),
                 None,
-            )?
+            );
+            // SAFETY: 恢复进入前的线程 DPI 上下文；失败时返回值仍为可判定的空句柄。
+            if !previous_dpi.0.is_null() {
+                SetThreadDpiAwarenessContext(previous_dpi);
+            }
+            result?
         };
         let preference = DWMWCP_ROUND;
         // SAFETY: 只设置本窗口属性，参数为本地值；Win10 不支持圆角时返回失败。
@@ -952,7 +963,7 @@ impl Popup {
             view.pending = false;
             shown
         };
-        // SAFETY: 只使本窗口客户区失效，绘制在随后的 WM_PAINT 中进行。
+        // SAFETY: 先显示再立即处理 WM_PAINT；否则 DWM 会先呈现空白边框，宿主回调结束后才补画文字。
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
@@ -967,6 +978,11 @@ impl Popup {
             }
             self.notify(EVENT_OBJECT_IME_SHOW);
             self.raise(|| Some(self.root()), UIA_MenuOpenedEventId);
+        }
+        // 逐键刷新必须在同一回调内完成，避免候选窗已显示而内容仍为空的可见窗口。
+        // SAFETY: 句柄属于本线程候选窗，UpdateWindow 只同步处理该窗口的无状态 WM_PAINT。
+        unsafe {
+            let _ = UpdateWindow(self.hwnd);
         }
         if let Some(index) = state.highlighted {
             self.raise(

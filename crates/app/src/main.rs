@@ -2,6 +2,7 @@
 //! GUI 子系统：随登录启动的后台与开始菜单唤起的查字窗都不弹控制台；从终端运行时借用父控制台输出。
 #![windows_subsystem = "windows"]
 use std::{
+    ffi::c_void,
     path::Path,
     time::{Duration, Instant},
 };
@@ -11,10 +12,34 @@ use tigertype_engine::{Dictionary, Session};
 use tigertype_ipc::{pipe::Runtime, service::Client};
 use windows_sys::Win32::{
     System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE},
+    System::LibraryLoader::{GetModuleHandleA, GetProcAddress},
+    UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     UI::WindowsAndMessaging::{
         ASFW_ANY, AllowSetForegroundWindow, MB_ICONERROR, MB_OK, MessageBoxW,
     },
 };
+
+/// 仅在系统提供时设置进程 DPI；通过动态解析避免旧版 Windows 10 因缺少导入而无法启动。
+fn set_process_dpi_awareness() {
+    // SAFETY: 只查询已加载的 user32 模块句柄，不取得新所有权。
+    let module = unsafe { GetModuleHandleA(c"user32.dll".as_ptr().cast()) };
+    if module.is_null() {
+        return;
+    }
+    // SAFETY: 模块句柄来自上面的系统查询，名称为固定 NUL 结尾字符串。
+    let Some(address) =
+        (unsafe { GetProcAddress(module, c"SetProcessDpiAwarenessContext".as_ptr().cast()) })
+    else {
+        return;
+    };
+    // SAFETY: 名称来自 user32，签名与 Windows SDK 的 SetProcessDpiAwarenessContext 一致。
+    let set: unsafe extern "system" fn(*mut c_void) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    // SAFETY: 地址由固定 API 名称解析，参数为 SDK 定义的 PMv2 上下文值。
+    unsafe {
+        let _ = set(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
 
 /// 连接本登录会话中与本程序同映像的后台；停止请求另要求调用方映像一致。
 fn backend(deadline: Instant) -> std::result::Result<Client, tigertype_ipc::Error> {
@@ -25,7 +50,7 @@ fn backend(deadline: Instant) -> std::result::Result<Client, tigertype_ipc::Erro
 fn run(args: &[std::ffi::OsString]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!(
-            "TigerType Rust 核心工具\n  serve [<数据包绝对路径> <独立受管数据目录绝对路径>]\n  lookup-window\n  stop\n  import-resources <新数据包绝对路径>\n  verify-package <数据包绝对路径>\n  lookup <数据包绝对路径> <拼音或汉字>\n  demo-input <数据包绝对路径> <编码>\n  install-fonts <随包字体目录绝对路径>\nserve 省略路径时使用安装版位置（程序目录的数据包与 %APPDATA%\\TigerType）；lookup-window 请本会话后台显示查字窗，后台未运行时以安装版位置启动后台并显示。"
+            "TigerType Rust 核心工具\n  serve [<数据包绝对路径> <独立受管数据目录绝对路径>]\n  lookup-window\n  stop\n  import-resources <新数据包绝对路径>\n  verify-package <数据包绝对路径>\n  lookup <数据包绝对路径> <拼音、虎码或汉字/词>\n  demo-input <数据包绝对路径> <编码>\n  install-fonts <随包字体目录绝对路径>\nserve 省略路径时使用安装版位置（程序目录的数据包与 %APPDATA%\\TigerType）；lookup-window 请本会话后台显示查字窗，后台未运行时以安装版位置启动后台并显示。"
         );
         return Ok(());
     }
@@ -74,15 +99,17 @@ fn run(args: &[std::ffi::OsString]) -> Result<()> {
             let package = import::build(&project_root()?.join("vendor/tiger"))?;
             import::save(&package, Path::new(&args[1]))?;
             println!(
-                "已校验并写入 {} 条单字编码；未修改原资源。",
-                package.data.entries.len()
+                "已校验并写入 {} 条单字编码、{} 条词编码；未修改原资源。",
+                package.data.entries.len(),
+                package.data.phrases.len()
             );
         }
         (Some("verify-package"), 2) => {
             let package = import::load(Path::new(&args[1]))?;
             println!(
-                "数据包校验通过：{} 条编码，{} 条单字拼音，{} 条学习资料。",
+                "数据包校验通过：{} 条单字编码，{} 条词编码，{} 条单字拼音，{} 条学习资料。",
                 package.data.entries.len(),
+                package.data.phrases.len(),
                 package.data.pinyin.len(),
                 package.data.details.len()
             );
@@ -113,6 +140,8 @@ fn run(args: &[std::ffi::OsString]) -> Result<()> {
     Ok(())
 }
 fn main() -> std::process::ExitCode {
+    // 缺少该 API 时安全回退到系统默认 DPI，不影响命令行入口启动。
+    set_process_dpi_awareness();
     // SAFETY: 只查询本进程标准句柄或附加父进程已有的控制台，不新建窗口；重定向时句柄已由启动信息给出。
     let console = unsafe {
         !GetStdHandle(STD_ERROR_HANDLE).is_null() || AttachConsole(ATTACH_PARENT_PROCESS) != 0

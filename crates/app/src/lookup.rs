@@ -98,7 +98,7 @@ mod tests {
         }) else {
             panic!("需要查询结果");
         };
-        assert_eq!(page.items[0].character, '𠀀');
+        assert_eq!(page.items[0].text, "𠀀");
         assert_eq!(page.items[0].learning.codes, ["ab"]);
         assert!(matches!(
             controller.execute(Request::Lookup {

@@ -101,7 +101,8 @@ impl<'a> Session<'a> {
     }
     pub fn snapshot(&self) -> InputState {
         let page = self.selected / PAGE_SIZE;
-        let show = self.options.show_learning || self.mode == InputMode::Pinyin;
+        let show = self.options.typing_mode == tigertype_contracts::TypingMode::Single
+            && (self.options.show_learning || self.mode == InputMode::Pinyin);
         let candidates: Vec<_> = self
             .candidates
             .iter()

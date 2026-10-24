@@ -295,6 +295,16 @@
       "sha256": "154ca47606e0c1ec884af1832521635ebccc5e9c317df2649d6630f6a8fdc086"
     },
     {
+      "path": "tigress_ci.dict.yaml",
+      "size": 2444290,
+      "sha256": "852233c7963c1c63e49963ae21c7e44161d18943d4edf54c7dd802b027a43354"
+    },
+    {
+      "path": "tigress_simp_ci.dict.yaml",
+      "size": 58492,
+      "sha256": "cde0332ba5ed17c932ef822a4e36e2aebfca6985968ec539067f7381dee07a27"
+    },
+    {
       "path": "tiger.extended.dict.yaml",
       "size": 3734,
       "sha256": "3621a404ade3b43e30f2e3203b748839795d2657629ea13de6b05acb4ab8ecb2"

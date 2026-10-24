@@ -198,6 +198,77 @@ fn real_backend_singleton_image_check_reclaims_idle_hosts_and_reconnects_without
     reader.join().unwrap();
     Ok(())
 }
+
+#[test]
+fn backend_key_round_trip_pressure_stays_within_input_budget() -> Result<()> {
+    let namespace = format!("service-pressure-{}", std::process::id());
+    let image = std::env::current_exe()?;
+    let mut worker = Worker(
+        ProcessCommand::new(&image)
+            .args(["--ignored", "--exact", "backend_worker", "--nocapture"])
+            .env("TIGERTYPE_BACKEND_TEST", &namespace)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?,
+    );
+    let stdout = worker.0.stdout.take().unwrap();
+    let (ready, observed) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout)
+            .lines()
+            .map_while(std::result::Result::ok)
+        {
+            if line == "BACKEND_READY" {
+                let _ = ready.try_send(());
+            }
+        }
+    });
+    observed.recv_timeout(Duration::from_secs(5))?;
+    let runtime = Runtime::new()?;
+    let mut link = Link::new(image.clone(), &namespace);
+    let (client, fresh) = link.ensure(&runtime, deadline())?;
+    assert!(fresh);
+    open(client)?;
+    focus(client, 1)?;
+
+    // 合成输入反复进入/退出组合，覆盖候选状态创建、清空与 JSON/管道往返，不记录按键内容。
+    let mut samples = Vec::with_capacity(2_000);
+    for _ in 0..1_000 {
+        let started = Instant::now();
+        assert!(matches!(
+            key(client, 1, Key::Character('u'))?,
+            Reply::Key(_)
+        ));
+        assert!(matches!(key(client, 1, Key::Backspace)?, Reply::Key(_)));
+        samples.push(started.elapsed());
+    }
+    samples.sort_unstable();
+    let p95 = samples[samples.len() * 95 / 100];
+    eprintln!(
+        "backend pressure: n={} p95={p95:?} max={:?}",
+        samples.len(),
+        samples.last()
+    );
+    assert!(
+        p95 <= Duration::from_millis(10),
+        "输入往返 P95 超过 10ms: {p95:?}"
+    );
+
+    Client::connect(&runtime, &image, &namespace, deadline())?.stop_backend(deadline())?;
+    drop(link);
+    runtime.shutdown(deadline())?;
+    assert_eq!(
+        // SAFETY: 等待自己创建的测试进程，失败时 Worker 析构负责终止与回收。
+        unsafe { WaitForSingleObject(worker.0.as_raw_handle(), 5000) },
+        WAIT_OBJECT_0
+    );
+    assert!(worker.0.wait()?.success());
+    reader.join().unwrap();
+    Ok(())
+}
+
 #[test]
 #[ignore = "只由限时父测试启动，使用合成词表"]
 fn backend_worker() -> Result<()> {

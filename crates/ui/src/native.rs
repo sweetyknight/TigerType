@@ -14,7 +14,7 @@ use std::{
     sync::mpsc::{SyncSender, TryRecvError},
 };
 use tigertype_contracts::{
-    CandidateFont, CustomColors, Options, OutputForm, Palette, Theme,
+    CandidateFont, CustomColors, Options, OutputForm, Palette, Theme, TypingMode,
     protocol::Panel,
     ui::{Reply, Request},
 };
@@ -97,6 +97,7 @@ const FONT: usize = 230;
 const THEME: usize = 240;
 /// 自定义四基色（背景、文字、高亮、强调）的十六进制输入框。
 const CUSTOM: usize = 250;
+const MODE: usize = 280;
 
 const FORMS: [(OutputForm, &str); 3] = [
     (OutputForm::Original, "原字"),
@@ -117,10 +118,11 @@ const TOGGLES: [(usize, &str, &str); 3] = [
     ),
 ];
 /// 三组分段单选：行标题、说明、首个控件编号、各段宽度（96 DPI）。
-const CHOICES: [(&str, &str, usize, i32); 3] = [
+const CHOICES: [(&str, &str, usize, i32); 4] = [
     ("输出字形(&O)", "上屏前转换为所选字形", FORM, 52),
     ("候选字体(&F)", "候选窗与查字字形所用字体", FONT, 80),
     ("配色主题(&T)", "全部界面所用配色", THEME, 48),
+    ("输入模式(&M)", "普通输入使用单字或词码表", MODE, 64),
 ];
 const UI_FACE: &str = "Microsoft YaHei UI";
 /// 列表每项高度（96 DPI）。
@@ -972,18 +974,18 @@ fn main_spec(width: i32, height: i32) -> MainSpec {
         ],
     }
 }
-/// 设置窗为固定尺寸对话框：七行卡片，前三行为开关，中间三行为分段单选，末行为自定义四基色。
-const SETTINGS_SIZE: (i32, i32) = (560, 588);
+/// 设置窗为固定尺寸对话框：八行卡片，前三行为开关，随后四行为分段单选，末行为自定义四基色。
+const SETTINGS_SIZE: (i32, i32) = (560, 648);
 const ROW_TOP: i32 = 80;
 const ROW: i32 = 60;
-const ROWS: i32 = 7;
+const ROWS: i32 = 8;
 const FOOTER_TOP: i32 = ROW_TOP + ROWS * ROW + 16;
 /// 自定义四基色输入框外框（96 DPI）：第 k 个框。
 fn custom_frame(k: i32) -> Box4 {
     let (width, _) = SETTINGS_SIZE;
     [
         width - 40 - (4 - k) * 84 + 6,
-        ROW_TOP + 6 * ROW + 14,
+        ROW_TOP + 7 * ROW + 14,
         78,
         32,
     ]
@@ -996,8 +998,8 @@ fn settings_spec() -> Vec<(usize, Box4)> {
         (NOTICE, [24, FOOTER_TOP + 10, width - 48 - 200, 44]),
         (CANCEL, [width - 24 - 88 - 8 - 88, FOOTER_TOP + 15, 88, 34]),
         (SAVE, [width - 24 - 88, FOOTER_TOP + 15, 88, 34]),
-        (ROW_TITLE + 3, [41, ROW_TOP + 6 * ROW + 9, 140, 22]),
-        (ROW_DESC + 3, [41, ROW_TOP + 6 * ROW + 31, 140, 20]),
+        (ROW_TITLE + 4, [41, ROW_TOP + 7 * ROW + 9, 140, 22]),
+        (ROW_DESC + 4, [41, ROW_TOP + 7 * ROW + 31, 140, 20]),
     ];
     for k in 0..4 {
         let [x, y, w, h] = custom_frame(k);
@@ -1028,6 +1030,8 @@ fn choice_count(first: usize) -> usize {
     match first {
         FORM => FORMS.len(),
         FONT => CandidateFont::ALL.len(),
+        THEME => Theme::ALL.len(),
+        MODE => TypingMode::ALL.len(),
         _ => Theme::ALL.len(),
     }
 }
@@ -1123,14 +1127,14 @@ fn paint_window(hwnd: HWND) {
 fn on_surface(id: usize) -> bool {
     matches!(id, QUERY | LIST | PAGE | GLYPH | CODEPOINT | CODES..=PARTS)
         || (FIELD_LABEL..FIELD_LABEL + 4).contains(&id)
-        || (ROW_TITLE..ROW_TITLE + 4).contains(&id)
-        || (ROW_DESC..ROW_DESC + 4).contains(&id)
+        || (ROW_TITLE..ROW_TITLE + 5).contains(&id)
+        || (ROW_DESC..ROW_DESC + 5).contains(&id)
         || (CUSTOM..CUSTOM + 4).contains(&id)
 }
 fn muted(id: usize) -> bool {
     matches!(id, QUERY_LABEL | STATUS | PAGE | CODEPOINT | SUB | NOTICE)
         || (FIELD_LABEL..FIELD_LABEL + 4).contains(&id)
-        || (ROW_DESC..ROW_DESC + 4).contains(&id)
+        || (ROW_DESC..ROW_DESC + 5).contains(&id)
 }
 
 // SAFETY: Windows 在所属 UI 线程调用；不解引用业务指针、不使用业务状态，不执行可能 panic 的 Rust 操作。
@@ -1665,7 +1669,7 @@ fn settings_window(class: &Class, owner: HWND, options: &Options) -> Result<Wind
     window.add(
         SUB,
         "STATIC",
-        "输入选项只影响普通输入；保存后即时生效，无需重启后台。",
+        "输入选项只影响普通输入；保存后即时生效。快捷键：单击 Shift 中英，Ctrl+. 中英文标点，Ctrl+L 学习信息，↑/↓选词。",
         SS_NOPREFIX,
     )?;
     for (index, (id, title, _)) in TOGGLES.iter().enumerate() {
@@ -1683,6 +1687,7 @@ fn settings_window(class: &Class, owner: HWND, options: &Options) -> Result<Wind
         let names: Vec<&str> = match *first {
             FORM => FORMS.iter().map(|(_, name)| *name).collect(),
             FONT => CandidateFont::ALL.iter().map(|font| font.name()).collect(),
+            MODE => TypingMode::ALL.iter().map(|mode| mode.name()).collect(),
             _ => Theme::ALL.iter().map(|theme| theme.name()).collect(),
         };
         for (k, name) in names.into_iter().enumerate() {
@@ -1691,8 +1696,13 @@ fn settings_window(class: &Class, owner: HWND, options: &Options) -> Result<Wind
             window.add(first + k, "BUTTON", name, style | BS_AUTORADIOBUTTON as u32)?;
         }
     }
-    window.add(ROW_TITLE + 3, "STATIC", "自定义配色(&U)", SS_CENTERIMAGE)?;
-    window.add(ROW_DESC + 3, "STATIC", "背景·文字·高亮·强调", SS_NOPREFIX)?;
+    window.add(ROW_TITLE + 4, "STATIC", "自定义配色(&U)", SS_CENTERIMAGE)?;
+    window.add(
+        ROW_DESC + 4,
+        "STATIC",
+        "代码模板：背景·文字·高亮·强调",
+        SS_NOPREFIX,
+    )?;
     for k in 0..4 {
         let group = if k == 0 { WS_GROUP } else { 0 };
         window.add(
@@ -1773,6 +1783,9 @@ fn set_options(window: &Window, options: Options) {
     for (k, theme) in Theme::ALL.iter().enumerate() {
         check(window, THEME + k, *theme == options.theme);
     }
+    for (k, mode) in TypingMode::ALL.iter().enumerate() {
+        check(window, MODE + k, *mode == options.typing_mode);
+    }
     let custom = options.custom;
     for (k, color) in [custom.window, custom.text, custom.highlight, custom.accent]
         .into_iter()
@@ -1802,6 +1815,8 @@ fn get_options(window: &Window) -> Result<Options, String> {
         candidate_font: CandidateFont::ALL
             [pick(FONT, CandidateFont::ALL.len()).ok_or("必须选择候选字体")?],
         theme: Theme::ALL[pick(THEME, Theme::ALL.len()).ok_or("必须选择配色主题")?],
+        typing_mode: TypingMode::ALL
+            [pick(MODE, TypingMode::ALL.len()).ok_or("必须选择输入模式")?],
         custom: CustomColors {
             window: color(0)?,
             text: color(1)?,
@@ -1832,7 +1847,7 @@ fn show_page(main: &Window, model: &Model) {
         .map_or(&[][..], |page| &page.items[..]);
     for item in items {
         let code = item.learning.codes.first().map_or("", String::as_str);
-        let text = wide(&format!("{} {code}", item.character));
+        let text = wide(&format!("{} {code}", item.text));
         main.send(LIST, LB_ADDSTRING, 0, text.as_ptr() as LPARAM);
     }
     main.send(
@@ -1862,8 +1877,11 @@ fn show_detail(main: &Window, model: &Model) {
     };
     let (glyph, point, codes, full, reading, parts) = match item {
         Some(item) => (
-            item.character.to_string(),
-            format!("U+{:04X}", item.character as u32),
+            item.text.clone(),
+            item.text
+                .chars()
+                .next()
+                .map_or_else(String::new, |c| format!("U+{:04X}", c as u32)),
             list(&item.learning.codes),
             list(&item.learning.full_codes),
             list(&item.learning.readings),
@@ -1910,6 +1928,7 @@ fn refresh(main: &Window, settings: &Window, model: &Model) {
         .chain(FORM..FORM + FORMS.len())
         .chain(FONT..FONT + CandidateFont::ALL.len())
         .chain(THEME..THEME + Theme::ALL.len())
+        .chain(MODE..MODE + TypingMode::ALL.len())
         .chain(CUSTOM..CUSTOM + 4)
     {
         settings.enable(id, !model.busy);
@@ -2520,7 +2539,7 @@ mod tests {
                 common_only: false,
                 show_learning: true,
                 output_form: OutputForm::Traditional,
-                theme: Theme::Night,
+                theme: Theme::Ink,
                 candidate_font: CandidateFont::KaiTi,
                 ..defaults
             };
@@ -2560,7 +2579,7 @@ mod tests {
                     .send(tigertype_contracts::ui::Reply::Lookup(Ok(
                         tigertype_contracts::LookupPage {
                             items: vec![tigertype_contracts::LookupItem {
-                                character: '𠀀',
+                                text: "𠀀".into(),
                                 learning: Default::default(),
                             }],
                             has_more: false,
@@ -2583,7 +2602,7 @@ mod tests {
                 .contains("工作线程已退出")
             );
             worker.join().unwrap();
-            assert_eq!(model.result.as_ref().unwrap().items[0].character, '𠀀');
+            assert_eq!(model.result.as_ref().unwrap().items[0].text, "𠀀");
             assert!(!model.busy);
             assert_eq!(main.send(LIST, LB_GETCOUNT, 0, 0), 1);
             let mut buffer = [0u16; 64];

@@ -253,6 +253,28 @@ fn hidden_popup_lays_out_rows_and_turns_matching_press_release_into_one_stamped_
     assert!(view.state.is_none() && view.layout.rows.is_empty() && view.serial == serial + 2);
 }
 
+#[test]
+fn popup_refresh_pressure_stays_within_input_budget() {
+    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let mut sample = state(9, 0);
+    sample.options.show_learning = true;
+    let started = std::time::Instant::now();
+    for revision in 0..1_000 {
+        sample.revision = revision + 1;
+        sample.highlighted = Some(revision as usize % sample.candidates.len());
+        popup.show(&sample, CARET, HWND::default()).unwrap();
+    }
+    let elapsed = started.elapsed();
+    eprintln!(
+        "candidate popup pressure: n=1000 total={elapsed:?} per={:?}",
+        elapsed / 1_000
+    );
+    assert!(
+        elapsed <= std::time::Duration::from_secs(1),
+        "候选窗刷新过慢: {elapsed:?}"
+    );
+}
+
 fn string(value: &VARIANT) -> String {
     // SAFETY: 先核对类型标记为 VT_BSTR，再借用联合体中的字符串；VARIANT 仍拥有它。
     unsafe {

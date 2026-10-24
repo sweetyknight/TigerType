@@ -80,7 +80,7 @@ impl Model {
                 self.query = query;
                 self.page = page;
                 self.notice = if result.items.is_empty() {
-                    "没有匹配的单字".into()
+                    "没有匹配的字词".into()
                 } else {
                     format!("第 {} 页；查字不产生上屏提交", page + 1)
                 };
@@ -121,7 +121,7 @@ pub(crate) fn details(page: &LookupPage) -> String {
         .map(|item| {
             format!(
                 "{}\r\n可用编码：{}\r\n完整编码：{}\r\n读音：{}\r\n拆分：{}\r\n",
-                item.character,
+                item.text,
                 list(&item.learning.codes),
                 list(&item.learning.full_codes),
                 list(&item.learning.readings),
@@ -217,7 +217,7 @@ mod tests {
     fn non_bmp_and_missing_data_are_displayed_without_guessing() {
         let text = details(&LookupPage {
             items: vec![LookupItem {
-                character: '𠀀',
+                text: "𠀀".into(),
                 learning: LearningInfo {
                     codes: vec!["ab".into()],
                     ..Default::default()

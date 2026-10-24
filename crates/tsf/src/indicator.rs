@@ -205,7 +205,7 @@ impl ITfSource_Impl for Indicator_Impl {
     }
 }
 
-/// 建菜单：全角项按 full 写成要切换到的一边；后台不可用时各项置灰，并在末尾附原因说明（同样置灰）。
+/// 建菜单：全角项固定显示“全角/半角”，后台不可用时各项置灰，并在末尾附原因说明（同样置灰）。
 /// 项为自绘，文字仍随项保存供读屏器朗读。菜单归调用方 DestroyMenu。
 pub(crate) fn build(available: bool, full: bool) -> Result<HMENU> {
     FULL.set(full);
@@ -293,8 +293,7 @@ fn label(id: u32) -> &'static str {
     match id {
         SETTINGS => "设置",
         LOOKUP => "查字",
-        SHAPE if FULL.get() => "切换到半角",
-        SHAPE => "切换到全角",
+        SHAPE => "全角/半角",
         _ => OFFLINE,
     }
 }
@@ -626,7 +625,7 @@ pub(crate) mod tests {
         unsafe { button.OnClick(TF_LBI_CLK_LEFT, POINT::default(), &RECT::default()) }.unwrap();
         assert_eq!(*toggled.borrow(), [Key::ToggleAscii]);
         assert!(shown.borrow().is_empty());
-        // 右键弹出真实菜单：依次选“设置”“查字”“切换到全角”，Esc 取消什么都不做。
+        // 右键弹出真实菜单：全角/半角项固定显示，点击后按当前状态翻转。
         right_click(&button, &[VK_DOWN, VK_RETURN]);
         right_click(&button, &[VK_DOWN, VK_DOWN, VK_RETURN]);
         right_click(&button, &[VK_DOWN, VK_DOWN, VK_DOWN, VK_RETURN]);
@@ -666,12 +665,8 @@ pub(crate) mod tests {
                 }
                 DestroyMenu(menu).unwrap();
             }
-            // 全角项写成要切换到的一边。
-            let shape = if full {
-                "切换到半角"
-            } else {
-                "切换到全角"
-            };
+            // 全角/半角项不暴露“切换到”措辞，避免把当前状态误读成目标状态。
+            let shape = "全角/半角";
             let mut expected = vec![
                 (SETTINGS, !available, "设置".to_string()),
                 (LOOKUP, !available, "查字".to_string()),

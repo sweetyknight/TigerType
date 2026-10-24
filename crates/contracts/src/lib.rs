@@ -51,6 +51,8 @@ pub struct Options {
     /// 仅在主题为自定义时生效；切到预设也保留，便于切回。
     pub custom: CustomColors,
     pub candidate_font: CandidateFont,
+    /// 普通输入使用单字码表或词码表；默认单字，避免升级后改变输入习惯。
+    pub typing_mode: TypingMode,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -62,6 +64,25 @@ impl Default for Options {
             theme: Theme::Amber,
             custom: CustomColors::default(),
             candidate_font: CandidateFont::WenKai,
+            typing_mode: TypingMode::Single,
+        }
+    }
+}
+
+/// 虎码输入范围。词模式仍复用同一套四码编辑会话，只替换候选来源。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypingMode {
+    #[default]
+    Single,
+    Word,
+}
+impl TypingMode {
+    pub const ALL: [Self; 2] = [Self::Single, Self::Word];
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Single => "单字",
+            Self::Word => "词",
         }
     }
 }
@@ -126,7 +147,6 @@ pub enum Theme {
     Amber,
     Ink,
     Bamboo,
-    Night,
     Rose,
     Custom,
 }
@@ -243,11 +263,10 @@ pub struct Palette {
     pub selection: u32,
 }
 impl Theme {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::Amber,
         Self::Ink,
         Self::Bamboo,
-        Self::Night,
         Self::Rose,
         Self::Custom,
     ];
@@ -256,7 +275,6 @@ impl Theme {
             Self::Amber => "琥珀",
             Self::Ink => "墨",
             Self::Bamboo => "竹",
-            Self::Night => "夜",
             Self::Rose => "玫红",
             Self::Custom => "自定义",
         }
@@ -315,23 +333,6 @@ impl Theme {
                 accent: 0x4D7C0F,
                 on_accent: 0xFFFFFF,
                 selection: 0xD6E5BC,
-            },
-            Self::Night => Palette {
-                window: 0x24221F,
-                surface: 0x2E2B28,
-                border: 0x45413B,
-                line: 0x3A3733,
-                field: 0x57524A,
-                text: 0xEDEAE4,
-                label: 0xA8A096,
-                muted: 0xA39B90,
-                faint: 0x6B655D,
-                highlight: 0x4A3A28,
-                highlight_text: 0xF2B66B,
-                chosen: 0xEDEAE4,
-                accent: 0xE0913A,
-                on_accent: 0x1C1A17,
-                selection: 0x5C4630,
             },
             // 取自小狼毫配色 MacRoseo：白底黑字、高亮行无底色只把字染成玫红。
             // 原玫红 #FA114F 在白底仅约 4.0:1，等比压暗到 4.5:1；序号原为 #999999，同理加深。
@@ -536,7 +537,8 @@ pub struct KeyOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LookupItem {
-    pub character: char,
+    /// 查询结果文本；单字时长度为一个 Unicode 标量，词查询时为完整词组。
+    pub text: String,
     pub learning: LearningInfo,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,7 +572,7 @@ mod tests {
             }
             assert_eq!(p.unreadable(), None, "{theme:?}");
         }
-        assert!(Theme::Night.preset().unwrap().dark() && !Theme::Amber.preset().unwrap().dark());
+        assert!(!Theme::Amber.preset().unwrap().dark());
     }
     #[test]
     fn custom_colors_derive_a_blue_free_palette_and_reject_blue_or_unreadable_input() {

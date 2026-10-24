@@ -20,6 +20,13 @@ pub struct Entry {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Phrase {
+    pub text: String,
+    pub code: String,
+    pub weight: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pronunciation {
     pub character: char,
     pub pinyin: String,
@@ -43,6 +50,9 @@ pub struct Mapping {
 #[serde(deny_unknown_fields)]
 pub struct Data {
     pub entries: Vec<Entry>,
+    /// 小狼毫 tigress_ci 词表；只保留词、权重和最终四码，不加载 Lua 编码器。
+    #[serde(default)]
+    pub phrases: Vec<Phrase>,
     pub common: Vec<char>,
     pub pinyin: Vec<Pronunciation>,
     pub details: Vec<Detail>,
@@ -54,7 +64,12 @@ pub struct Dictionary {
     entries: Vec<Entry>,
     common: BTreeSet<char>,
     pinyin: Vec<Pronunciation>,
-    learning: Vec<LookupItem>,
+    // 启动时把同码桶整理为按权重顺序的去重字符，输入路径不再扫描整张排序表。
+    tiger_buckets: BTreeMap<String, Vec<char>>,
+    pinyin_buckets: BTreeMap<String, Vec<char>>,
+    phrases: Vec<Phrase>,
+    word_buckets: BTreeMap<String, Vec<String>>,
+    learning: Vec<(char, LearningInfo)>,
     simplified: BTreeMap<char, Vec<char>>,
     traditional: BTreeMap<char, Vec<char>>,
 }
@@ -99,6 +114,7 @@ impl Dictionary {
         if data.entries.is_empty()
             || [
                 data.entries.len(),
+                data.phrases.len(),
                 data.common.len(),
                 data.pinyin.len(),
                 data.details.len(),
@@ -172,6 +188,28 @@ impl Dictionary {
                 return Err(Error("单字学习资料条目超限"));
             }
         }
+        // 词候选沿用码表权重顺序，不能用 Hash/BTree 的键序替代排序。
+        data.phrases
+            .sort_by(|a, b| a.code.cmp(&b.code).then_with(|| b.weight.cmp(&a.weight)));
+        let mut word_buckets = BTreeMap::<String, Vec<String>>::new();
+        for phrase in &data.phrases {
+            if phrase.text.chars().count() < 2
+                || phrase.text.chars().any(char::is_control)
+                || !valid_code(&phrase.code)
+            {
+                return Err(Error("词条文本或编码非法"));
+            }
+            word_buckets
+                .entry(phrase.code.clone())
+                .or_default()
+                .push(phrase.text.clone());
+        }
+        for values in word_buckets.values_mut() {
+            values.dedup();
+            if values.len() > MAX_MATCHES {
+                return Err(Error("同码词候选超过有界容量"));
+            }
+        }
         // 稳定排序让同权重候选保留原始顺序，不使用随机哈希序作为排序。
         data.entries
             .sort_by(|a, b| a.code.cmp(&b.code).then_with(|| b.weight.cmp(&a.weight)));
@@ -180,17 +218,36 @@ impl Dictionary {
                 .cmp(&b.pinyin)
                 .then_with(|| b.weight.cmp(&a.weight))
         });
+        // 预建两类短码桶；去重工作只在加载阶段做一次，避免每个按键重新维护 BTreeSet。
+        let mut tiger_buckets: BTreeMap<String, Vec<char>> = BTreeMap::new();
+        let mut tiger_seen = BTreeSet::<(String, char)>::new();
+        for entry in &data.entries {
+            if tiger_seen.insert((entry.code.clone(), entry.character)) {
+                tiger_buckets
+                    .entry(entry.code.clone())
+                    .or_default()
+                    .push(entry.character);
+            }
+        }
+        let mut pinyin_buckets: BTreeMap<String, Vec<char>> = BTreeMap::new();
+        let mut pinyin_seen = BTreeSet::<(String, char)>::new();
+        for entry in &data.pinyin {
+            if pinyin_seen.insert((entry.pinyin.clone(), entry.character)) {
+                pinyin_buckets
+                    .entry(entry.pinyin.clone())
+                    .or_default()
+                    .push(entry.character);
+            }
+        }
         let result = Self {
             entries: data.entries,
             common: data.common.into_iter().collect(),
             pinyin: data.pinyin,
-            learning: learning
-                .into_iter()
-                .map(|(character, learning)| LookupItem {
-                    character,
-                    learning,
-                })
-                .collect(),
+            tiger_buckets,
+            pinyin_buckets,
+            phrases: data.phrases,
+            word_buckets,
+            learning: learning.into_iter().collect(),
             simplified: maps(data.simplified)?,
             traditional: maps(data.traditional)?,
         };
@@ -226,9 +283,9 @@ impl Dictionary {
 
     pub fn learning(&self, character: char) -> LearningInfo {
         self.learning
-            .binary_search_by_key(&character, |e| e.character)
+            .binary_search_by_key(&character, |e| e.0)
             .ok()
-            .map(|index| self.learning[index].learning.clone())
+            .map(|index| self.learning[index].1.clone())
             .unwrap_or_default()
     }
 
@@ -241,30 +298,51 @@ impl Dictionary {
         if code.is_empty() {
             return Vec::new();
         }
+        if mode == InputMode::Tiger && options.typing_mode == tigertype_contracts::TypingMode::Word
+        {
+            return self
+                .word_buckets
+                .get(code)
+                .into_iter()
+                .flatten()
+                .map(|text| Candidate {
+                    text: text.clone(),
+                    ..Default::default()
+                })
+                .collect();
+        }
         let characters: Vec<char> = match mode {
-            InputMode::Tiger => {
-                let start = self.entries.partition_point(|e| e.code.as_str() < code);
-                self.entries[start..]
-                    .iter()
-                    .take_while(|e| e.code == code)
-                    .filter(|e| !options.common_only || self.common.contains(&e.character))
-                    .map(|e| e.character)
-                    .collect()
-            }
-            InputMode::Pinyin => {
-                let start = self.pinyin.partition_point(|e| e.pinyin.as_str() < code);
-                self.pinyin[start..]
-                    .iter()
-                    .take_while(|e| e.pinyin == code)
-                    .map(|e| e.character)
-                    .collect()
-            }
+            InputMode::Tiger => self
+                .tiger_buckets
+                .get(code)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|character| !options.common_only || self.common.contains(character))
+                .collect(),
+            InputMode::Pinyin => self
+                .pinyin_buckets
+                .get(code)
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect(),
         };
         let conversion = match options.output_form {
             OutputForm::Original => None,
             OutputForm::Simplified => Some(&self.simplified),
             OutputForm::Traditional => Some(&self.traditional),
         };
+        if conversion.is_none() {
+            // 原字模式的桶已在加载时去重，直接生成候选，避免每个按键重复分配去重树。
+            return characters
+                .into_iter()
+                .map(|character| Candidate {
+                    text: character.to_string(),
+                    ..Default::default()
+                })
+                .collect();
+        }
         let mut seen = BTreeSet::new();
         let mut result = Vec::new();
         for source in characters {
@@ -295,36 +373,69 @@ impl Dictionary {
         if page > u32::MAX as usize {
             return Err(Error("查询页码超限"));
         }
-        let characters = if query.is_empty() {
+        let items = if query.is_empty() {
             Vec::new()
         } else if query
             .chars()
             .all(|c| c.is_ascii_alphabetic() || c == 'ü' || c == 'Ü')
         {
-            self.candidates(
-                &normalize_pinyin(query)?,
-                InputMode::Pinyin,
-                Options::default(),
-            )
-            .into_iter()
-            .map(|c| c.text.chars().next().unwrap())
-            .collect()
+            let mut values = self
+                .word_buckets
+                .get(&query.to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_default();
+            values.extend(
+                self.candidates(
+                    &normalize_pinyin(query)?,
+                    InputMode::Pinyin,
+                    Options::default(),
+                )
+                .into_iter()
+                .map(|c| c.text),
+            );
+            values.dedup();
+            values
         } else {
-            let mut seen = BTreeSet::new();
-            query
-                .chars()
-                .filter(|c| !c.is_whitespace() && seen.insert(*c))
-                .collect::<Vec<_>>()
+            let mut words = self
+                .phrases
+                .iter()
+                .filter(|phrase| phrase.text == query)
+                .map(|phrase| phrase.text.clone())
+                .collect::<Vec<_>>();
+            if words.is_empty() {
+                let mut seen = BTreeSet::new();
+                words = query
+                    .chars()
+                    .filter(|c| !c.is_whitespace() && seen.insert(*c))
+                    .map(|c| c.to_string())
+                    .collect();
+            }
+            words
         };
         Ok(LookupPage {
-            has_more: characters.len().saturating_sub(offset) > PAGE_SIZE,
-            items: characters
+            has_more: items.len().saturating_sub(offset) > PAGE_SIZE,
+            items: items
                 .into_iter()
                 .skip(offset)
                 .take(PAGE_SIZE)
-                .map(|character| LookupItem {
-                    character,
-                    learning: self.learning(character),
+                .map(|text| {
+                    let mut learning = text
+                        .chars()
+                        .next()
+                        .map_or_else(LearningInfo::default, |character| self.learning(character));
+                    // 词查询展示词本身的四码，不把首字编码误当作词码。
+                    if let Some(code) = self
+                        .phrases
+                        .iter()
+                        .find(|phrase| phrase.text == text)
+                        .map(|phrase| phrase.code.clone())
+                    {
+                        learning.codes = vec![code];
+                        learning.full_codes.clear();
+                        learning.decomposition = None;
+                        learning.readings.clear();
+                    }
+                    LookupItem { text, learning }
                 })
                 .collect(),
         })
