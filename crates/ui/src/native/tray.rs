@@ -578,6 +578,19 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 draw_menu_item(item);
                 1
             }
+            // 菜单模态期间由线程池代等唤起邮箱，后台停止或唤起时收起菜单（见 super::watch）。
+            WM_ENTERMENULOOP => {
+                let _ = modal_enter(hwnd);
+                0
+            }
+            WM_EXITMENULOOP => {
+                modal_exit();
+                0
+            }
+            UNBLOCK => {
+                unblock(hwnd);
+                0
+            }
             // 切换深浅色时系统广播设置名 ImmersiveColorSet，按新任务栏底色重画图标。
             WM_SETTINGCHANGE if l != 0 && named(l as *const u16, "ImmersiveColorSet") => {
                 recolor(hwnd);
@@ -643,6 +656,7 @@ pub(super) fn first(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::tests::bounded;
 
     /// 只建隐藏窗口、不登记通知区图标，验证图标事件与唤起信号都能把首次唤起交给事件循环。
     #[test]
@@ -672,6 +686,20 @@ mod tests {
         for panel in [Panel::Settings, Panel::Lookup] {
             assert_eq!(decode(encode(panel)), panel);
         }
+        an_open_tray_menu_closes_when_the_backend_stops(&tray);
+    }
+
+    /// 真实右键菜单（屏幕上一闪而过，不移动鼠标）展开期间后台停止：菜单须立即收起，
+    /// 且停止信号留给事件循环，UI 线程得以退出而不是一直等用户操作。窗口类同名，由图标事件测试串行调用。
+    fn an_open_tray_menu_closes_when_the_backend_stops(tray: &Tray) {
+        let (sender, show) = crate::mailbox::<Panel>().unwrap();
+        watch(Some(&show));
+        bounded(sender, || menu(tray.hwnd, 0, 0));
+        // 停止信号未被菜单吞掉：事件循环随即发现邮箱断开并退出。
+        let taskbar = Latest::new().unwrap();
+        assert_eq!(first(&show, tray, &taskbar).unwrap(), None);
+        // 邮箱随本函数释放，不留悬空事件句柄。
+        watch(None);
     }
 
     #[test]

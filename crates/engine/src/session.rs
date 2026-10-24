@@ -18,6 +18,8 @@ pub struct Session<'a> {
     candidates: Vec<Candidate>,
     selected: usize,
     revision: u64,
+    // 组合中收到的热重载设置：等本次组合结束（含顶屏的旧字上屏、新字开始之间）再换上。
+    pending: Option<Options>,
 }
 impl<'a> Session<'a> {
     pub fn new(dictionary: &'a Dictionary, options: Options) -> Self {
@@ -34,6 +36,7 @@ impl<'a> Session<'a> {
             candidates: Vec::new(),
             selected: 0,
             revision: 1,
+            pending: None,
         }
     }
     fn advance(&mut self) -> Result<()> {
@@ -43,7 +46,16 @@ impl<'a> Session<'a> {
             .ok_or(Error("会话快照编号耗尽"))?;
         Ok(())
     }
+    /// 组合已结束时换上待用设置（退格删空也算结束）。
+    fn settle(&mut self) {
+        if !self.composing()
+            && let Some(options) = self.pending.take()
+        {
+            self.options = options;
+        }
+    }
     fn rebuild(&mut self) {
+        self.settle();
         self.candidates = self
             .dictionary
             .candidates(&self.buffer, self.mode, self.options);
@@ -52,6 +64,7 @@ impl<'a> Session<'a> {
     fn reset(&mut self) {
         self.buffer.clear();
         self.mode = InputMode::Tiger;
+        self.settle();
         self.candidates.clear();
         self.selected = 0;
     }
@@ -63,8 +76,18 @@ impl<'a> Session<'a> {
     pub fn configure(&mut self, options: Options) -> Result<InputState> {
         self.advance()?;
         self.options = options;
+        self.pending = None;
         self.rebuild();
         Ok(self.snapshot())
+    }
+    /// 热重载：无组合时立即换上；组合中只记下，不改宿主已显示的候选与编号，组合结束时换上。
+    pub fn adopt(&mut self, options: Options) -> Result<()> {
+        if self.composing() {
+            self.pending = Some(options);
+        } else {
+            self.configure(options)?;
+        }
+        Ok(())
     }
     pub fn composing(&self) -> bool {
         !self.buffer.is_empty() || self.mode == InputMode::Pinyin
@@ -309,7 +332,10 @@ impl<'a> Session<'a> {
         } else {
             current.saturating_sub(1)
         };
-        self.selected = next * PAGE_SIZE;
+        // 越界翻页忽略：页码不变时高亮也不动，否则随后空格会上错字。
+        if next != current {
+            self.selected = next * PAGE_SIZE;
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 //! 只在编辑会话内改本服务拥有的组合范围。按键/点击会话先核对文档，再调用后台交换，最后写入并取组合位置，
-//! 均在同一会话内完成：拿不到锁时后台状态未变；迟到回调、外部改写与非空用户选区不写入。
+//! 均在同一会话内完成：拿不到锁时后台状态未变；迟到回调与外部改写不写入。
+//! 用户非空选区由新组合或提交直接替换（同系统输入法）；后台无结论时尚未写入，原键交宿主自行替换。
 use std::{
     cell::{Cell, RefCell},
     mem::ManuallyDrop,
@@ -128,6 +129,9 @@ impl ITfEditSession_Impl for EditSession_Impl {
                 || self.epoch.get() != self.expected_epoch
                 || (self.expected_epoch == 0 && !matches!(self.action, Action::Cancel))
             {
+                // 过期或失效的排队会话不碰文档，但仍须通知结束，否则点击锁不会解除。
+                self.completion.borrow_mut().report.error = Some(E_FAIL);
+                self.finish();
                 return Err(E_FAIL.into());
             }
             if let Some(budget) = self.budget {
@@ -142,9 +146,7 @@ impl ITfEditSession_Impl for EditSession_Impl {
             if let Err(error) = &result {
                 self.completion.borrow_mut().report.error = Some(error.code());
             }
-            if let Some(finish) = self.finish.take() {
-                finish(std::mem::take(&mut self.completion.borrow_mut().report));
-            }
+            self.finish();
             result
         }))
         .unwrap_or_else(|_| Err(E_FAIL.into()))
@@ -224,6 +226,13 @@ fn set_caret(context: &ITfContext, range: &ITfRange, cookie: u32) -> Result<()> 
     result
 }
 impl EditSession_Impl {
+    /// 把报告交给结束通知，至多一次；先释放借用再回调。
+    fn finish(&self) {
+        if let Some(finish) = self.finish.take() {
+            let report = std::mem::take(&mut self.completion.borrow_mut().report);
+            finish(report);
+        }
+    }
     /// 丢弃本地组合记录并作废旧组合 sink；正文已归宿主，不在这里改动。
     fn forget(&self) -> Result<()> {
         let mut state = self
@@ -359,14 +368,8 @@ impl EditSession_Impl {
         let range = match owned {
             Some(range) => range,
             None if select => return Err(E_FAIL.into()),
-            None => {
-                let range = selected(&self.context, cookie)?;
-                // SAFETY: 新组合不覆盖用户的非空选区，拒绝后由宿主处理原键。
-                if !unsafe { range.IsEmpty(cookie)? }.as_bool() {
-                    return Err(E_FAIL.into());
-                }
-                range
-            }
+            // 非空选区不拒绝：预判已宣布吃键，拒绝会让宿主吞掉原键；写入时选区被替换。
+            None => selected(&self.context, cookie)?,
         };
         let exchange = exchange.borrow_mut().take().ok_or(E_FAIL)?;
         let outcome = match exchange(reset, self.deadline.get()) {
@@ -552,7 +555,8 @@ impl Editor {
         self.run(action, deadline, true, None, None).report
     }
     /// 候选点击会话（`TF_ES_ASYNCDONTCARE`）：开始时核对组合仍完整，后台预算从开始时计算；
-    /// finish 在会话内收到报告，会话始终未执行则不会调用。返回请求是否被宿主受理。
+    /// finish 在会话被调起时（含过期、失效拒绝）恰好收到一次报告，宿主始终不调起则不会调用。
+    /// 返回请求是否被宿主受理（外层与内层 HRESULT 都成功）；false 时调用方自行收尾。
     pub fn select(
         &self,
         exchange: impl FnOnce(Instant) -> Verdict + 'static,
@@ -657,7 +661,8 @@ impl Editor {
             completed.report.error = Some(E_FAIL);
         }
         Request {
-            queued: result.is_ok(),
+            // 内层 HRESULT 失败即宿主拒绝了会话（同步执行失败时 finish 已调用，调用方重复收尾无害）。
+            queued: matches!(result, Ok(hr) if hr.is_ok()),
             ran: completed.ran,
             report: std::mem::take(&mut completed.report),
         }

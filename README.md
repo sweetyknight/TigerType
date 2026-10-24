@@ -1,6 +1,6 @@
 # TigerType
 
-Windows Rust 专用虎码单字输入法项目：单字输入、拼音查字学习、简繁候选与原生 Win11Light 外观，不兼容 Rime 生态。
+Windows Rust 专用虎码单字输入法项目：单字输入、拼音查字学习、简繁候选与原生自绘外观，不兼容 Rime 生态。
 
 - [实施方案](docs/implementation-plan.md)：批准范围、架构、验收。
 - [项目状态](docs/project-status.md)：实际已实现、缺陷和验证；不要把规划当成可用功能。
@@ -28,7 +28,7 @@ cargo test --locked --offline -p tigertype-ipc --test dll_residency
 
 ## 离线核心工具
 
-先将批准的原资源按锁定清单准备在本项目 `vendor/tiger`；工具只读取所需的 9 项文本，不自动探测现用输入法目录。
+先将批准的原资源按锁定清单准备在本项目 `vendor/tiger`；工具只读取所需的 7 项文本，不自动探测现用输入法目录。
 
 ```powershell
 # 输出必须为新文件；已有包不会被覆盖。以下路径按本仓库位置填写。

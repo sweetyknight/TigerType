@@ -14,7 +14,9 @@ pub(crate) struct Document {
     pub(crate) text: RefCell<Vec<u16>>,
     pub(crate) selection: Cell<(usize, usize)>,
     pub(crate) sink: RefCell<Option<ITfCompositionSink>>,
-    readonly: Cell<bool>,
+    pub(crate) readonly: Cell<bool>,
+    /// 模拟宿主查询状态失败。
+    pub(crate) fail_status: Cell<bool>,
     fail_end: Cell<bool>,
     fail_write: Cell<bool>,
     writes: Cell<u32>,
@@ -200,6 +202,9 @@ impl ITfContext_Impl for Context_Impl {
         Err(E_NOTIMPL.into())
     }
     fn GetStatus(&self) -> Result<TS_STATUS> {
+        if self.doc.fail_status.get() {
+            return Err(E_FAIL.into());
+        }
         Ok(TS_STATUS {
             dwDynamicFlags: if self.doc.readonly.get() {
                 TS_SD_READONLY
@@ -439,8 +444,6 @@ fn document_checks_precede_the_exchange_so_rejected_keys_leave_the_backend_uncha
     assert!(rejected(key(&editor, deadline())));
     doc.readonly.set(false);
     *doc.text.borrow_mut() = "原文".encode_utf16().collect();
-    doc.selection.set((0, 2));
-    assert!(rejected(key(&editor, deadline())));
     doc.selection.set((2, 2));
     doc.defer.set(true);
     assert!(rejected(key(&editor, deadline())));
@@ -453,6 +456,29 @@ fn document_checks_precede_the_exchange_so_rejected_keys_leave_the_backend_uncha
     assert_eq!(calls.get(), 0);
     assert_eq!(doc.writes.get(), 0);
     assert_eq!(text(&doc), "原文");
+}
+
+#[test]
+fn a_non_empty_selection_is_replaced_by_the_composition_or_commit_but_kept_when_the_backend_fails()
+{
+    let (doc, editor) = setup();
+    *doc.text.borrow_mut() = "原文甲".encode_utf16().collect();
+    // 后台无结论：尚未写入，选区原样留给宿主按原键处理。
+    doc.selection.set((0, 2));
+    let report = editor.key(deadline(), |_, _| Verdict::Skip);
+    assert!(report.error.is_some() && !report.exchanged);
+    assert_eq!((text(&doc), doc.selection.get()), ("原文甲".into(), (0, 2)));
+    // 新组合替换选区，光标在组合末端；取消只删组合，被替换的选区不恢复（同系统输入法）。
+    let report = apply(&editor, outcome(1, "u", None), deadline());
+    assert!(report.handled && report.error.is_none());
+    assert_eq!((text(&doc), doc.selection.get()), ("u甲".into(), (1, 1)));
+    assert!(editor.cancel(deadline()).error.is_none());
+    assert_eq!(text(&doc), "甲");
+    // 无组合时的直接提交（如标点）同样替换选区。
+    doc.selection.set((0, 1));
+    let report = apply(&editor, outcome(2, "", Some("，")), deadline());
+    assert!(report.committed && report.error.is_none());
+    assert_eq!((text(&doc), doc.selection.get()), ("，".into(), (1, 1)));
 }
 
 #[test]
@@ -677,9 +703,9 @@ fn select(
 #[test]
 fn click_sessions_commit_into_the_intact_composition_and_never_end_or_reset_it() {
     let (doc, editor) = setup();
-    // 没有自有组合：不交换，报告失败。
+    // 没有自有组合：不交换，报告失败；同步执行失败的内层结果使请求视为未受理。
     let (queued, report, called) = select(&editor, || Verdict::Apply(outcome(1, "", Some("的"))));
-    assert!(queued && !called.get());
+    assert!(!queued && !called.get());
     assert!(report.borrow().as_ref().unwrap().error.is_some());
     assert!(
         apply(&editor, outcome(1, "u", None), deadline())
@@ -732,7 +758,27 @@ fn click_on_a_terminated_composition_keeps_the_reset_for_the_next_key() {
 }
 
 #[test]
-fn queued_click_budget_starts_when_the_session_runs_and_invalidation_cancels_it() {
+fn queued_click_budget_starts_when_the_session_runs_and_invalidation_or_expiry_cancels_it() {
+    // 过期：排队超过两秒才执行，同样在访问文档前拒绝并通知结束。
+    {
+        let (doc, editor) = setup();
+        assert!(
+            apply(&editor, outcome(1, "u", None), deadline())
+                .error
+                .is_none()
+        );
+        doc.defer.set(true);
+        let (queued, report, called) =
+            select(&editor, || Verdict::Apply(outcome(2, "", Some("的"))));
+        assert!(queued && report.borrow().is_none());
+        std::thread::sleep(QUEUED + Duration::from_millis(50));
+        let session = doc.deferred.borrow_mut().take().unwrap();
+        // SAFETY: 合成宿主迟到执行排队会话，编辑对象仍由 COM 引用计数持有。
+        assert!(unsafe { session.DoEditSession(1) }.is_err());
+        let done = report.borrow_mut().take().unwrap();
+        assert!(!called.get() && done.error.is_some() && !done.exchanged);
+        assert_eq!(text(&doc), "u");
+    }
     for invalidate in [false, true] {
         let (doc, editor) = setup();
         assert!(
@@ -743,16 +789,16 @@ fn queued_click_budget_starts_when_the_session_runs_and_invalidation_cancels_it(
         doc.defer.set(true);
         let window = Rc::new(Cell::new(None));
         let seen = window.clone();
-        let finished = Rc::new(Cell::new(false));
+        let finished = Rc::new(Cell::new(None));
         let done = finished.clone();
         assert!(editor.select(
             move |deadline| {
                 seen.set(Some(deadline.saturating_duration_since(Instant::now())));
                 Verdict::Apply(outcome(2, "", Some("的")))
             },
-            move |_| done.set(true),
+            move |report| done.set(Some(report.error.is_none())),
         ));
-        assert!(!finished.get());
+        assert!(finished.get().is_none());
         if invalidate {
             editor.invalidate();
         }
@@ -762,15 +808,15 @@ fn queued_click_budget_starts_when_the_session_runs_and_invalidation_cancels_it(
         let result = unsafe { queued.DoEditSession(1) };
         assert_eq!(result.is_ok(), !invalidate);
         if invalidate {
-            // 失效的排队会话在访问文档前拒绝，也不回调结束通知。
-            assert!(window.get().is_none() && !finished.get());
+            // 失效的排队会话在访问文档前拒绝，仍以失败报告通知结束（解除点击锁）。
+            assert!(window.get().is_none() && finished.get() == Some(false));
             assert_eq!(text(&doc), "u");
         } else {
             let budget = window.get().unwrap();
             assert!(
                 budget <= Duration::from_millis(50) && started.elapsed() < Duration::from_secs(1)
             );
-            assert!(finished.get());
+            assert_eq!(finished.get(), Some(true));
             assert_eq!(text(&doc), "的");
         }
     }

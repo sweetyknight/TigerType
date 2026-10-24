@@ -7,6 +7,7 @@ use crate::{
 };
 use std::{
     cell::Cell,
+    ffi::c_void,
     io,
     os::windows::io::AsRawHandle,
     ptr::{null, null_mut},
@@ -18,7 +19,10 @@ use tigertype_contracts::{
     ui::{Reply, Request},
 };
 use windows_sys::Win32::{
-    Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WAIT_FAILED, WPARAM},
+    Foundation::{
+        COLORREF, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, POINT, RECT, SIZE,
+        WAIT_FAILED, WPARAM,
+    },
     Graphics::{
         Dwm::{
             DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
@@ -29,7 +33,9 @@ use windows_sys::Win32::{
     System::{
         LibraryLoader::GetModuleHandleW,
         SystemServices::{SS_CENTER, SS_CENTERIMAGE, SS_NOPREFIX, SS_OWNERDRAW},
-        Threading::INFINITE,
+        Threading::{
+            INFINITE, RegisterWaitForSingleObject, SetEvent, UnregisterWaitEx, WT_EXECUTEONLYONCE,
+        },
     },
     UI::{
         Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
@@ -120,9 +126,72 @@ const UI_FACE: &str = "Microsoft YaHei UI";
 /// 列表每项高度（96 DPI）。
 const ITEM_HEIGHT: u32 = 44;
 
+/// 收起系统模态循环：唤起邮箱在模态期间有信号（含后台停止）时由线程池回调投递给进入模态的窗口。
+const UNBLOCK: u32 = WM_APP + 6;
+
 thread_local! {
     // 本 UI 线程的绘制配色：只在确认设置后由本线程写入，系统回调只读；不是业务状态。
     static PALETTE: Cell<Palette> = Cell::new(Options::default().palette());
+    // 唤起邮箱事件与模态期间登记的线程池等待；只在本 UI 线程读写，是基础设施而非业务状态。
+    static WAKE: Cell<HANDLE> = const { Cell::new(null_mut()) };
+    static WAIT: Cell<HANDLE> = const { Cell::new(null_mut()) };
+}
+
+/// 登记唤起邮箱：菜单（托盘右键、窗口系统菜单）与移动/缩放都是系统模态循环，期间事件循环不运行；
+/// 来了唤起或后台停止就收起模态交回事件循环，否则停止时 UI 线程会一直等用户操作，join 不返回。
+/// 邮箱须活过本线程的全部窗口；传 None 取消登记。
+fn watch(show: Option<&Inbox<Panel>>) {
+    WAKE.set(show.map_or(null_mut(), |show| show.event.as_raw_handle()));
+}
+// SAFETY: 线程池线程调用；上下文是进入模态的窗口句柄（值），只投递消息，不碰 UI 状态。
+unsafe extern "system" fn woken(context: *mut c_void, _: bool) {
+    // SAFETY: 同上；窗口已销毁时投递只返回失败。
+    unsafe { PostMessageW(context as HWND, UNBLOCK, 0, 0) };
+}
+/// WM_ENTERMENULOOP/WM_ENTERSIZEMOVE：登记一次性等待；已登记（嵌套）或未登记邮箱时不动。登记失败只是退回旧行为。
+/// 返回本次是否登记，嵌套的调用方据此只注销自己登记的等待。
+fn modal_enter(hwnd: HWND) -> bool {
+    let event = WAKE.get();
+    if event.is_null() || !WAIT.get().is_null() {
+        return false;
+    }
+    let mut wait = null_mut();
+    // SAFETY: 事件由登记的邮箱持有；上下文按值传窗口句柄，不指向栈或堆对象。
+    if unsafe {
+        RegisterWaitForSingleObject(
+            &mut wait,
+            event,
+            Some(woken),
+            hwnd as *const c_void,
+            INFINITE,
+            WT_EXECUTEONLYONCE,
+        )
+    } != 0
+    {
+        WAIT.set(wait);
+        return true;
+    }
+    false
+}
+/// WM_EXITMENULOOP/WM_EXITSIZEMOVE：阻塞注销到回调结束（若已开始）。
+fn modal_exit() {
+    let wait = WAIT.replace(null_mut());
+    if !wait.is_null() {
+        // SAFETY: wait 由 modal_enter 登记，只注销一次；回调只投递消息，阻塞等待不会死锁。
+        unsafe { UnregisterWaitEx(wait, INVALID_HANDLE_VALUE) };
+    }
+}
+/// UNBLOCK：自动复位事件已被等待消耗，先重新置上让事件循环照常取唤起或发现停止；
+/// 仍在模态中才收起菜单并取消移动/缩放（迟到的 UNBLOCK 不打断之后的操作）。
+fn unblock(hwnd: HWND) {
+    // SAFETY: 事件由登记的邮箱持有；EndMenu 与 WM_CANCELMODE 只作用于本线程的模态循环与鼠标捕获。
+    unsafe {
+        SetEvent(WAKE.get());
+        if !WAIT.get().is_null() {
+            EndMenu();
+            SendMessageW(hwnd, WM_CANCELMODE, 0, 0);
+        }
+    }
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -383,15 +452,24 @@ fn class_procedure(hwnd: HWND) -> WNDPROC {
 }
 
 // SAFETY: 系统在所属 UI 线程调用；先交 EDIT 原过程处理，再在本次回调内按主题重画可见选区；
-// 不保存指针、不分配，选区相关以外的消息原样返回。
+// 不保存指针、不分配，选区相关以外的消息原样返回（UNBLOCK 由本过程处理，不交 EDIT）。
 unsafe extern "system" fn edit_procedure(
     hwnd: HWND,
     message: u32,
     w: WPARAM,
     l: LPARAM,
 ) -> LRESULT {
+    if message == UNBLOCK {
+        unblock(hwnd);
+        return 0;
+    }
+    // EDIT 自带的右键菜单不发 WM_ENTERMENULOOP，在原过程弹菜单前后自行登记/注销模态等待。
+    let menu = message == WM_CONTEXTMENU && modal_enter(hwnd);
     // SAFETY: 参数原样交给 EDIT 类的原窗口过程。
     let result = unsafe { CallWindowProcW(class_procedure(hwnd), hwnd, message, w, l) };
+    if menu {
+        modal_exit();
+    }
     if matches!(message, WM_SETFOCUS | WM_KILLFOCUS) {
         // 输入框外框的强调底边随焦点变化，由父窗口重画。
         // SAFETY: 只使父窗口失效，绘制在其 WM_PAINT 中进行。
@@ -1099,8 +1177,23 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 post(hwnd, CLOSE, 0);
                 0
             }
+            WM_ENTERMENULOOP | WM_ENTERSIZEMOVE => {
+                let _ = modal_enter(hwnd);
+                0
+            }
+            WM_EXITMENULOOP => {
+                modal_exit();
+                0
+            }
+            UNBLOCK => {
+                unblock(hwnd);
+                0
+            }
             // 拖动缩放期间系统模态循环会吞掉投递的布局消息，结束时补发一次。
             WM_SIZE | WM_EXITSIZEMOVE => {
+                if message == WM_EXITSIZEMOVE {
+                    modal_exit();
+                }
                 post(hwnd, LAYOUT, 0);
                 0
             }
@@ -1933,8 +2026,21 @@ pub fn run(
 ) -> Result<(), String> {
     let _dpi = DpiContext::enter()?;
     PALETTE.with(|palette| palette.set(options.palette()));
+    watch(Some(&show));
+    // 邮箱比所有窗口活得久；退出时先撤销登记，不留悬空事件句柄。
+    let result = serve(requests, inbox, &show, taskbar, options);
+    watch(None);
+    result
+}
+fn serve(
+    requests: SyncSender<Request>,
+    inbox: Inbox<Reply>,
+    show: &Inbox<Panel>,
+    taskbar: &Latest<bool>,
+    options: Options,
+) -> Result<(), String> {
     let tray = tray::Tray::new()?;
-    let Some(panel) = tray::first(&show, &tray, taskbar)? else {
+    let Some(panel) = tray::first(show, &tray, taskbar)? else {
         return Ok(());
     };
     let class = Class::register()?;
@@ -1950,7 +2056,7 @@ pub fn run(
         &mut model,
         &requests,
         &inbox,
-        &show,
+        show,
         Some((&tray, taskbar)),
     )
 }
@@ -2027,6 +2133,9 @@ fn event_loop(
                         show_page(main, model);
                     }
                     if model.options != before {
+                        // 保存期间关闭重开会把控件恢复成旧值（控件在途时禁用，没有用户草稿可丢），
+                        // 成功后同步，否则再保存会回滚刚确认的设置。
+                        set_options(settings, model.options);
                         apply_look(main, settings, &model.options)?;
                     }
                     refresh(main, settings, model);
@@ -2309,6 +2418,74 @@ mod tests {
             );
         }
     }
+    // SAFETY: 系统在本线程菜单模态循环内调用；只收起本线程菜单。
+    unsafe extern "system" fn give_up(_: HWND, _: u32, _: usize, _: u32) {
+        // SAFETY: 同上。
+        unsafe { EndMenu() };
+    }
+    // 系统同一时刻只允许一个弹出菜单：别的线程弹菜单会立即关掉本线程的，弹真实菜单的测试经此串行。
+    static MENU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// 在本线程运行一个模态循环，取得锁后才起表：约 300ms 时另一线程断开唤起邮箱（即后台停止）。
+    /// 修复失效时由 5 秒定时器收起菜单，让测试以超时失败而不是挂住；模态须在 3 秒内被收起，
+    /// 不足 200ms 说明模态根本没展开（例如被别处的菜单顶掉）。
+    pub(super) fn bounded(sender: crate::ReplySender<Panel>, modal: impl FnOnce()) {
+        let _only = MENU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(sender);
+        });
+        let started = std::time::Instant::now();
+        // SAFETY: 定时器属于本线程，用后注销。
+        let timer = unsafe { SetTimer(null_mut(), 0, 5000, Some(give_up)) };
+        modal();
+        // 只计模态本身：回收停止线程要等满 300ms，计入会让没展开的菜单也显得够久。
+        let elapsed = started.elapsed();
+        // SAFETY: 同上。
+        unsafe { KillTimer(null_mut(), timer) };
+        stopper.join().unwrap();
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+        assert!(
+            elapsed > std::time::Duration::from_millis(200),
+            "模态未展开：{elapsed:?}"
+        );
+    }
+    /// 查字/设置窗的菜单模态展开期间后台停止：窗口菜单（系统菜单与弹出菜单同经 WM_ENTERMENULOOP）
+    /// 与文本框自带右键菜单（不发该通知）都须立即收起，停止信号留给事件循环，UI 线程随即退出。
+    /// 菜单在屏幕上一闪而过，不移动鼠标。
+    fn window_menu_closes_when_the_backend_stops(
+        main: &mut Window,
+        settings: &mut Window,
+        model: &mut Model,
+    ) {
+        for edit in [false, true] {
+            menu_closes_when_the_backend_stops(main, settings, model, edit);
+        }
+    }
+    fn menu_closes_when_the_backend_stops(
+        main: &mut Window,
+        settings: &mut Window,
+        model: &mut Model,
+        edit: bool,
+    ) {
+        let (sender, show) = crate::mailbox::<Panel>().unwrap();
+        watch(Some(&show));
+        let query = main.control(QUERY);
+        // SAFETY: 菜单在本函数内创建并销毁，所有者为本测试线程的查字窗；文本框右键菜单按键盘方式（lParam -1）在插入符处弹出。
+        bounded(sender, || unsafe {
+            if edit {
+                SendMessageW(query, WM_CONTEXTMENU, query as WPARAM, -1);
+                return;
+            }
+            let menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, 1, wide("测试").as_ptr());
+            TrackPopupMenuEx(menu, TPM_RETURNCMD, 0, 0, main.handle, null());
+            DestroyMenu(menu);
+        });
+        let (requests, _receiver) = std::sync::mpsc::sync_channel(1);
+        let (_replies, inbox) = crate::mailbox().unwrap();
+        assert!(event_loop(main, settings, model, &requests, &inbox, &show, None).is_ok());
+        watch(None);
+    }
     #[test]
     fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         // 合成控件测试不显示窗口、不碰剪贴板、不加载个人资源。
@@ -2418,6 +2595,12 @@ mod tests {
             let (requests, _receiver) = std::sync::mpsc::sync_channel(1);
             let (replies, inbox) = crate::mailbox().unwrap();
             model.save(options).unwrap();
+            // 回复前关闭再重开设置页：控件恢复为旧确认值，成功回复须把它们同步为新值。
+            model.settings_open = false;
+            set_options(&settings, model.options);
+            assert!(model.open_settings());
+            set_options(&settings, model.options);
+            assert_eq!(get_options(&settings).unwrap(), Options::default());
             replies
                 .send(tigertype_contracts::ui::Reply::Saved(Ok(options)))
                 .unwrap();
@@ -2436,6 +2619,7 @@ mod tests {
             );
             assert_eq!(main.send(LIST, LB_GETCURSEL, 0, 0), 0);
             assert_eq!(model.options, options);
+            assert_eq!(get_options(&settings).unwrap(), options);
             assert_eq!(PALETTE.with(Cell::get), options.palette());
             assert_eq!(main.face, CandidateFont::KaiTi);
             let (replies, inbox) = crate::mailbox().unwrap();
@@ -2495,6 +2679,7 @@ mod tests {
                 )
                 .is_ok()
             );
+            window_menu_closes_when_the_backend_stops(&mut main, &mut settings, &mut model);
             PALETTE.with(|palette| palette.set(Options::default().palette()));
             // 反复创建可发现遗漏的窗口类注销，避免把线程退出误当资源已释放。
             drop(settings);

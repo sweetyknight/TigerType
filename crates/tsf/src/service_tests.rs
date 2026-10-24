@@ -674,6 +674,104 @@ fn unavailable_backend_or_inactive_service_passes_keys_without_touching_the_docu
     unsafe { tip.Deactivate() }.unwrap();
 }
 
+/// 像宿主一样经按键 sink 走回调：预判不吃键就不再调用处理回调；返回（预判，处理）。
+/// 预判吃下而处理放行即宿主可能吞键，调用方断言二者一致。
+fn press(keys: &ITfKeyEventSink, context: &ITfContext, vk: VIRTUAL_KEY) -> (bool, bool) {
+    let (w, l) = (WPARAM(vk.0 as usize), LPARAM(0));
+    // SAFETY: 合成上下文，同步调用本对象的按键 sink。
+    unsafe {
+        if !keys.OnTestKeyDown(context, w, l).unwrap().as_bool() {
+            return (false, false);
+        }
+        (true, keys.OnKeyDown(context, w, l).unwrap().as_bool())
+    }
+}
+/// 单击 Shift：按下与抬起各经预判，吃下才调用处理回调；返回抬起的（预判，处理）。
+fn tap_shift(keys: &ITfKeyEventSink, context: &ITfContext) -> (bool, bool) {
+    let (w, l) = (WPARAM(VK_SHIFT.0 as usize), LPARAM(0));
+    assert_eq!(press(keys, context, VK_SHIFT), (false, false));
+    // SAFETY: 同上。
+    unsafe {
+        if !keys.OnTestKeyUp(context, w, l).unwrap().as_bool() {
+            return (false, false);
+        }
+        (true, keys.OnKeyUp(context, w, l).unwrap().as_bool())
+    }
+}
+
+#[test]
+fn selection_and_read_only_contexts_get_the_same_verdict_in_test_and_key_down() {
+    let object = service();
+    let (server, bound) = backend(&object.namespace);
+    bound.recv().unwrap();
+    let (_manager, thread_mgr) = manager();
+    let tip: ITfTextInputProcessorEx = object.to_interface();
+    // SAFETY: 合成线程管理器在本线程同步回调。
+    unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
+    let keys: ITfKeyEventSink = object.to_interface();
+    let (doc, context) = document();
+    // 只读上下文或读不到宿主状态：预判即放行，不发请求。
+    doc.readonly.set(true);
+    assert_eq!(press(&keys, &context, VK_U), (false, false));
+    doc.readonly.set(false);
+    doc.fail_status.set(true);
+    assert_eq!(press(&keys, &context, VK_U), (false, false));
+    doc.fail_status.set(false);
+    // 后台在线、选中已有文字：预判吃下，处理时以组合替换选区，而不是拒绝后吞键。
+    *doc.text.borrow_mut() = "原文".encode_utf16().collect();
+    doc.selection.set((0, 2));
+    assert_eq!(press(&keys, &context, VK_U), (true, true));
+    assert_eq!((text(&doc), doc.selection.get()), ("u".into(), (1, 1)));
+    // SAFETY: 停用取消组合并关闭管道。
+    unsafe { tip.Deactivate() }.unwrap();
+    let (log, ..) = server.join().unwrap();
+    assert_eq!(
+        log.iter()
+            .filter(|c| matches!(c, Command::Key { .. }))
+            .count(),
+        1,
+        "{log:?}"
+    );
+}
+
+#[test]
+fn backend_loss_while_composing_withdraws_the_preedit_and_hides_candidates() {
+    // 下一个字母与单击 Shift（按下不吃、抬起预判）两条路径都须清理。
+    for shift in [false, true] {
+        lose_backend_while_composing(shift);
+    }
+}
+fn lose_backend_while_composing(shift: bool) {
+    let object = service();
+    let (server, bound) = backend(&object.namespace);
+    bound.recv().unwrap();
+    let (_manager, thread_mgr) = manager();
+    let tip: ITfTextInputProcessorEx = object.to_interface();
+    // SAFETY: 合成线程管理器在本线程同步回调。
+    unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
+    let active = object.active().unwrap();
+    let keys: ITfKeyEventSink = object.to_interface();
+    let (doc, context) = document();
+    assert_eq!(press(&keys, &context, VK_U), (true, true));
+    assert_eq!(text(&doc), "u");
+    assert!(shown(&active).is_some());
+    // 断开连接即后台消失（单槽假后台随之退出，重连失败）；候选窗此刻仍显示旧组合。
+    active.host.borrow_mut().close();
+    server.join().unwrap();
+    assert!(shown(&active).is_some());
+    // 下一键预判放行，同时撤回自有组合、收起候选，残余编码不留给宿主。
+    let verdict = if shift {
+        tap_shift(&keys, &context)
+    } else {
+        press(&keys, &context, VK_U)
+    };
+    assert_eq!(verdict, (false, false), "shift={shift}");
+    assert_eq!(text(&doc), "");
+    assert!(shown(&active).is_none());
+    // SAFETY: 停用释放 sink。
+    unsafe { tip.Deactivate() }.unwrap();
+}
+
 #[test]
 fn taskbar_icon_follows_the_chinese_english_toggle_from_the_backend() {
     let object = service();

@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
 use tigertype_engine::{Data, Detail, Dictionary, Mapping, Pronunciation};
 
-const VERSION: u32 = 1;
+// 2：去掉无人消费的旧 Win11Light 外观段，旧包不兼容。
+const VERSION: u32 = 2;
 const LIMIT: u64 = 128 * 1024 * 1024;
 const SOURCES: &[&str] = &[
     "tiger.dict.yaml",
@@ -18,24 +19,7 @@ const SOURCES: &[&str] = &[
     "opencc/PYCharacters.txt",
     "opencc/STCharacters_Tu.txt",
     "opencc/TSCharacters.txt",
-    "weasel.custom.yaml",
-    "tiger.custom.yaml",
 ];
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Theme {
-    pub name: String,
-    /// 存储统一 RGBA，不能把小狼毫 ABGR 数字直接交给绘图接口。
-    pub colors: BTreeMap<String, [u8; 4]>,
-    pub font_face: String,
-    pub comment_font_face: String,
-    pub label_font_face: String,
-    pub font_point: u16,
-    pub align_type: String,
-    pub layout: BTreeMap<String, u16>,
-    pub page_size: u8,
-}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,7 +28,6 @@ pub struct Package {
     pub dictionary_version: String,
     pub sources: Vec<Entry>,
     pub data: Data,
-    pub theme: Theme,
     pub payload_sha256: String,
 }
 
@@ -65,11 +48,8 @@ fn source_entries() -> Result<Vec<Entry>> {
         })
         .collect()
 }
-fn digest(data: &Data, theme: &Theme) -> Result<String> {
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&(data, theme))?)
-    ))
+fn digest(data: &Data) -> Result<String> {
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(data)?)))
 }
 fn verified(root: &Path, entry: &Entry) -> Result<String> {
     let path = root.join(resources::relative(&entry.path)?);
@@ -193,92 +173,6 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
     Ok(data)
 }
 
-fn rgba(text: &str) -> Result<[u8; 4]> {
-    let hex = text.strip_prefix("0x").ok_or("颜色须为锁定十六进制格式")?;
-    if hex.len() > 8 || hex.is_empty() {
-        return Err("颜色长度非法".into());
-    }
-    let value = u32::from_str_radix(hex, 16)?;
-    Ok([
-        value as u8,
-        (value >> 8) as u8,
-        (value >> 16) as u8,
-        if hex.len() > 6 {
-            (value >> 24) as u8
-        } else {
-            255
-        },
-    ])
-}
-fn scalar<'a>(text: &'a str, key: &str) -> Result<&'a str> {
-    text.lines()
-        .find_map(|line| line.trim().strip_prefix(&format!("{key}:")))
-        .map(|s| s.trim().trim_matches('"'))
-        .ok_or_else(|| format!("缺少外观字段: {key}").into())
-}
-fn parse_theme(weasel: &str, tiger: &str) -> Result<Theme> {
-    if !weasel.contains("\"style/color_scheme\": win11light") {
-        return Err("只接受批准的 Win11Light".into());
-    }
-    let colors = weasel
-        .split_once("  \"preset_color_schemes/win11light\":\n")
-        .ok_or("缺少 Win11Light")?
-        .1
-        .split_once("  style:\n")
-        .ok_or("缺少 style")?
-        .0;
-    let mut palette = BTreeMap::new();
-    for line in lines(colors) {
-        let (key, value) = line.split_once(':').ok_or("颜色行格式不符")?;
-        if key.ends_with("_color") {
-            palette.insert(key.into(), rgba(value.trim())?);
-        }
-    }
-    if !palette.contains_key("back_color") || !palette.contains_key("candidate_text_color") {
-        return Err("主题缺少必需颜色".into());
-    }
-    let style = weasel.split_once("  style:\n").unwrap().1;
-    let layout = scalar(style, "layout")?.trim_matches(['{', '}']);
-    let mut dimensions = BTreeMap::new();
-    let mut align_type = None;
-    for pair in layout.split(',') {
-        let (key, value) = pair.trim().split_once(':').ok_or("布局格式不符")?;
-        // 锁定包的 enhanced_position 为非数值占位，不解释为启用的功能。
-        if key == "enhanced_position" {
-            continue;
-        }
-        // 对齐方式不是像素数；保留语义字段，不能送入整数解析器。
-        if key == "align_type" {
-            if value.trim() != "center" {
-                return Err("未批准的候选对齐方式".into());
-            }
-            align_type = Some(value.trim().to_owned());
-            continue;
-        }
-        dimensions.insert(key.into(), value.trim().parse()?);
-    }
-    let page = scalar(tiger, "menu/page_size")?
-        .split_whitespace()
-        .next()
-        .ok_or("缺少候选数")?
-        .parse()?;
-    let theme = Theme {
-        name: "win11light".into(),
-        colors: palette,
-        font_face: scalar(style, "font_face")?.into(),
-        comment_font_face: scalar(style, "comment_font_face")?.into(),
-        label_font_face: scalar(style, "label_font_face")?.into(),
-        font_point: scalar(style, "font_point")?.parse()?,
-        align_type: align_type.ok_or("缺少候选对齐方式")?,
-        layout: dimensions,
-        page_size: page,
-    };
-    if theme.page_size != 9 || theme.font_point != 15 {
-        return Err("外观参数偏离批准默认值".into());
-    }
-    Ok(theme)
-}
-
 pub fn build(source: &Path) -> Result<Package> {
     let sources = source_entries()?;
     let mut files = BTreeMap::new();
@@ -286,16 +180,13 @@ pub fn build(source: &Path) -> Result<Package> {
         files.insert(entry.path.clone(), verified(source, entry)?);
     }
     let data = parse_data(&files).map_err(|e| format!("数据表解析失败: {e}"))?;
-    let theme = parse_theme(&files["weasel.custom.yaml"], &files["tiger.custom.yaml"])
-        .map_err(|e| format!("外观解析失败: {e}"))?;
-    let payload_sha256 = digest(&data, &theme)?;
+    let payload_sha256 = digest(&data)?;
     Dictionary::new(data.clone())?;
     Ok(Package {
         format_version: VERSION,
         dictionary_version: "2026.08.14".into(),
         sources,
         data,
-        theme,
         payload_sha256,
     })
 }
@@ -318,12 +209,9 @@ fn validate(package: &Package) -> Result<()> {
     if package.format_version != VERSION
         || package.dictionary_version != "2026.08.14"
         || package.sources != source_entries()?
-        || digest(&package.data, &package.theme)? != package.payload_sha256
-        || package.theme.name != "win11light"
-        || package.theme.page_size != 9
-        || package.theme.font_point != 15
+        || digest(&package.data)? != package.payload_sha256
     {
-        return Err("数据包版本、来源、外观或内容摘要不符".into());
+        return Err("数据包版本、来源或内容摘要不符".into());
     }
     Dictionary::new(package.data.clone())?;
     Ok(())
@@ -332,22 +220,6 @@ fn validate(package: &Package) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn theme_keeps_text_alignment_separate_from_pixel_dimensions() {
-        let source = "  \"preset_color_schemes/win11light\":\n    back_color: 0xfff9f9f9\n    candidate_text_color: 0x000000\n  style:\n    font_face: \"Consolas\"\n    comment_font_face: \"TumanPUA\"\n    label_font_face: \"SimSun\"\n    font_point: 15\n    layout: {align_type: center, margin_x: 5, enhanced_position: bool}\n  \"style/color_scheme\": win11light\n";
-        let theme = parse_theme(source, "menu/page_size: 9 # 九候选").unwrap();
-        assert_eq!(theme.align_type, "center");
-        assert_eq!(theme.layout["margin_x"], 5);
-        assert!(!theme.layout.contains_key("align_type"));
-        assert!(parse_theme(&source.replace("center", "unknown"), "menu/page_size: 9").is_err());
-    }
-    #[test]
-    fn colors_preserve_abgr_order_and_explicit_alpha() {
-        assert_eq!(rgba("0x0000ff").unwrap(), [255, 0, 0, 255]);
-        assert_eq!(rgba("0x800000ff").unwrap(), [255, 0, 0, 128]);
-        assert_eq!(rgba("0x00303030").unwrap(), [48, 48, 48, 0]);
-        assert!(rgba("0x123456789").is_err());
-    }
     #[test]
     fn parsers_reject_ambiguous_or_malformed_records() {
         assert!(character("你好").is_err());

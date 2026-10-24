@@ -329,8 +329,8 @@ fn reloaded_settings_wait_until_the_composition_ends() -> Result<()> {
         panic!("需要按键回复");
     };
     assert_eq!(committed.commit.as_deref(), Some("的"));
-    assert_eq!(committed.state.options, Options::default());
-    // 组合结束后的下一键换上新设置，回复随之把新外观带给候选窗。
+    // 组合在本键结束即换上新设置，回复随之把新外观带给候选窗。
+    assert_eq!(committed.state.options, changed);
     let next = state(exchange(
         &mut dispatch,
         host,

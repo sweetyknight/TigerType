@@ -49,7 +49,8 @@ impl<'a> Dispatcher<'a> {
             settings: 0,
         })
     }
-    /// 设置热重载：已打开会话在下一次无组合的请求时换上；新会话的设置由调用方随 Open 给出。
+    /// 设置热重载：已打开会话在下一次请求时交给引擎，无组合即换上，组合中等本次组合结束（含顶屏）再换；
+    /// 新会话的设置由调用方随 Open 给出。
     pub fn reconfigure(&mut self, options: Options) {
         self.options = options;
         self.settings += 1;
@@ -244,10 +245,10 @@ impl<'a> Dispatcher<'a> {
         self.active = None;
     }
 }
-/// 热重载的设置只在会话无组合时换上：组合中更换会改变宿主已显示的候选与编号。
+/// 每个设置版本只交给会话一次；组合中由引擎暂存，不改宿主已显示的候选与编号。
 fn adopt(entry: &mut (Session<'_>, u64), options: Options, settings: u64) -> Result<()> {
-    if entry.1 != settings && !entry.0.composing() {
-        entry.0.configure(options)?;
+    if entry.1 != settings {
+        entry.0.adopt(options)?;
         entry.1 = settings;
     }
     Ok(())

@@ -210,16 +210,7 @@ pub(crate) fn install_into(
                 false
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let written = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&to)
-                    .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_all()));
-                if let Err(error) = written {
-                    // 写入失败不留下残缺字体文件。
-                    let _ = fs::remove_file(&to);
-                    return Err(error.into());
-                }
+                create(&to, &bytes)?;
                 true
             }
             Err(error) => return Err(error.into()),
@@ -238,10 +229,37 @@ pub(crate) fn install_into(
     Ok(report)
 }
 
+/// 新建并写满字体文件；写入失败只删除本次新建的文件。新建失败（如另一安装进程刚建了同名文件）不删任何东西。
+fn create(to: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(to)?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        // 写入失败不留下残缺字体文件。
+        let _ = fs::remove_file(to);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use windows_sys::Win32::System::Registry::{KEY_ALL_ACCESS, RegLoadAppKeyW};
+
+    #[test]
+    fn a_failed_create_never_deletes_a_file_another_installer_just_made() -> Result<()> {
+        let root = resources::new_directory(&std::env::temp_dir(), "tigertype-font-race")?;
+        let to = root.join("甲.ttf");
+        // 检查时不存在、新建前被另一进程抢先写入：本进程新建失败，对方的文件原样保留。
+        fs::write(&to, b"other installer")?;
+        assert!(create(&to, b"alpha").is_err());
+        assert_eq!(fs::read(&to)?, b"other installer");
+        fs::remove_file(&to)?;
+        create(&to, b"alpha")?;
+        assert_eq!(fs::read(&to)?, b"alpha");
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
 
     /// 私有应用配置单元：只存在于本测试的临时文件中，不触碰用户注册表。
     fn hive(file: &Path) -> Key {

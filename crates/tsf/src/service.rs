@@ -276,6 +276,21 @@ impl Active {
             .try_borrow_mut()
             .is_ok_and(|mut host| host.ready(deadline))
     }
+    /// 吃键前的后台确认（按下与 Shift 抬起共用）：离线时撤回仍一致的自有组合并收起候选，
+    /// 原键交还宿主；预判不吃键时宿主不再调用处理回调，清理只能在这里做。
+    fn online(self: &Rc<Self>, deadline: Instant) -> bool {
+        if self.ready(deadline) {
+            return true;
+        }
+        if self
+            .current_editor()
+            .is_some_and(|editor| editor.composing())
+        {
+            let _ = self.leave();
+        }
+        self.hide();
+        false
+    }
     /// 菜单配色与全角状态：取上次回复里的后台状态，配色与候选窗一致。
     fn look(&self) -> (Palette, bool) {
         self.host.try_borrow().map_or_else(
@@ -283,9 +298,10 @@ impl Active {
             |host| (host.state().options.palette(), host.state().full_shape),
         )
     }
-    /// 映射本键并按上次状态判断是否吃键；不发输入请求，后台连不上则不吃。
+    /// 映射本键并按上次状态判断是否吃键；不发输入请求，只读上下文或后台连不上则不吃。
+    /// 宿主未必交还“预判吃下、处理时放行”的原键，所以编辑会话会拒绝的条件须在这里先排除。
     fn judge(
-        &self,
+        self: &Rc<Self>,
         context: &ITfContext,
         wparam: WPARAM,
         lparam: LPARAM,
@@ -298,7 +314,12 @@ impl Active {
             .is_some_and(|editor| editor.is(context) && editor.composing());
         let previous = self.host.try_borrow().ok()?.state().composing;
         let key = key::map(vk, modifiers(), typed(vk, lparam), composing && previous)?;
-        if !self.ready(deadline) {
+        // SAFETY: GetStatus 不需要编辑锁，只读宿主动态标志；读不到与只读一样放行（会话内同样会拒绝）。
+        match unsafe { context.GetStatus() } {
+            Ok(status) if status.dwDynamicFlags & TS_SD_READONLY == 0 => {}
+            _ => return None,
+        }
+        if !self.online(deadline) {
             return None;
         }
         let mut state = self.host.try_borrow().ok()?.state().clone();
@@ -399,6 +420,7 @@ impl Active {
         };
         let (active, done) = (Rc::downgrade(self), Rc::downgrade(self));
         let (watched, unblock) = (Rc::downgrade(&popup), Rc::downgrade(&popup));
+        // finish 在会话的每条终止路径上恰好调用一次；未受理时由这里解锁。
         let queued = editor.select(
             move |deadline| {
                 if !watched.upgrade().is_some_and(|popup| popup.showing(serial)) {
@@ -700,7 +722,10 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnTestKeyUp(&self, _: Ref<ITfContext>, wparam: WPARAM, _: LPARAM) -> Result<BOOL> {
         Ok(shielded(|| {
             let deadline = Instant::now() + BUDGET;
-            Ok(self.released(wparam) && self.active().is_some_and(|active| active.ready(deadline)))
+            Ok(
+                self.released(wparam)
+                    && self.active().is_some_and(|active| active.online(deadline)),
+            )
         }))
     }
     fn OnKeyUp(&self, pic: Ref<ITfContext>, wparam: WPARAM, _: LPARAM) -> Result<BOOL> {

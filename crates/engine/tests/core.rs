@@ -329,6 +329,35 @@ fn auto_commit_checks_converted_deduplicated_candidates_and_setting_changes_do_n
     );
 }
 #[test]
+fn reloaded_settings_wait_for_the_composition_to_end_including_a_top_up_and_backspace() {
+    let dictionary = Dictionary::new(data()).unwrap();
+    let traditional = Options {
+        output_form: OutputForm::Traditional,
+        ..Default::default()
+    };
+    let mut session = Session::new(&dictionary, Options::default());
+    type_code(&mut session, "srid");
+    session.adopt(traditional).unwrap();
+    // 组合中不重算已显示的候选。
+    let shown = session.snapshot();
+    assert_eq!(shown.options, Options::default());
+    assert_eq!(shown.candidates[0].text, "发");
+    // 第五码顶屏：旧字按已显示的候选上屏，新组合换上新设置。
+    let topped = session.process(Key::Character('u')).unwrap();
+    assert_eq!(topped.commit.as_deref(), Some("发"));
+    assert_eq!(topped.state.composition.text, "u");
+    assert_eq!(topped.state.options, traditional);
+    // 退格删空同样算组合结束。
+    session.adopt(Options::default()).unwrap();
+    assert_eq!(session.snapshot().options, traditional);
+    let emptied = session.process(Key::Backspace).unwrap();
+    assert!(!emptied.state.composing);
+    assert_eq!(emptied.state.options, Options::default());
+    // 无组合时立即换上。
+    session.adopt(traditional).unwrap();
+    assert_eq!(session.snapshot().options, traditional);
+}
+#[test]
 fn reverse_lookup_is_full_charset_and_reports_the_actual_character() {
     let dictionary = Dictionary::new(data()).unwrap();
     for (code, expected) in [
@@ -431,6 +460,25 @@ fn pagination_selection_and_stale_snapshots_are_checked() {
     let selected = session.select(state.revision, 1).unwrap().commit.unwrap();
     assert_eq!(selected, char::from_u32(0x4e10 + 10).unwrap().to_string());
     assert!(session.select(state.revision, 1).is_err());
+    // 越界翻页忽略：首页向上、末页向下都不改高亮，随后空格提交的仍是原高亮项。
+    let nth = |n: u32| char::from_u32(0x4e10 + n).unwrap().to_string();
+    use Key::{Character, Next, PageDown, PageUp};
+    for (moves, page, expected) in [
+        (vec![Next, Next, PageUp], 0, 2),
+        (vec![Next, Next, Character('-')], 0, 2),
+        (vec![PageDown, PageDown, Next, Next, PageDown], 2, 20),
+        (vec![PageDown, PageDown, Next, Next, Character('=')], 2, 20),
+    ] {
+        type_code(&mut session, "a");
+        for key in moves {
+            session.process(key).unwrap();
+        }
+        assert_eq!(session.snapshot().page_index, page);
+        assert_eq!(
+            session.process(Key::Space).unwrap().commit,
+            Some(nth(expected))
+        );
+    }
 }
 #[test]
 fn malformed_data_is_rejected_before_sessions_and_initialization_is_repeatable() {

@@ -75,7 +75,7 @@ fn verify(root: &std::path::Path, work: &std::path::Path) -> Result<serde_json::
     Ok(
         json!({"entries":package.data.entries.len(),"pinyin":package.data.pinyin.len(),
         "details":package.data.details.len(),"full_codes_not_directly_inputtable":missing_full_codes,
-        "package_sha256":digest,"theme":package.theme.name,"source_count":package.sources.len()}),
+        "package_sha256":digest,"source_count":package.sources.len()}),
     )
 }
 
