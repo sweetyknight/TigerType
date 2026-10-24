@@ -2,6 +2,7 @@
 //! 不创建输入会话，查询不产生上屏提交。
 use crate::{Result, data::Data};
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use tigertype_contracts::{
     Options,
     ui::{Reply, Request},
@@ -34,6 +35,10 @@ impl<'a> Controller<'a> {
     }
     pub(crate) fn options(&self) -> Options {
         self.options
+    }
+    /// 将数据层已规范化的配置路径交给设置页，避免 UI 根据输入参数自行拼路径。
+    pub(crate) fn settings_path(&self) -> PathBuf {
+        self.data.settings_path()
     }
     pub(crate) fn execute(&mut self, request: Request) -> Reply {
         match request {
@@ -132,6 +137,20 @@ mod tests {
         assert_eq!(
             std::fs::read(root.join("config/settings.json"))?,
             b"not json"
+        );
+        Ok(())
+    }
+    #[test]
+    fn missing_typing_mode_defaults_to_single_for_existing_settings() -> Result<()> {
+        let mut value = serde_json::to_value(Options::default())?;
+        value
+            .as_object_mut()
+            .ok_or("设置不是 JSON 对象")?
+            .remove("typing_mode");
+        let restored: Options = serde_json::from_value(value)?;
+        assert_eq!(
+            restored.typing_mode,
+            tigertype_contracts::TypingMode::Single
         );
         Ok(())
     }

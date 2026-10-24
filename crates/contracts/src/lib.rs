@@ -52,6 +52,8 @@ pub struct Options {
     pub custom: CustomColors,
     pub candidate_font: CandidateFont,
     /// 普通输入使用单字码表或词码表；默认单字，避免升级后改变输入习惯。
+    /// 新增字段缺失时沿用单字默认值，避免旧设置阻断登录启动；未知字段仍拒绝。
+    #[serde(default)]
     pub typing_mode: TypingMode,
 }
 impl Default for Options {

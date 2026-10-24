@@ -418,6 +418,7 @@ pub fn run(package: &Path, directory: &Path, show: bool) -> Result<()> {
     };
     // 设置文件可能被外部改动；控制器载入时校验，不把偏蓝或不可读的配色发给宿主候选窗。
     let mut controller = Controller::new(&dictionary, data)?;
+    let settings_path = controller.settings_path();
     let options = controller.options();
     let mut server = Server::new(&dictionary, "backend", options)?;
     let reload = server.reload.clone();
@@ -454,7 +455,14 @@ pub fn run(package: &Path, directory: &Path, show: bool) -> Result<()> {
             .name("tiger-lookup-ui".into())
             .spawn_scoped(scope, move || {
                 // 启动即挂通知区图标，查字/设置窗首次唤起才建；后台停止时唤起邮箱断开，UI 线程随之退出。
-                tigertype_ui::run(requests, inbox, show_inbox, &taskbar, options)
+                tigertype_ui::run(
+                    requests,
+                    inbox,
+                    show_inbox,
+                    &taskbar,
+                    &settings_path,
+                    options,
+                )
             })?;
         // run 结束即释放 Server 与唤起邮箱：UI 退出并断开请求通道，工作线程随之结束。
         let result = server.run();

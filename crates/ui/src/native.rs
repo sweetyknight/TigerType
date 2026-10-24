@@ -9,7 +9,9 @@ use std::{
     cell::Cell,
     ffi::c_void,
     io,
+    os::windows::ffi::OsStrExt,
     os::windows::io::AsRawHandle,
+    path::Path,
     ptr::{null, null_mut},
     sync::mpsc::{SyncSender, TryRecvError},
 };
@@ -53,6 +55,7 @@ use windows_sys::Win32::{
                 VK_ESCAPE, VK_MENU, VK_RETURN,
             },
         },
+        Shell::ShellExecuteW,
         WindowsAndMessaging::*,
     },
 };
@@ -87,6 +90,7 @@ const COMMON: usize = 202;
 const LEARNING: usize = 203;
 const SAVE: usize = 205;
 const CANCEL: usize = 206;
+const OPEN_CONFIG: usize = 207;
 const NOTICE: usize = 211;
 const HEADING: usize = 212;
 const SUB: usize = 213;
@@ -995,7 +999,8 @@ fn settings_spec() -> Vec<(usize, Box4)> {
     let mut controls = vec![
         (HEADING, [24, 14, width - 48, 30]),
         (SUB, [24, 48, width - 48, 20]),
-        (NOTICE, [24, FOOTER_TOP + 10, width - 48 - 200, 44]),
+        (NOTICE, [160, FOOTER_TOP + 10, width - 48 - 336, 44]),
+        (OPEN_CONFIG, [24, FOOTER_TOP + 15, 128, 34]),
         (CANCEL, [width - 24 - 88 - 8 - 88, FOOTER_TOP + 15, 88, 34]),
         (SAVE, [width - 24 - 88, FOOTER_TOP + 15, 88, 34]),
         (ROW_TITLE + 4, [41, ROW_TOP + 7 * ROW + 9, 140, 22]),
@@ -1713,7 +1718,13 @@ fn settings_window(class: &Class, owner: HWND, options: &Options) -> Result<Wind
         )?;
         window.send(CUSTOM + k, EM_SETLIMITTEXT, 7, 0);
     }
-    window.add(CANCEL, "BUTTON", "取消", WS_GROUP | WS_TABSTOP)?;
+    window.add(
+        OPEN_CONFIG,
+        "BUTTON",
+        "打开配置文件(&O)",
+        WS_GROUP | WS_TABSTOP,
+    )?;
+    window.add(CANCEL, "BUTTON", "取消", WS_TABSTOP)?;
     window.add(
         SAVE,
         "BUTTON",
@@ -1758,6 +1769,28 @@ fn settings_window(class: &Class, owner: HWND, options: &Options) -> Result<Wind
     }
     initialize_cues(window.handle);
     Ok(window)
+}
+
+/// 用系统默认编辑器打开受管配置文件；文件不存在时返回可读错误，不创建或覆盖配置。
+fn open_config(path: &Path) -> Result<(), String> {
+    let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+    let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: 两个 UTF-16 缓冲区在调用期间有效且以 NUL 结尾；ShellExecuteW 不转移其所有权。
+    let result = unsafe {
+        ShellExecuteW(
+            null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            null(),
+            null(),
+            SW_SHOWNORMAL,
+        )
+    } as usize;
+    if result <= 32 {
+        Err("无法打开配置文件，请先保存设置".into())
+    } else {
+        Ok(())
+    }
 }
 fn checked(window: &Window, id: usize) -> bool {
     window.send(id, BM_GETCHECK, 0, 0) == BST_CHECKED as isize
@@ -1923,7 +1956,7 @@ fn refresh(main: &Window, settings: &Window, model: &Model) {
         COPY,
         !model.busy && model.result.as_ref().is_some_and(|p| !p.items.is_empty()),
     );
-    for id in [AUTO, COMMON, LEARNING, SAVE, CANCEL]
+    for id in [AUTO, COMMON, LEARNING, SAVE, CANCEL, OPEN_CONFIG]
         .into_iter()
         .chain(FORM..FORM + FORMS.len())
         .chain(FONT..FONT + CandidateFont::ALL.len())
@@ -1974,7 +2007,7 @@ fn key_command(settings: bool, id: usize, key: usize, ime: bool) -> Option<(u32,
             return Some((CLOSE, 0));
         }
         if key == VK_RETURN as usize {
-            return Some((ACTION, SAVE));
+            return Some((ACTION, if id == OPEN_CONFIG { OPEN_CONFIG } else { SAVE }));
         }
     } else if key == VK_RETURN as usize {
         return match id {
@@ -2041,13 +2074,14 @@ pub fn run(
     inbox: Inbox<Reply>,
     show: Inbox<Panel>,
     taskbar: &Latest<bool>,
+    settings_path: &Path,
     options: Options,
 ) -> Result<(), String> {
     let _dpi = DpiContext::enter()?;
     PALETTE.with(|palette| palette.set(options.palette()));
     watch(Some(&show));
     // 邮箱比所有窗口活得久；退出时先撤销登记，不留悬空事件句柄。
-    let result = serve(requests, inbox, &show, taskbar, options);
+    let result = serve(requests, inbox, &show, taskbar, settings_path, options);
     watch(None);
     result
 }
@@ -2056,6 +2090,7 @@ fn serve(
     inbox: Inbox<Reply>,
     show: &Inbox<Panel>,
     taskbar: &Latest<bool>,
+    settings_path: &Path,
     options: Options,
 ) -> Result<(), String> {
     let tray = tray::Tray::new()?;
@@ -2076,7 +2111,7 @@ fn serve(
         &requests,
         &inbox,
         show,
-        Some((&tray, taskbar)),
+        (settings_path, Some((&tray, taskbar))),
     )
 }
 
@@ -2112,9 +2147,10 @@ fn event_loop(
     requests: &SyncSender<Request>,
     inbox: &Inbox<Reply>,
     show: &Inbox<Panel>,
-    // 通知区图标与后台给出的显隐；测试不登记图标时为 None。
-    icon: Option<(&tray::Tray, &Latest<bool>)>,
+    // 设置文件路径与通知区图标；测试不登记图标时为 None。
+    context: (&Path, Option<(&tray::Tray, &Latest<bool>)>),
 ) -> Result<(), String> {
+    let (settings_path, icon) = context;
     let mut events = vec![inbox.event.as_raw_handle(), show.event.as_raw_handle()];
     if let Some((_, taskbar)) = icon {
         events.push(taskbar.event().as_raw_handle());
@@ -2257,6 +2293,16 @@ fn event_loop(
                         ),
                         CANCEL => {
                             post(settings.handle, CLOSE, 0);
+                            None
+                        }
+                        OPEN_CONFIG => {
+                            model.settings_notice = match open_config(settings_path) {
+                                Ok(()) => {
+                                    "已打开配置文件。手工修改不会自动载入，下次保存会检查冲突。"
+                                        .into()
+                                }
+                                Err(error) => error,
+                            };
                             None
                         }
                         SETTINGS => {
@@ -2413,6 +2459,14 @@ mod tests {
             );
         }
         assert_eq!(
+            key_command(true, OPEN_CONFIG, VK_RETURN as usize, false),
+            Some((ACTION, OPEN_CONFIG))
+        );
+        assert_eq!(
+            key_command(true, OPEN_CONFIG, VK_ESCAPE as usize, false),
+            Some((CLOSE, 0))
+        );
+        assert_eq!(
             key_command(true, CANCEL, VK_RETURN as usize, false),
             Some((CLOSE, 0))
         );
@@ -2502,7 +2556,18 @@ mod tests {
         });
         let (requests, _receiver) = std::sync::mpsc::sync_channel(1);
         let (_replies, inbox) = crate::mailbox().unwrap();
-        assert!(event_loop(main, settings, model, &requests, &inbox, &show, None).is_ok());
+        assert!(
+            event_loop(
+                main,
+                settings,
+                model,
+                &requests,
+                &inbox,
+                &show,
+                (Path::new("settings.json"), None),
+            )
+            .is_ok()
+        );
         watch(None);
     }
     #[test]
@@ -2596,7 +2661,7 @@ mod tests {
                     &requests,
                     &inbox,
                     &show,
-                    None
+                    (Path::new("settings.json"), None)
                 )
                 .unwrap_err()
                 .contains("工作线程已退出")
@@ -2632,7 +2697,7 @@ mod tests {
                     &requests,
                     &inbox,
                     &show,
-                    None
+                    (Path::new("settings.json"), None)
                 )
                 .is_err()
             );
@@ -2654,7 +2719,7 @@ mod tests {
                     &requests,
                     &inbox,
                     &show,
-                    None
+                    (Path::new("settings.json"), None)
                 )
                 .unwrap_err()
                 .contains("回复与在途操作不符")
@@ -2673,7 +2738,7 @@ mod tests {
                     &requests,
                     &inbox,
                     &show,
-                    None
+                    (Path::new("settings.json"), None)
                 )
                 .is_ok()
             );
@@ -2694,7 +2759,7 @@ mod tests {
                     &requests,
                     &inbox,
                     &show,
-                    None
+                    (Path::new("settings.json"), None)
                 )
                 .is_ok()
             );

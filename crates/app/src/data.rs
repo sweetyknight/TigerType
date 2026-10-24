@@ -184,12 +184,17 @@ impl Data {
 
     pub fn settings(&self) -> Result<Option<Vec<u8>>> {
         let _config = Directories::pin(&self.root.join("config"))?;
-        let path = self.root.join("config/settings.json");
+        let path = self.settings_path();
         if path.try_exists()? {
             Ok(Some(read_file(&path, MAX_CONFIG)?))
         } else {
             Ok(None)
         }
+    }
+
+    /// 返回已规范化且受目录租约保护的设置文件路径，供设置页交给系统编辑器。
+    pub(crate) fn settings_path(&self) -> PathBuf {
+        self.root.join("config/settings.json")
     }
 }
 
