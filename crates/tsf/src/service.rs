@@ -1,7 +1,8 @@
 //! TIP 组装：激活时登记按键/焦点 sink 并取得进程期驻留传输；按键在同步编辑会话内完成 IPC、写入与取组合位置，
 //! 拿不到编辑锁、后台不可用或结果不确定都放行原键。候选窗在本线程自绘，点击经异步编辑会话选字。
 //! 激活期间保持键盘开闭状态为“开”：TSF 不把按键交给关闭状态下的 TIP。
-//! 激活时登记任务栏输入法图标，其菜单经同一连接请后台显示设置/查字窗。
+//! 激活时登记任务栏输入法图标，按每次回复显示中英状态，其菜单经同一连接请后台显示设置/查字窗。
+//! 线程取得/失去输入焦点时告诉后台任务栏是否正显示本输入法图标，后台据此隐藏/恢复通知区图标。
 use crate::{
     candidate::{Popup, bounded, fallback_caret},
     edit::{EditReport, Editor, Verdict},
@@ -43,7 +44,10 @@ use windows::{
             WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow},
         },
     },
-    core::{BOOL, Error, GUID, HRESULT, IUnknown, IUnknownImpl, Interface, Ref, Result, implement},
+    core::{
+        BOOL, ComObject, Error, GUID, HRESULT, IUnknown, IUnknownImpl, Interface, Ref, Result,
+        implement,
+    },
 };
 
 /// TigerType TIP 的 COM 类标识；类工厂与注册（C 批）共用，开发期不兼容旧值。
@@ -171,6 +175,12 @@ impl Channel for Backend {
             .ok_or(IpcError::Closed)?
             .show(panel, deadline)
     }
+    fn indicate(&mut self, visible: bool, deadline: Instant) -> std::result::Result<(), IpcError> {
+        self.link
+            .client()
+            .ok_or(IpcError::Closed)?
+            .indicate(visible, deadline)
+    }
     fn cancel(&mut self) {
         // 直接释放管道：后台立即发现断开，下次 ensure 重新连接。
         self.link.close();
@@ -190,28 +200,38 @@ struct Active {
     quiet: bool,
     /// 键盘开闭状态容器与其 sink cookie。
     keyboard: Option<(ITfCompartment, u32)>,
-    /// 已登记的任务栏输入法图标；登记失败为 None，只是没有图标菜单。
-    indicator: Option<ITfLangBarItemButton>,
+    /// 已登记的任务栏输入法图标；登记失败为 None，只是没有图标菜单与中英显示。
+    indicator: Option<ComObject<Indicator>>,
+    /// 线程焦点 sink cookie；登记失败为 None，只是后台不隐藏通知区图标。
+    focus: Option<u32>,
 }
 /// 登记任务栏输入法图标；按钮经弱引用回到激活状态，不形成引用环。
-fn indicator(manager: &ITfThreadMgr, owner: &Weak<Active>) -> Option<ITfLangBarItemButton> {
+fn indicator(manager: &ITfThreadMgr, owner: &Weak<Active>) -> Option<ComObject<Indicator>> {
     let items: ITfLangBarItemMgr = manager.cast().ok()?;
-    let (ready, show) = (owner.clone(), owner.clone());
-    let button: ITfLangBarItemButton = Indicator::new(
+    let (ready, show, toggle) = (owner.clone(), owner.clone(), owner.clone());
+    let button = ComObject::new(Indicator::new(
         move || match ready.upgrade() {
-            // 先确认连接：刚重连时状态回到默认，配色随之取默认值，直到下一键拿到后台设置。
-            Some(active) => (active.ready(Instant::now() + BUDGET), active.palette()),
-            None => (false, Options::default().palette()),
+            // 先确认连接：刚重连时状态回到默认，配色与全角随之取默认值，直到下一键拿到后台状态。
+            Some(active) => {
+                let ready = active.ready(Instant::now() + BUDGET);
+                let (palette, full) = active.look();
+                (ready, palette, full)
+            }
+            None => (false, Options::default().palette(), false),
         },
         move |panel| {
             if let Some(active) = show.upgrade() {
                 active.show(panel);
             }
         },
-    )
-    .into();
+        move |key| {
+            if let Some(active) = toggle.upgrade() {
+                active.toggle(key);
+            }
+        },
+    ));
     // SAFETY: 登记本按钮，停用时以同一对象注销。
-    unsafe { items.AddItem(&button) }.ok()?;
+    unsafe { items.AddItem(&button.to_interface::<ITfLangBarItemButton>()) }.ok()?;
     Some(button)
 }
 impl Active {
@@ -256,12 +276,12 @@ impl Active {
             .try_borrow_mut()
             .is_ok_and(|mut host| host.ready(deadline))
     }
-    /// 菜单配色：取上次回复里的后台设置，与候选窗一致。
-    fn palette(&self) -> Palette {
-        self.host
-            .try_borrow()
-            .map_or_else(|_| Options::default(), |host| host.state().options)
-            .palette()
+    /// 菜单配色与全角状态：取上次回复里的后台状态，配色与候选窗一致。
+    fn look(&self) -> (Palette, bool) {
+        self.host.try_borrow().map_or_else(
+            |_| (Options::default().palette(), false),
+            |host| (host.state().options.palette(), host.state().full_shape),
+        )
     }
     /// 映射本键并按上次状态判断是否吃键；不发输入请求，后台连不上则不吃。
     fn judge(
@@ -354,6 +374,9 @@ impl Active {
             }
             Err(_) => return self.hide(),
         };
+        if let Some(indicator) = &self.indicator {
+            indicator.update(state.ascii_mode);
+        }
         // 空码等无候选时不显示候选窗，编码只留在宿主内的组合下划线里。
         let visible = report.error.is_none() && state.composing && !state.candidates.is_empty();
         let place = report.caret.filter(bounded).or_else(fallback_caret);
@@ -406,6 +429,52 @@ impl Active {
             popup.unblock(serial);
         }
     }
+    /// 图标翻转开关：单击切换中英（效果同单击 Shift），菜单切换全角。点击不在按键事件内，拿不到同步编辑会话：
+    /// 中英切换遇到自有组合时排队异步会话（后台把编码原样上屏，须写入文档）；其余情况不碰文档直接交换，
+    /// 中英切换前先让后台丢弃宿主已终止的残留组合，不会补上屏旧编码；全角只翻开关，组合原样保留。
+    /// 失败只作废连接并收起候选。
+    fn toggle(self: &Rc<Self>, key: Key) {
+        let switch = key == Key::ToggleAscii;
+        if let Some(editor) = self
+            .current_editor()
+            .filter(|editor| switch && editor.composing())
+        {
+            let (active, done) = (Rc::downgrade(self), Rc::downgrade(self));
+            // 复用点击选字的异步会话：开始时同样核对自有组合仍完整，否则不发请求。
+            editor.select(
+                move |deadline| {
+                    let Some(active) = active.upgrade() else {
+                        return Verdict::Skip;
+                    };
+                    let Ok(mut host) = active.host.try_borrow_mut() else {
+                        return Verdict::Skip;
+                    };
+                    match host.key(Key::ToggleAscii, deadline) {
+                        Ok(outcome) => Verdict::Apply(outcome),
+                        Err(_) => Verdict::Lost,
+                    }
+                },
+                move |report| {
+                    if let Some(active) = done.upgrade() {
+                        active.settle(&report);
+                    }
+                },
+            );
+            return;
+        }
+        let ascii = self.host.try_borrow_mut().ok().and_then(|mut host| {
+            if switch && host.state().composing {
+                host.discard();
+            }
+            let outcome = host.key(key, Instant::now() + BUDGET).ok()?;
+            Some(outcome.state.ascii_mode)
+        });
+        match (ascii, &self.indicator) {
+            (Some(ascii), Some(indicator)) => indicator.update(ascii),
+            (Some(_), None) => {}
+            (None, _) => self.hide(),
+        }
+    }
     /// 图标菜单：放行前台切换后请后台显示窗口。后台不可用时菜单已置灰，失败只作废连接并收起旧候选。
     fn show(&self, panel: Panel) {
         // SAFETY: 只放宽下一次前台切换；本进程没有前台权时调用失败，窗口照常显示，只是可能不到前台。
@@ -415,6 +484,17 @@ impl Active {
             .try_borrow_mut()
             .is_ok_and(|mut host| host.show(panel, Instant::now() + BUDGET));
         if !shown {
+            self.hide();
+        }
+    }
+    /// 本线程取得/失去输入焦点：任务栏随之显示/不再显示本输入法图标，告诉后台以隐藏/恢复通知区图标。
+    /// 失败只作废连接并收起旧候选，不影响按键。
+    fn indicate(&self, visible: bool) {
+        let sent = self
+            .host
+            .try_borrow_mut()
+            .is_ok_and(|mut host| host.indicate(visible, Instant::now() + BUDGET));
+        if !sent {
             self.hide();
         }
     }
@@ -433,15 +513,20 @@ impl Active {
             (&self.indicator, self.manager.cast::<ITfLangBarItemMgr>())
         {
             // SAFETY: 以登记时的同一对象注销任务栏图标。
-            let _ = unsafe { items.RemoveItem(button) };
+            let _ = unsafe { items.RemoveItem(&button.to_interface::<ITfLangBarItemButton>()) };
         }
         if let Ok(keystrokes) = self.manager.cast::<ITfKeystrokeMgr>() {
             // SAFETY: 以激活时的同一客户端编号注销，配对释放系统持有的按键 sink 引用。
             let _ = unsafe { keystrokes.UnadviseKeyEventSink(self.client) };
         }
         if let Ok(source) = self.manager.cast::<ITfSource>() {
-            // SAFETY: 以激活时返回的 cookie 注销线程管理器 sink。
-            let _ = unsafe { source.UnadviseSink(self.cookie) };
+            // SAFETY: 以激活时返回的 cookie 注销线程管理器 sink 与线程焦点 sink。
+            unsafe {
+                let _ = source.UnadviseSink(self.cookie);
+                if let Some(focus) = self.focus {
+                    let _ = source.UnadviseSink(focus);
+                }
+            }
         }
         if let Some((compartment, cookie)) = &self.keyboard
             && let Ok(source) = compartment.cast::<ITfSource>()
@@ -456,6 +541,7 @@ impl Active {
     ITfTextInputProcessorEx,
     ITfKeyEventSink,
     ITfThreadMgrEventSink,
+    ITfThreadFocusSink,
     ITfCompartmentEventSink
 )]
 pub struct TextService {
@@ -532,8 +618,14 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
                 return Err(error);
             }
             let keyboard = watch_keyboard(&manager, tid, &self.to_interface());
+            let focus: ITfThreadFocusSink = self.to_interface();
+            // SAFETY: 登记本对象的线程焦点 sink，停用时以同一 cookie 注销；失败照常激活。
+            let focus = unsafe { source.AdviseSink(&ITfThreadFocusSink::IID, &focus) }.ok();
+            // SAFETY: 只读本线程是否持有输入焦点。
+            let focused = unsafe { manager.IsThreadFocus() }.is_ok_and(|focused| focused.as_bool());
             let active = Rc::new_cyclic(|owner| Active {
                 indicator: indicator(&manager, owner),
+                focus,
                 manager,
                 client: tid,
                 cookie,
@@ -547,7 +639,29 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
                 quiet: self.quiet,
                 keyboard,
             });
-            *self.active.try_borrow_mut().map_err(busy)? = Some(active);
+            *self.active.try_borrow_mut().map_err(busy)? = Some(active.clone());
+            // 在持有焦点的线程里切到本输入法：任务栏此刻即显示本输入法图标。
+            if focused {
+                active.indicate(true);
+            }
+            Ok(())
+        })
+    }
+}
+impl ITfThreadFocusSink_Impl for TextService_Impl {
+    fn OnSetThreadFocus(&self) -> Result<()> {
+        guarded(|| {
+            if let Some(active) = self.active() {
+                active.indicate(true);
+            }
+            Ok(())
+        })
+    }
+    fn OnKillThreadFocus(&self) -> Result<()> {
+        guarded(|| {
+            if let Some(active) = self.active() {
+                active.indicate(false);
+            }
             Ok(())
         })
     }

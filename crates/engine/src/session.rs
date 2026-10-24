@@ -12,6 +12,7 @@ pub struct Session<'a> {
     options: Options,
     ascii: bool,
     ascii_punctuation: bool,
+    full_shape: bool,
     single_quote_open: bool,
     double_quote_open: bool,
     candidates: Vec<Candidate>,
@@ -27,6 +28,7 @@ impl<'a> Session<'a> {
             options,
             ascii: false,
             ascii_punctuation: false,
+            full_shape: false,
             single_quote_open: false,
             double_quote_open: false,
             candidates: Vec::new(),
@@ -91,10 +93,12 @@ impl<'a> Session<'a> {
                     let info = self
                         .dictionary
                         .learning(candidate.text.chars().next().unwrap());
-                    candidate.comment = if info.codes.is_empty() {
-                        "未收录虎码".into()
-                    } else {
-                        info.codes.join(" / ")
+                    // 同小狼毫虎码方案的注释：〔拆分 · 编码〕，缺拆分资料时只列编码。
+                    let codes = info.codes.join(" / ");
+                    candidate.comment = match (&info.decomposition, codes.is_empty()) {
+                        (_, true) => "未收录虎码".into(),
+                        (Some(parts), false) => format!("〔{parts} · {codes}〕"),
+                        (None, false) => format!("〔{codes}〕"),
                     };
                     candidate.learning = Some(info);
                 }
@@ -125,6 +129,7 @@ impl<'a> Session<'a> {
             options: self.options,
             ascii_mode: self.ascii,
             ascii_punctuation: self.ascii_punctuation,
+            full_shape: self.full_shape,
             composing: self.composing(),
             revision: self.revision,
         }
@@ -166,6 +171,7 @@ impl<'a> Session<'a> {
             }
             Key::ToggleLearning => self.options.show_learning = !self.options.show_learning,
             Key::TogglePunctuation => self.ascii_punctuation = !self.ascii_punctuation,
+            Key::ToggleFullShape => self.full_shape = !self.full_shape,
             _ if self.ascii => handled = false,
             Key::Escape | Key::Tab => {
                 handled = self.composing();
@@ -255,7 +261,8 @@ impl<'a> Session<'a> {
                     };
                     if self.composing() {
                         if let Some(mut text) = self.commit(self.selected) {
-                            text.push_str(&punctuation.unwrap_or_else(|| c.to_string()));
+                            let plain = self.shaped(Key::Character(c)).unwrap_or(c);
+                            text.push_str(&punctuation.unwrap_or_else(|| plain.to_string()));
                             commit = Some(text);
                         }
                     } else if let Some(text) = punctuation {
@@ -276,11 +283,19 @@ impl<'a> Session<'a> {
                 }
             }
         }
+        // 全角：本会放行给宿主的可打印字符与空格改为上屏全角字符；控制键、组合中的键不受影响。
+        if !handled && let Some(wide) = self.shaped(key) {
+            handled = true;
+            commit = Some(wide.to_string());
+        }
         Ok(KeyOutcome {
             handled,
             commit,
             state: self.snapshot(),
         })
+    }
+    fn shaped(&self, key: Key) -> Option<char> {
+        key.full_width().filter(|_| self.full_shape)
     }
     fn page(&mut self, down: bool, handled: &mut bool) {
         *handled = self.composing();

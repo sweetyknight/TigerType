@@ -1,7 +1,9 @@
-//! 任务栏输入法图标（输入模式语言栏按钮）：单击打开设置页，右键弹出“设置/查字”菜单。
+//! 任务栏输入法图标（输入模式语言栏按钮）：显示中英状态“中/英”，单击切换中英（同小狼毫、微软拼音），
+//! 右键弹出“设置/查字/全角半角”菜单；后台未运行时菜单项置灰并说明原因。
+//! 品牌“虎”只由后台通知区图标显示，两处不重复。
 //! 按钮只声明普通按钮样式：系统右键时只调用 OnClick(右键)、从不调用 InitMenu，
 //! 所以菜单由本输入法在 OnClick 内自行弹出（小狼毫、Mozc 同样做法）。
-//! 只在 TIP 线程使用；动作经激活状态给的回调转成对后台的唤起请求，按钮本身不持有连接、不读盘。
+//! 只在 TIP 线程使用；动作经激活状态给的回调转成对后台的切换/唤起请求，按钮本身不持有连接、不读盘。
 use crate::{
     candidate::{UI_FACE, colors, create_font, draw_text, fill, rgb, round},
     service::{CLSID_TEXT_SERVICE, guarded},
@@ -11,7 +13,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     ptr, slice,
 };
-use tigertype_contracts::{Options, Palette, Theme, protocol::Panel};
+use tigertype_contracts::{Key, Options, Palette, protocol::Panel};
 use windows::{
     Win32::{
         Foundation::{
@@ -19,7 +21,10 @@ use windows::{
             SIZE, WPARAM,
         },
         Graphics::Gdi::*,
-        System::Ole::{CONNECT_E_ADVISELIMIT, CONNECT_E_CANNOTCONNECT, CONNECT_E_NOCONNECTION},
+        System::{
+            Ole::{CONNECT_E_ADVISELIMIT, CONNECT_E_CANNOTCONNECT, CONNECT_E_NOCONNECTION},
+            Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
+        },
         UI::{
             Controls::{
                 DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DISABLED, ODS_GRAYED, ODS_SELECTED, ODT_MENU,
@@ -36,11 +41,9 @@ use windows::{
 
 pub(crate) const SETTINGS: u32 = 1;
 pub(crate) const LOOKUP: u32 = 2;
-/// 菜单项：编号、文字、目标窗口。自绘项不处理助记键，用方向键与 Enter 选择。
-const ITEMS: [(u32, &str, Panel); 2] = [
-    (SETTINGS, "设置", Panel::Settings),
-    (LOOKUP, "查字", Panel::Lookup),
-];
+pub(crate) const SHAPE: u32 = 3;
+/// 菜单项编号；自绘项不处理助记键，用方向键与 Enter 选择。
+const ITEMS: [u32; 3] = [SETTINGS, LOOKUP, SHAPE];
 /// 后台不可用时附在末尾的原因说明；编号 0 与“取消”同值，且置灰不可选。
 const OFFLINE: &str = "后台未运行：从开始菜单打开 TigerType 查字与设置";
 const MENU_CLASS: PCWSTR = w!("TigerType.Menu");
@@ -53,25 +56,52 @@ const COOKIE: u32 = 1;
 thread_local! {
     // 菜单弹出期间的绘制配色：只在弹出前写入，自绘回调只读，不是业务状态。
     static PALETTE: Cell<Palette> = Cell::new(Options::default().palette());
+    // 建菜单时的全角状态，决定全角项写成要切换到的哪一边；同样只在建菜单时写入。
+    static FULL: Cell<bool> = const { Cell::new(false) };
 }
 
 #[implement(ITfLangBarItemButton, ITfSource)]
 pub(crate) struct Indicator {
-    /// 弹出菜单前确认后台可连接（受单次回调预算约束）并给出当前配色；连不上时菜单项置灰并说明原因。
-    probe: Box<dyn Fn() -> (bool, Palette)>,
+    /// 弹出菜单前确认后台可连接（受单次回调预算约束），并给出当前配色与全角状态；连不上时菜单项置灰并说明原因。
+    probe: Box<dyn Fn() -> (bool, Palette, bool)>,
     show: Box<dyn Fn(Panel)>,
+    /// 请后台翻转开关：单击为中英（图标随回复经 [`Indicator::update`] 刷新），菜单为全角。
+    toggle: Box<dyn Fn(Key)>,
     sink: RefCell<Option<ITfLangBarItemSink>>,
+    /// 上次回复的英文模式；新连接的会话默认中文。
+    ascii: Cell<bool>,
+    /// 建按钮时的任务栏深浅，决定图标字色。
+    light: bool,
 }
 impl Indicator {
     pub(crate) fn new(
-        probe: impl Fn() -> (bool, Palette) + 'static,
+        probe: impl Fn() -> (bool, Palette, bool) + 'static,
         show: impl Fn(Panel) + 'static,
+        toggle: impl Fn(Key) + 'static,
     ) -> Self {
         Self {
             probe: Box::new(probe),
             show: Box::new(show),
+            toggle: Box::new(toggle),
             sink: RefCell::new(None),
+            ascii: Cell::new(false),
+            light: light_taskbar(),
         }
+    }
+    /// 按后台回复同步中英状态；变化时通知系统重取图标与提示。
+    pub(crate) fn update(&self, ascii: bool) {
+        if self.ascii.replace(ascii) == ascii {
+            return;
+        }
+        // 先取出 sink 再通知：系统可能在通知内回调本按钮。
+        let sink = self.sink.try_borrow().ok().and_then(|sink| sink.clone());
+        if let Some(sink) = sink {
+            // SAFETY: 本线程同步通知已登记的语言栏 sink；失败只是图标暂未刷新。
+            let _ = unsafe { sink.OnUpdate(TF_LBI_ICON | TF_LBI_TOOLTIP) };
+        }
+    }
+    fn mode(&self) -> &'static str {
+        if self.ascii.get() { "英" } else { "中" }
     }
 }
 
@@ -109,23 +139,31 @@ impl ITfLangBarItem_Impl for Indicator_Impl {
         Ok(())
     }
     fn GetTooltipString(&self) -> Result<BSTR> {
-        Ok(BSTR::from("TigerType 虎码：单击打开设置，右键更多"))
+        Ok(BSTR::from(
+            format!(
+                "TigerType 虎码（{}文）：单击切换中英，右键更多",
+                self.mode()
+            )
+            .as_str(),
+        ))
     }
 }
 
 impl ITfLangBarItemButton_Impl for Indicator_Impl {
     fn OnClick(&self, click: TfLBIClick, point: &POINT, _: *const RECT) -> Result<()> {
         guarded(|| {
-            let panel = match click {
-                TF_LBI_CLK_LEFT => Some(Panel::Settings),
+            match click {
+                TF_LBI_CLK_LEFT => (self.toggle)(Key::ToggleAscii),
                 TF_LBI_CLK_RIGHT => {
-                    let (available, palette) = (self.probe)();
-                    menu(*point, available, palette)?
+                    let (available, palette, full) = (self.probe)();
+                    match menu(*point, available, palette, full)? {
+                        Some(SETTINGS) => (self.show)(Panel::Settings),
+                        Some(LOOKUP) => (self.show)(Panel::Lookup),
+                        Some(SHAPE) => (self.toggle)(Key::ToggleFullShape),
+                        _ => {}
+                    }
                 }
-                _ => None,
-            };
-            if let Some(panel) = panel {
-                (self.show)(panel);
+                _ => {}
             }
             Ok(())
         })
@@ -138,7 +176,7 @@ impl ITfLangBarItemButton_Impl for Indicator_Impl {
         Ok(())
     }
     fn GetIcon(&self) -> Result<HICON> {
-        guarded(icon)
+        guarded(|| icon(self.mode(), self.light))
     }
     fn GetText(&self) -> Result<BSTR> {
         Ok(BSTR::from("TigerType"))
@@ -167,18 +205,15 @@ impl ITfSource_Impl for Indicator_Impl {
     }
 }
 
-/// 建菜单：后台不可用时两项置灰，并在末尾附原因说明（同样置灰）。项为自绘，文字仍随项保存供读屏器朗读。
-/// 菜单归调用方 DestroyMenu。
-pub(crate) fn build(available: bool) -> Result<HMENU> {
+/// 建菜单：全角项按 full 写成要切换到的一边；后台不可用时各项置灰，并在末尾附原因说明（同样置灰）。
+/// 项为自绘，文字仍随项保存供读屏器朗读。菜单归调用方 DestroyMenu。
+pub(crate) fn build(available: bool, full: bool) -> Result<HMENU> {
+    FULL.set(full);
     // SAFETY: 新建空菜单，失败路径在返回前销毁。
     let menu = unsafe { CreatePopupMenu()? };
-    let offline = (!available).then_some((0, OFFLINE));
-    let items = ITEMS
-        .iter()
-        .map(|(id, text, _)| (*id, *text))
-        .chain(offline);
-    for (position, (id, text)) in items.enumerate() {
-        let mut text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let offline = (!available).then_some(0);
+    for (position, id) in ITEMS.into_iter().chain(offline).enumerate() {
+        let mut text: Vec<u16> = label(id).encode_utf16().chain(Some(0)).collect();
         let item = MENUITEMINFOW {
             cbSize: size_of::<MENUITEMINFOW>() as u32,
             fMask: MIIM_ID | MIIM_STRING | MIIM_FTYPE | MIIM_STATE,
@@ -198,9 +233,9 @@ pub(crate) fn build(available: bool) -> Result<HMENU> {
     Ok(menu)
 }
 
-/// 在右键位置弹出菜单并等待选择，返回目标窗口；取消（或后台不可用时）为 None。
+/// 在右键位置弹出菜单并等待选择，返回所选编号；取消（或后台不可用时）为 None。
 /// 所有者是本线程临时建的隐藏窗口：自绘消息须交给本模块，而不是宿主窗口；不激活、不改宿主焦点，用完即毁。
-fn menu(at: POINT, available: bool, palette: Palette) -> Result<Option<Panel>> {
+fn menu(at: POINT, available: bool, palette: Palette, full: bool) -> Result<Option<u32>> {
     let instance = crate::module()?;
     let class = WNDCLASSW {
         lpfnWndProc: Some(procedure),
@@ -233,7 +268,7 @@ fn menu(at: POINT, available: bool, palette: Palette) -> Result<Option<Panel>> {
             None,
         )?
     };
-    let chosen = build(available).map(|menu| {
+    let chosen = build(available, full).map(|menu| {
         PALETTE.set(palette);
         // SAFETY: 系统度量查询无副作用。
         let align = if unsafe { GetSystemMetrics(SM_MENUDROPALIGNMENT) } != 0 {
@@ -251,17 +286,17 @@ fn menu(at: POINT, available: bool, palette: Palette) -> Result<Option<Panel>> {
     // SAFETY: 销毁本函数建的所有者窗口。
     let _ = unsafe { DestroyWindow(owner) };
     let chosen = chosen?;
-    Ok(ITEMS
-        .iter()
-        .find(|(id, ..)| *id == chosen)
-        .map(|(.., panel)| *panel))
+    Ok(ITEMS.contains(&chosen).then_some(chosen))
 }
 
 fn label(id: u32) -> &'static str {
-    ITEMS
-        .iter()
-        .find(|(key, ..)| *key == id)
-        .map_or(OFFLINE, |(_, text, _)| *text)
+    match id {
+        SETTINGS => "设置",
+        LOOKUP => "查字",
+        SHAPE if FULL.get() => "切换到半角",
+        SHAPE => "切换到全角",
+        _ => OFFLINE,
+    }
 }
 
 // SAFETY: 回调截住 panic；只处理本菜单的自绘消息，结构指针由系统给出且已判空，只在本次回调内使用；
@@ -370,12 +405,33 @@ pub(crate) fn draw(hwnd: HWND, item: &DRAWITEMSTRUCT) {
     }
 }
 
-/// 现画小图标：琥珀主题强调色圆角底上的白色“虎”，深浅任务栏都看得清且无蓝色。
-/// 每次新建，HICON 归调用方并由其 DestroyIcon。
-fn icon() -> Result<HICON> {
+/// 任务栏是否为浅色：系统“Windows 模式”设置，读不到按深色（Win10 默认）。
+/// 只在激活建按钮时读一次：输入路径不读配置。
+/// shortcut: 激活期间切换深浅色要等下次激活才换字色，需即时跟随时改由后台推送。
+fn light_taskbar() -> bool {
+    let mut value = 0u32;
+    let mut size = size_of::<u32>() as u32;
+    // SAFETY: 输出缓冲为本地 DWORD，大小已填；只读当前用户的一个值。
+    let read = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("SystemUsesLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut value as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    read.is_ok() && value != 0
+}
+
+/// 现画小图标：像微软拼音、小狼毫那样只画一个“中”/“英”字，底全透明；
+/// 字色随任务栏深浅（深色用白、浅色用近黑），无蓝色。每次新建，HICON 归调用方并由其 DestroyIcon。
+fn icon(glyph: &str, light: bool) -> Result<HICON> {
     // SAFETY: 系统度量查询无副作用。
     let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
-    let accent = Theme::Amber.preset().ok_or(E_FAIL)?.accent;
+    let ink: u32 = if light { 0x1A1A1A } else { 0xFFFFFF };
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
@@ -400,12 +456,14 @@ fn icon() -> Result<HICON> {
         let color = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
             .unwrap_or_default();
         let mask = CreateBitmap(size, size, 1, 1, Some(mask_bits.as_ptr().cast()));
+        // 灰度抗锯齿：覆盖率直接当 alpha，ClearType 的彩色边缘可能偏蓝。
+        // 字身取图标的 3/4，汉字墨迹约占 2/3，四周留白与微软拼音相近。
         let font = CreateFontW(
-            -(size * 7 / 8),
+            -(size * 3 / 4),
             0,
             0,
             0,
-            FW_BOLD.0 as i32,
+            FW_NORMAL.0 as i32,
             0,
             0,
             0,
@@ -423,39 +481,20 @@ fn icon() -> Result<HICON> {
             && !font.is_invalid()
             && !bits.is_null()
         {
+            // 新 DIB 全零（黑）；白字画上去后各通道即覆盖率。
             let old_bitmap = SelectObject(dc, color.into());
             let old_font = SelectObject(dc, font.into());
-            let old_brush = SelectObject(dc, GetStockObject(DC_BRUSH));
-            let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
-            SetDCBrushColor(dc, rgb(accent));
-            // 无画笔时填充少画右/下一像素，补齐。
-            let radius = size / 4;
-            let _ = RoundRect(dc, 0, 0, size + 1, size + 1, radius * 2, radius * 2);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, rgb(0xFFFFFF));
-            let mut area = RECT {
-                left: 0,
-                top: 0,
-                right: size,
-                bottom: size,
-            };
-            let mut text: Vec<u16> = "虎".encode_utf16().collect();
-            DrawTextW(
-                dc,
-                &mut text,
-                &mut area,
-                DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
-            );
+            let text: Vec<u16> = glyph.encode_utf16().collect();
+            let (x, y) = centered(dc, text[0], size);
+            SetTextAlign(dc, TA_BASELINE | TA_LEFT);
+            let _ = TextOutW(dc, x, y, &text);
             let _ = GdiFlush();
-            SelectObject(dc, old_pen);
-            SelectObject(dc, old_brush);
             SelectObject(dc, old_font);
             SelectObject(dc, old_bitmap);
-            // GDI 不写 alpha：底色与字都非零，圆角外仍为 0，据此补出不透明区域。
             for pixel in slice::from_raw_parts_mut(bits.cast::<u32>(), (size * size) as usize) {
-                if *pixel != 0 {
-                    *pixel |= 0xFF00_0000;
-                }
+                *pixel = coverage(*pixel, ink);
             }
             result = CreateIconIndirect(&ICONINFO {
                 fIcon: true.into(),
@@ -481,10 +520,53 @@ fn icon() -> Result<HICON> {
     }
 }
 
+/// 按字形墨迹框居中，返回基线起点：GDI 的垂直居中按字符单元算，雅黑的单元比汉字高，
+/// 字会偏下甚至被裁掉底边。取不到字形度量时退回按字身估算。
+/// SAFETY: 调用方保证 dc 有效且已选入目标字体。
+unsafe fn centered(dc: HDC, glyph: u16, size: i32) -> (i32, i32) {
+    let one = FIXED { fract: 0, value: 1 };
+    let identity = MAT2 {
+        eM11: one,
+        eM22: one,
+        ..Default::default()
+    };
+    let mut metrics = GLYPHMETRICS::default();
+    // SAFETY: 只取度量（GGO_METRICS 不写缓冲），输出结构为本地值。
+    let read = unsafe {
+        GetGlyphOutlineW(
+            dc,
+            glyph.into(),
+            GGO_METRICS,
+            &mut metrics,
+            0,
+            None,
+            &identity,
+        )
+    };
+    if read == GDI_ERROR as u32 {
+        return (size / 8, size * 7 / 8);
+    }
+    let (width, height) = (metrics.gmBlackBoxX as i32, metrics.gmBlackBoxY as i32);
+    let origin = metrics.gmptGlyphOrigin;
+    (
+        (size - width) / 2 - origin.x,
+        (size - height) / 2 + origin.y,
+    )
+}
+
+/// 白字黑底的像素转成“字色 + 覆盖率 alpha”（图标位图为非预乘 ARGB），覆盖率为 0 的像素全透明。
+const fn coverage(pixel: u32, ink: u32) -> u32 {
+    let (red, green, blue) = (pixel >> 16 & 0xFF, pixel >> 8 & 0xFF, pixel & 0xFF);
+    let alpha = if red > green { red } else { green };
+    let alpha = if blue > alpha { blue } else { alpha };
+    if alpha == 0 { 0 } else { alpha << 24 | ink }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use std::{rc::Rc, sync::Mutex};
+    use tigertype_contracts::{Theme, without_blue};
     use windows::Win32::{
         System::Threading::GetCurrentThreadId,
         UI::{
@@ -492,6 +574,7 @@ pub(crate) mod tests {
             Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_RETURN},
         },
     };
+    use windows::core::ComObject;
 
     /// 同一时刻只让一个测试弹真实菜单。
     static MENU: Mutex<()> = Mutex::new(());
@@ -527,41 +610,43 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn right_click_pops_a_real_menu_whose_choice_opens_that_panel_and_offline_items_cannot_be_chosen()
-     {
+    fn left_click_toggles_and_the_right_click_menu_opens_panels_or_switches_full_shape() {
         let shown = Rc::new(RefCell::new(Vec::new()));
+        let toggled = Rc::new(RefCell::new(Vec::new()));
         let online = Rc::new(Cell::new(true));
-        let (log, probe) = (shown.clone(), online.clone());
+        let (log, probe, keys) = (shown.clone(), online.clone(), toggled.clone());
         let button: ITfLangBarItemButton = Indicator::new(
-            move || (probe.get(), Options::default().palette()),
+            move || (probe.get(), Options::default().palette(), false),
             move |panel| log.borrow_mut().push(panel),
+            move |key| keys.borrow_mut().push(key),
         )
         .into();
-        right_click(&button, &[VK_DOWN, VK_RETURN]);
-        right_click(&button, &[VK_DOWN, VK_DOWN, VK_RETURN]);
-        right_click(&button, &[VK_ESCAPE]);
-        assert_eq!(*shown.borrow(), [Panel::Settings, Panel::Lookup]);
-        // 后台不可用：项全部置灰，Enter 收起菜单但不选中任何项，什么都不唤起。
-        online.set(false);
-        right_click(&button, &[VK_DOWN, VK_RETURN]);
-        assert_eq!(shown.borrow().len(), 2);
-        // 左键不弹菜单，直接打开设置页。
+        // 左键不弹菜单，只切换中英。
         // SAFETY: 本线程同步回调本按钮。
         unsafe { button.OnClick(TF_LBI_CLK_LEFT, POINT::default(), &RECT::default()) }.unwrap();
-        assert_eq!(
-            *shown.borrow(),
-            [Panel::Settings, Panel::Lookup, Panel::Settings]
-        );
+        assert_eq!(*toggled.borrow(), [Key::ToggleAscii]);
+        assert!(shown.borrow().is_empty());
+        // 右键弹出真实菜单：依次选“设置”“查字”“切换到全角”，Esc 取消什么都不做。
+        right_click(&button, &[VK_DOWN, VK_RETURN]);
+        right_click(&button, &[VK_DOWN, VK_DOWN, VK_RETURN]);
+        right_click(&button, &[VK_DOWN, VK_DOWN, VK_DOWN, VK_RETURN]);
+        right_click(&button, &[VK_ESCAPE]);
+        assert_eq!(*shown.borrow(), [Panel::Settings, Panel::Lookup]);
+        assert_eq!(*toggled.borrow(), [Key::ToggleAscii, Key::ToggleFullShape]);
+        // 后台不可用：项全部置灰，Enter 收起菜单但不选中任何项，什么都不发。
+        online.set(false);
+        right_click(&button, &[VK_DOWN, VK_RETURN]);
+        assert_eq!((shown.borrow().len(), toggled.borrow().len()), (2, 2));
         // 系统不对普通按钮调用菜单接口；即使被调用也不唤起任何窗口。
         // SAFETY: 同上。
         unsafe { button.OnMenuSelect(SETTINGS) }.unwrap();
-        assert_eq!(shown.borrow().len(), 3);
+        assert_eq!(shown.borrow().len(), 2);
     }
 
     #[test]
-    fn menu_lists_settings_and_lookup_as_owner_drawn_items_and_explains_when_offline() {
-        for available in [true, false] {
-            let menu = build(available).unwrap();
+    fn menu_lists_settings_lookup_and_the_shape_switch_and_explains_when_offline() {
+        for (available, full) in [(true, false), (true, true), (false, false)] {
+            let menu = build(available, full).unwrap();
             let mut items = Vec::new();
             // SAFETY: 读回本测试刚建的菜单项，读完销毁菜单。
             unsafe {
@@ -581,9 +666,16 @@ pub(crate) mod tests {
                 }
                 DestroyMenu(menu).unwrap();
             }
+            // 全角项写成要切换到的一边。
+            let shape = if full {
+                "切换到半角"
+            } else {
+                "切换到全角"
+            };
             let mut expected = vec![
                 (SETTINGS, !available, "设置".to_string()),
                 (LOOKUP, !available, "查字".to_string()),
+                (SHAPE, !available, shape.to_string()),
             ];
             if !available {
                 expected.push((0, true, OFFLINE.to_string()));
@@ -645,15 +737,64 @@ pub(crate) mod tests {
                 assert_eq!((at_fill, at_bar), (fill, bar), "{theme:?} {state:?}");
                 for color in [at_fill, at_bar] {
                     let [red, green, blue, _] = color.0.to_le_bytes();
-                    assert!(blue <= red && blue <= green, "{theme:?} {color:?}");
+                    let value = u32::from_be_bytes([0, red, green, blue]);
+                    assert!(without_blue(value), "{theme:?} {color:?}");
                 }
             }
         }
     }
 
+    #[implement(ITfLangBarItemSink)]
+    struct Sink(Rc<RefCell<Vec<u32>>>);
+    impl ITfLangBarItemSink_Impl for Sink_Impl {
+        fn OnUpdate(&self, flags: u32) -> Result<()> {
+            self.0.borrow_mut().push(flags);
+            Ok(())
+        }
+    }
+
     #[test]
-    fn icon_is_an_opaque_badge_with_transparent_corners_and_no_blue() {
-        let icon = icon().unwrap();
+    fn mode_changes_redraw_the_icon_and_tooltip_only_when_the_mode_actually_flips() {
+        let object = ComObject::new(Indicator::new(
+            || (true, Options::default().palette(), false),
+            |_| {},
+            |_| {},
+        ));
+        let button: ITfLangBarItemButton = object.to_interface();
+        let updates = Rc::new(RefCell::new(Vec::new()));
+        let sink: ITfLangBarItemSink = Sink(updates.clone()).into();
+        // SAFETY: 本线程同步调用本测试按钮。
+        let tooltip = || unsafe { button.GetTooltipString() }.unwrap().to_string();
+        // SAFETY: 登记本测试 sink，按钮在本线程同步回调。
+        unsafe {
+            button
+                .cast::<ITfSource>()
+                .unwrap()
+                .AdviseSink(&ITfLangBarItemSink::IID, &sink)
+        }
+        .unwrap();
+        assert!(tooltip().contains("中文"));
+        // 状态未变不打扰系统；切到英文与切回中文各通知一次图标与提示。
+        object.update(false);
+        object.update(true);
+        assert!(tooltip().contains("英文"));
+        object.update(true);
+        object.update(false);
+        assert!(tooltip().contains("中文"));
+        let flags = TF_LBI_ICON | TF_LBI_TOOLTIP;
+        assert_eq!(*updates.borrow(), [flags, flags]);
+    }
+
+    #[test]
+    fn icon_is_a_bare_glyph_in_the_taskbar_ink_on_a_transparent_background() {
+        for (light, ink) in [(false, 0xFFFFFF), (true, 0x1A1A1A)] {
+            for glyph in ["中", "英"] {
+                bare(icon(glyph, light).unwrap(), ink);
+            }
+        }
+    }
+
+    fn bare(icon: HICON, ink: u32) {
         let mut info = ICONINFO::default();
         // SAFETY: 读回本测试刚建的图标位图，读完删除位图与图标。
         unsafe {
@@ -693,13 +834,30 @@ pub(crate) mod tests {
             let _ = DeleteObject(info.hbmMask.into());
             DestroyIcon(icon).unwrap();
             assert_eq!(rows, size);
-            // 角上透明，中心不透明；所有不透明像素的蓝分量都不高于红、绿（无蓝）。
+            // 没有底板：角上透明、可见像素只占少数；笔画处完全不透明，可见像素一律是任务栏字色（无蓝）。
             assert_eq!(pixels[0] >> 24, 0);
-            let center = pixels[(size / 2 * size + size / 2) as usize];
-            assert_eq!(center >> 24, 0xFF);
-            for pixel in pixels.iter().filter(|p| *p >> 24 != 0) {
-                let (r, g, b) = (pixel >> 16 & 0xFF, pixel >> 8 & 0xFF, pixel & 0xFF);
-                assert!(b <= r && b <= g, "{pixel:08X}");
+            let visible: Vec<u32> = pixels.iter().copied().filter(|p| p >> 24 != 0).collect();
+            assert!(
+                visible.len() * 2 < pixels.len(),
+                "{}/{}",
+                visible.len(),
+                pixels.len()
+            );
+            assert!(visible.iter().any(|p| p >> 24 == 0xFF));
+            // 字形按墨迹居中：四边都不贴边，上下、左右留白相差不超过 1px（按字符单元居中会偏下被裁）。
+            let inked = |at: &dyn Fn(i32) -> bool| (0..size).filter(|&k| at(k)).collect::<Vec<_>>();
+            let rows = inked(&|y| (0..size).any(|x| pixels[(y * size + x) as usize] >> 24 != 0));
+            let cols = inked(&|x| (0..size).any(|y| pixels[(y * size + x) as usize] >> 24 != 0));
+            for span in [rows, cols] {
+                let (first, last) = (span[0], span[span.len() - 1]);
+                assert!(first >= 1 && last <= size - 2, "{first}..{last} / {size}");
+                assert!(
+                    (first - (size - 1 - last)).abs() <= 1,
+                    "{first}..{last} / {size}"
+                );
+            }
+            for pixel in visible {
+                assert_eq!(pixel & 0xFF_FFFF, ink, "{pixel:08X}");
             }
         }
     }

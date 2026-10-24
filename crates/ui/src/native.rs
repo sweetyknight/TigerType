@@ -2,7 +2,7 @@
 //! 外观由父窗口与子类化按钮按主题自绘。回调无业务状态、无分配、无可展开代码：
 //! 配色取本 UI 线程的绘制配色，字体取控件自身，布局按客户区尺寸现算，不在窗口数据里存指针。
 use crate::{
-    Inbox,
+    Inbox, Latest,
     model::{Model, details},
 };
 use std::{
@@ -104,13 +104,17 @@ const TOGGLES: [(usize, &str, &str); 3] = [
         "编码满四码且只有一个候选时直接上屏",
     ),
     (COMMON, "普通输入仅常用字(&C)", "关闭后普通输入也使用全字集"),
-    (LEARNING, "显示学习提示(&L)", "在候选旁显示该字的虎码编码"),
+    (
+        LEARNING,
+        "显示拆分与编码(&L)",
+        "在候选旁显示〔拆分 · 编码〕，如〔白勹丶 · unid〕",
+    ),
 ];
 /// 三组分段单选：行标题、说明、首个控件编号、各段宽度（96 DPI）。
 const CHOICES: [(&str, &str, usize, i32); 3] = [
     ("输出字形(&O)", "上屏前转换为所选字形", FORM, 52),
     ("候选字体(&F)", "候选窗与查字字形所用字体", FONT, 80),
-    ("配色主题(&T)", "全部界面所用配色", THEME, 52),
+    ("配色主题(&T)", "全部界面所用配色", THEME, 48),
 ];
 const UI_FACE: &str = "Microsoft YaHei UI";
 /// 列表每项高度（96 DPI）。
@@ -929,7 +933,7 @@ fn settings_spec() -> Vec<(usize, Box4)> {
     }
     for (index, (_, _, first, segment)) in CHOICES.iter().enumerate() {
         let top = ROW_TOP + (3 + index as i32) * ROW;
-        controls.push((ROW_TITLE + index, [41, top + 9, 200, 22]));
+        controls.push((ROW_TITLE + index, [41, top + 9, 180, 22]));
         controls.push((ROW_DESC + index, [41, top + 31, 180, 20]));
         let count = choice_count(*first) as i32;
         let left = width - 40 - count * segment - 4;
@@ -1919,16 +1923,18 @@ fn keyboard(message: &MSG, main: &Window, settings: &Window) {
 /// 当前线程专用于原生 UI；事件唤醒回复、系统消息驱动操作，不使用定时轮询。
 /// 后台进程内的固定 UI 线程：启动即挂通知区图标，查字/设置窗等首次唤起（唤起信号或图标操作）才建；
 /// 关闭主窗只隐藏，再次唤起即前置目标窗口；show 断开（后台停止）才退出并删除图标。
+/// taskbar 为后台给出的通知区图标显隐（前台程序正用本输入法时隐藏），全程随到随用。
 pub fn run(
     requests: SyncSender<Request>,
     inbox: Inbox<Reply>,
     show: Inbox<Panel>,
+    taskbar: &Latest<bool>,
     options: Options,
 ) -> Result<(), String> {
     let _dpi = DpiContext::enter()?;
     PALETTE.with(|palette| palette.set(options.palette()));
-    let _tray = tray::Tray::new()?;
-    let Some(panel) = tray::first(&show)? else {
+    let tray = tray::Tray::new()?;
+    let Some(panel) = tray::first(&show, &tray, taskbar)? else {
         return Ok(());
     };
     let class = Class::register()?;
@@ -1945,6 +1951,7 @@ pub fn run(
         &requests,
         &inbox,
         &show,
+        Some((&tray, taskbar)),
     )
 }
 
@@ -1980,15 +1987,20 @@ fn event_loop(
     requests: &SyncSender<Request>,
     inbox: &Inbox<Reply>,
     show: &Inbox<Panel>,
+    // 通知区图标与后台给出的显隐；测试不登记图标时为 None。
+    icon: Option<(&tray::Tray, &Latest<bool>)>,
 ) -> Result<(), String> {
-    let events = [inbox.event.as_raw_handle(), show.event.as_raw_handle()];
+    let mut events = vec![inbox.event.as_raw_handle(), show.event.as_raw_handle()];
+    if let Some((_, taskbar)) = icon {
+        events.push(taskbar.event().as_raw_handle());
+    }
     let mut main_focus = None;
     let mut settings_focus = None;
     loop {
-        // SAFETY: 两个 Inbox 持有事件直到循环结束；消息、回复与唤起共享一次阻塞等待，空闲不耗 CPU。
+        // SAFETY: Inbox 与交接槽持有事件直到循环结束；消息、回复、唤起与显隐共享一次阻塞等待，空闲不耗 CPU。
         let wait = unsafe {
             MsgWaitForMultipleObjectsEx(
-                2,
+                events.len() as u32,
                 events.as_ptr(),
                 INFINITE,
                 QS_ALLINPUT,
@@ -1997,6 +2009,9 @@ fn event_loop(
         };
         if wait == WAIT_FAILED {
             return Err(error());
+        }
+        if let Some((tray, taskbar)) = icon {
+            tray.sync(taskbar)?;
         }
         match show.receiver.try_recv() {
             Ok(panel) => present(main, settings, model, panel),
@@ -2384,7 +2399,8 @@ mod tests {
                     &mut model,
                     &requests,
                     &inbox,
-                    &show
+                    &show,
+                    None
                 )
                 .unwrap_err()
                 .contains("工作线程已退出")
@@ -2413,7 +2429,8 @@ mod tests {
                     &mut model,
                     &requests,
                     &inbox,
-                    &show
+                    &show,
+                    None
                 )
                 .is_err()
             );
@@ -2433,7 +2450,8 @@ mod tests {
                     &mut model,
                     &requests,
                     &inbox,
-                    &show
+                    &show,
+                    None
                 )
                 .unwrap_err()
                 .contains("回复与在途操作不符")
@@ -2451,7 +2469,8 @@ mod tests {
                     &mut model,
                     &requests,
                     &inbox,
-                    &show
+                    &show,
+                    None
                 )
                 .is_ok()
             );
@@ -2471,7 +2490,8 @@ mod tests {
                     &mut model,
                     &requests,
                     &inbox,
-                    &show
+                    &show,
+                    None
                 )
                 .is_ok()
             );

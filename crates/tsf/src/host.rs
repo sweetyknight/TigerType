@@ -19,6 +19,8 @@ pub trait Channel {
     ) -> Result<Reply, Error>;
     /// 只在本次 ensure 成功后调用：请后台显示查字或设置窗，不占会话；传输错误时实现须作废连接。
     fn show(&mut self, panel: Panel, deadline: Instant) -> Result<(), Error>;
+    /// 只在本次 ensure 成功后调用：报告本宿主线程是否持有输入焦点，不占会话；传输错误时实现须作废连接。
+    fn indicate(&mut self, visible: bool, deadline: Instant) -> Result<(), Error>;
     /// 释放当前连接；下次 ensure 重新连接。
     fn cancel(&mut self);
 }
@@ -34,6 +36,8 @@ pub struct Host<C> {
     /// 后台会话可能留有文档中已不存在的组合，下次按键前须 Clear。
     dirty: bool,
     state: InputState,
+    /// 本宿主线程持有输入焦点（任务栏正显示本输入法图标）；后台随连接断开而遗忘，新连接须补报。
+    indicated: bool,
 }
 impl<C: Channel> Host<C> {
     pub fn new(channel: C) -> Self {
@@ -45,29 +49,47 @@ impl<C: Channel> Host<C> {
             focused: false,
             dirty: false,
             state: InputState::default(),
+            indicated: false,
         }
     }
     /// 上次回复的状态，只供 OnTestKeyDown 本地判定，不发 IPC。
     pub fn state(&self) -> &InputState {
         &self.state
     }
+    /// 确认连接；新连接上旧会话不存在、判定按新会话默认状态，且须先补报持有的输入焦点。
+    fn ensure(&mut self, deadline: Instant) -> Result<bool, Error> {
+        let fresh = self.channel.ensure(deadline)?;
+        if fresh {
+            self.session = 0;
+            self.state = InputState::default();
+            if self.indicated {
+                self.channel.indicate(true, deadline)?;
+            }
+        }
+        Ok(fresh)
+    }
     /// 吃键前确认后台可用：已有连接直接复用，否则在期限内只做连接握手，不发输入请求。
     /// 宿主未必把“预判吃下、处理时放行”的原键交还应用，所以连不上就不能吃键。
     pub fn ready(&mut self, deadline: Instant) -> bool {
-        match self.channel.ensure(deadline) {
-            Ok(fresh) => {
-                if fresh {
-                    // 新连接上的会话尚未打开，判定按新会话的默认状态。
-                    self.session = 0;
-                    self.state = InputState::default();
-                }
-                true
-            }
-            Err(_) => {
-                self.fail();
-                false
-            }
+        let ready = self.ensure(deadline).is_ok();
+        if !ready {
+            self.fail();
         }
+        ready
+    }
+    /// 本宿主线程取得或失去输入焦点：告诉后台任务栏是否正显示本输入法图标，后台据此隐藏或恢复通知区图标。
+    /// 新连接已在 ensure 中补报取得；失去时新建的连接本无持有，无需再报。失败作废连接。
+    pub fn indicate(&mut self, visible: bool, deadline: Instant) -> bool {
+        self.indicated = visible;
+        let sent = match self.ensure(deadline) {
+            Ok(true) => Ok(()),
+            Ok(false) => self.channel.indicate(visible, deadline),
+            Err(error) => Err(error),
+        };
+        if sent.is_err() {
+            self.fail();
+        }
+        sent.is_ok()
     }
     /// 文档焦点变化：下次按键先报告焦点，后台据此清除旧组合。
     pub fn blur(&mut self) {
@@ -98,13 +120,9 @@ impl<C: Channel> Host<C> {
         if self.session == 0 || !self.focused || self.dirty {
             return Ok(None);
         }
-        match self.channel.ensure(deadline) {
+        match self.ensure(deadline) {
             Ok(false) => {}
-            Ok(true) => {
-                self.session = 0;
-                self.state = InputState::default();
-                return Ok(None);
-            }
+            Ok(true) => return Ok(None),
             Err(error) => {
                 self.fail();
                 return Err(error);
@@ -164,9 +182,7 @@ impl<C: Channel> Host<C> {
         }
     }
     fn exchange(&mut self, key: Key, deadline: Instant) -> Result<KeyOutcome, Error> {
-        if self.channel.ensure(deadline)? {
-            self.session = 0;
-        }
+        self.ensure(deadline)?;
         if self.session == 0 {
             self.last_session = self.last_session.checked_add(1).ok_or(Error::Closed)?;
             self.session = self.last_session;
@@ -230,6 +246,9 @@ mod tests {
         /// 唤起结果，缺省为成功；shown 记录每次唤起的目标窗口。
         show: VecDeque<Result<(), Error>>,
         shown: Vec<Panel>,
+        /// 焦点报告结果，缺省为成功；indicated 记录每次报告。
+        indicate: VecDeque<Result<(), Error>>,
+        indicated: Vec<bool>,
     }
     #[derive(Clone, Default)]
     struct Fake(Rc<RefCell<Script>>);
@@ -246,6 +265,11 @@ mod tests {
             let mut script = self.0.borrow_mut();
             script.shown.push(panel);
             script.show.pop_front().unwrap_or(Ok(()))
+        }
+        fn indicate(&mut self, visible: bool, _: Instant) -> Result<(), Error> {
+            let mut script = self.0.borrow_mut();
+            script.indicated.push(visible);
+            script.indicate.pop_front().unwrap_or(Ok(()))
         }
         fn cancel(&mut self) {
             self.0.borrow_mut().cancelled += 1;
@@ -291,6 +315,43 @@ mod tests {
         Command::Open {
             options: Options::default(),
         }
+    }
+
+    #[test]
+    fn held_input_focus_is_reported_once_per_connection_and_released_without_a_new_one() {
+        let fake = Fake::default();
+        let mut host = Host::new(fake.clone());
+        let indicated = |fake: &Fake| std::mem::take(&mut fake.0.borrow_mut().indicated);
+        // 取得时须新建连接：连接上补报一次即可，不重复发送；不打开会话。
+        fake.0.borrow_mut().fresh.push_back(Ok(true));
+        assert!(host.indicate(true, deadline()));
+        assert_eq!(indicated(&fake), [true]);
+        assert!(take_log(&fake).is_empty());
+        // 连接作废后，下一键的新连接先补报取得，再 Open/Focus。
+        host.close();
+        fake.0.borrow_mut().fresh.push_back(Ok(true));
+        fake.0.borrow_mut().replies.extend([
+            ok(Reply::Opened),
+            ok(Reply::Focused),
+            Ok(outcome("u")),
+        ]);
+        host.key(Key::Character('u'), deadline()).unwrap();
+        assert_eq!(indicated(&fake), [true]);
+        assert_eq!(take_log(&fake), [(1, open()), (1, focus(1)), (1, key(1))]);
+        // 失去经现有连接报告；此后的新连接不再补报。
+        assert!(host.indicate(false, deadline()));
+        assert_eq!(indicated(&fake), [false]);
+        fake.0.borrow_mut().fresh.push_back(Ok(true));
+        assert!(host.ready(deadline()));
+        assert!(indicated(&fake).is_empty());
+        // 报告失败作废连接（后台随断开遗忘），仍记下取得，下个新连接补报。
+        let cancelled = fake.0.borrow().cancelled;
+        fake.0.borrow_mut().indicate.push_back(Err(Error::TimedOut));
+        assert!(!host.indicate(true, deadline()));
+        assert_eq!(fake.0.borrow().cancelled, cancelled + 1);
+        fake.0.borrow_mut().fresh.push_back(Ok(true));
+        assert!(host.ready(deadline()));
+        assert_eq!(indicated(&fake), [true, true]);
     }
 
     #[test]

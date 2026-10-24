@@ -174,6 +174,10 @@ fn tsf_local_key_judgment_matches_engine_handling_in_every_reachable_state() {
         vec![Key::ToggleAscii],
         vec![Key::ToggleAscii, Key::TogglePunctuation],
         [letters("u"), vec![Key::ToggleAscii, Key::ToggleAscii]].concat(),
+        vec![Key::ToggleFullShape],
+        [vec![Key::ToggleFullShape], letters("u")].concat(),
+        vec![Key::ToggleFullShape, Key::TogglePunctuation],
+        vec![Key::ToggleAscii, Key::ToggleFullShape],
     ];
     prefixes.push([letters("u"), vec![Key::Space]].concat());
     let mut keys = vec![
@@ -189,6 +193,7 @@ fn tsf_local_key_judgment_matches_engine_handling_in_every_reachable_state() {
         Key::ToggleAscii,
         Key::ToggleLearning,
         Key::TogglePunctuation,
+        Key::ToggleFullShape,
     ];
     keys.extend((0u8..=0x7f).map(|b| Key::Character(b as char)));
     keys.extend(['ü', 'Ü', '中', '１', '\u{3000}', '\u{85}'].map(Key::Character));
@@ -214,6 +219,67 @@ fn tsf_local_key_judgment_matches_engine_handling_in_every_reachable_state() {
             }
         }
     }
+}
+#[test]
+fn full_shape_commits_full_width_forms_only_for_keys_that_would_pass_through() {
+    let dictionary = Dictionary::new(data()).unwrap();
+    let mut session = Session::new(&dictionary, Options::default());
+    let commit = |session: &mut Session<'_>, key| {
+        let outcome = session.process(key).unwrap();
+        (outcome.handled, outcome.commit)
+    };
+    // 半角：数字、大写字母、空格照常放行给宿主。
+    assert_eq!(commit(&mut session, Key::Character('1')), (false, None));
+    assert!(!session.snapshot().full_shape);
+    session.process(Key::ToggleFullShape).unwrap();
+    assert!(session.snapshot().full_shape);
+    for (key, wide) in [
+        (Key::Character('1'), "１"),
+        (Key::Character('A'), "Ａ"),
+        (Key::Character('#'), "＃"),
+        (Key::Character(','), "，"),
+        (Key::Space, "\u{3000}"),
+    ] {
+        assert_eq!(
+            commit(&mut session, key),
+            (true, Some(wide.into())),
+            "{key:?}"
+        );
+    }
+    // 控制键不受影响；组合中的符号跟在首选后也转全角。
+    assert_eq!(commit(&mut session, Key::Enter), (false, None));
+    session.process(Key::TogglePunctuation).unwrap();
+    type_code(&mut session, "u");
+    assert_eq!(
+        commit(&mut session, Key::Character('#')),
+        (true, Some("的＃".into()))
+    );
+    // 英文模式下字母也转全角；再切回半角即放行。
+    session.process(Key::ToggleAscii).unwrap();
+    assert_eq!(
+        commit(&mut session, Key::Character('a')),
+        (true, Some("ａ".into()))
+    );
+    session.process(Key::ToggleFullShape).unwrap();
+    assert_eq!(commit(&mut session, Key::Character('a')), (false, None));
+}
+#[test]
+fn learning_comment_shows_decomposition_and_codes_only_when_enabled() {
+    let dictionary = Dictionary::new(data()).unwrap();
+    let comment = |show_learning| {
+        let mut session = Session::new(
+            &dictionary,
+            Options {
+                show_learning,
+                ..Default::default()
+            },
+        );
+        type_code(&mut session, "unid");
+        session.snapshot().candidates[0].comment.clone()
+    };
+    // 开关关闭时不显示任何拆分与编码；打开后按小狼毫格式〔拆分 · 编码〕。
+    assert_eq!(comment(false), "");
+    assert_eq!(comment(true), "〔白勹丶 · u / unid〕");
 }
 #[test]
 fn default_waits_four_then_next_letter_commits_once() {

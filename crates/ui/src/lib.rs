@@ -5,6 +5,6 @@ mod model;
 #[cfg(windows)]
 mod native;
 #[cfg(windows)]
-pub use mailbox::{Inbox, ReplySender, mailbox};
+pub use mailbox::{Inbox, Latest, ReplySender, mailbox};
 #[cfg(windows)]
 pub use native::run;

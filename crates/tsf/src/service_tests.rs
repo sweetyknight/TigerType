@@ -43,7 +43,12 @@ struct Manager {
     watcher: RefCell<Option<ITfCompartmentEventSink>>,
     /// 已登记的语言栏按钮（任务栏输入法图标）。
     items: RefCell<Vec<ITfLangBarItem>>,
+    /// 本线程是否持有输入焦点，与已登记的线程焦点 sink。
+    thread_focus: Cell<bool>,
+    focus: RefCell<Option<ITfThreadFocusSink>>,
 }
+/// 线程焦点 sink 的固定 cookie，与线程管理器 sink 的递增 cookie 区分。
+const FOCUS_COOKIE: u32 = 50;
 #[implement(
     ITfThreadMgr,
     ITfSource,
@@ -183,7 +188,12 @@ impl ITfSource_Impl for Compartment_Impl {
 impl ITfSource_Impl for ThreadMgr_Impl {
     fn AdviseSink(&self, iid: *const GUID, sink: Ref<IUnknown>) -> Result<u32> {
         // SAFETY: 调用方传入有效 IID 指针；只核对类型，不保存未知接口。
-        if unsafe { *iid } != ITfThreadMgrEventSink::IID || sink.is_null() {
+        let iid = unsafe { *iid };
+        if iid == ITfThreadFocusSink::IID && self.0.focus.borrow().is_none() {
+            *self.0.focus.borrow_mut() = Some(sink.ok()?.cast()?);
+            return Ok(FOCUS_COOKIE);
+        }
+        if iid != ITfThreadMgrEventSink::IID || sink.is_null() {
             return Err(E_INVALIDARG.into());
         }
         self.0.next.set(self.0.next.get() + 1);
@@ -191,6 +201,11 @@ impl ITfSource_Impl for ThreadMgr_Impl {
         Ok(self.0.next.get())
     }
     fn UnadviseSink(&self, cookie: u32) -> Result<()> {
+        if cookie == FOCUS_COOKIE {
+            self.0.focus.take().ok_or(E_INVALIDARG)?;
+            self.0.released.borrow_mut().push("focus");
+            return Ok(());
+        }
         let mut sinks = self.0.sinks.borrow_mut();
         let index = sinks
             .iter()
@@ -283,7 +298,7 @@ impl ITfThreadMgr_Impl for ThreadMgr_Impl {
         Err(E_NOTIMPL.into())
     }
     fn IsThreadFocus(&self) -> Result<BOOL> {
-        Err(E_NOTIMPL.into())
+        Ok(self.0.thread_focus.get().into())
     }
     fn GetFunctionProvider(&self, _: *const GUID) -> Result<ITfFunctionProvider> {
         Err(E_NOTIMPL.into())
@@ -350,13 +365,13 @@ fn state(buffer: &str, revision: u64) -> InputState {
     }
 }
 
-/// 进程内单槽假后台：真实管道、握手与协议校验；字母累积组合，空格提交首选，选字提交对应候选；
-/// 唤起请求记录目标窗口后确认。
+/// 进程内单槽假后台：真实管道、握手与协议校验；字母累积组合，空格提交首选，选字提交对应候选，
+/// 切换中英翻转英文模式；唤起请求记录目标窗口、焦点报告记录取得/失去后确认。
 #[allow(clippy::type_complexity)]
 fn backend(
     namespace: &str,
 ) -> (
-    thread::JoinHandle<(Vec<Command>, Vec<Panel>)>,
+    thread::JoinHandle<(Vec<Command>, Vec<Panel>, Vec<bool>)>,
     mpsc::Receiver<()>,
 ) {
     let label = format!("{namespace}-request-0");
@@ -376,8 +391,9 @@ fn backend(
         };
         pipe.send_frame(&encode(&welcome).unwrap(), later())
             .unwrap();
-        let (mut log, mut shown, mut buffer, mut revision) =
-            (Vec::new(), Vec::new(), String::new(), 1);
+        let (mut log, mut shown, mut indicated, mut buffer, mut revision) =
+            (Vec::new(), Vec::new(), Vec::new(), String::new(), 1);
+        let (mut ascii, mut full) = (false, false);
         // 宿主停用即断开管道，读取失败结束服务。
         while let Ok(frame) = pipe.receive_frame(later()) {
             let request = match decode(&frame).unwrap() {
@@ -385,6 +401,12 @@ fn backend(
                 Message::Show(panel) => {
                     shown.push(panel);
                     pipe.send_frame(&encode(&Message::Shown).unwrap(), later())
+                        .unwrap();
+                    continue;
+                }
+                Message::Indicator(visible) => {
+                    indicated.push(visible);
+                    pipe.send_frame(&encode(&Message::Noted).unwrap(), later())
                         .unwrap();
                     continue;
                 }
@@ -410,6 +432,18 @@ fn backend(
                     buffer.clear();
                     Reply::Cleared(state("", revision))
                 }
+                // 同引擎：英文模式不处理字母。
+                Command::Key {
+                    key: Key::Character(_),
+                    ..
+                } if ascii => Reply::Key(KeyOutcome {
+                    handled: false,
+                    commit: None,
+                    state: InputState {
+                        ascii_mode: true,
+                        ..state("", revision)
+                    },
+                }),
                 Command::Key {
                     key: Key::Character(c),
                     ..
@@ -424,6 +458,37 @@ fn backend(
                 Command::Key {
                     key: Key::Space, ..
                 } => commit(&mut buffer, 0),
+                Command::Key {
+                    key: Key::ToggleAscii,
+                    ..
+                } => {
+                    // 同引擎：组合中切换把编码原样上屏。
+                    ascii = !ascii;
+                    let raw = std::mem::take(&mut buffer);
+                    Reply::Key(KeyOutcome {
+                        handled: true,
+                        commit: (!raw.is_empty()).then_some(raw),
+                        state: InputState {
+                            ascii_mode: ascii,
+                            ..state(&buffer, revision)
+                        },
+                    })
+                }
+                // 全角只翻开关，组合原样保留。
+                Command::Key {
+                    key: Key::ToggleFullShape,
+                    ..
+                } => {
+                    full = !full;
+                    Reply::Key(KeyOutcome {
+                        handled: true,
+                        commit: None,
+                        state: InputState {
+                            full_shape: full,
+                            ..state(&buffer, revision)
+                        },
+                    })
+                }
                 Command::Select { index, .. } => commit(&mut buffer, index as usize),
                 _ => Reply::Rejected(Rejection::Unavailable),
             };
@@ -434,7 +499,7 @@ fn backend(
             pipe.send_frame(&encode(&response).unwrap(), later())
                 .unwrap();
         }
-        (log, shown)
+        (log, shown, indicated)
     });
     (server, bound)
 }
@@ -469,6 +534,7 @@ fn class_factory_exposes_only_the_tip_and_the_module_never_unloads() {
     assert!(tip.cast::<ITfTextInputProcessor>().is_ok());
     assert!(tip.cast::<ITfKeyEventSink>().is_ok());
     assert!(tip.cast::<ITfThreadMgrEventSink>().is_ok());
+    assert!(tip.cast::<ITfThreadFocusSink>().is_ok());
     // 显示属性与 UILess 候选接口未实现，不得冒充。
     assert!(tip.cast::<ITfDisplayAttributeProvider>().is_err());
     assert!(tip.cast::<ITfCandidateListUIElement>().is_err());
@@ -502,11 +568,11 @@ fn activation_pairs_sinks_and_a_refused_key_sink_rolls_back_the_thread_sink() {
         tip.Deactivate().unwrap();
     }
     assert!(manager.sinks.borrow().is_empty() && manager.keys.get().is_none());
-    // 失败的激活不登记图标；成功激活登记一个，停用时注销。
-    assert!(manager.items.borrow().is_empty());
+    // 失败的激活不登记图标与线程焦点 sink；成功激活各登记一个，停用时注销。
+    assert!(manager.items.borrow().is_empty() && manager.focus.borrow().is_none());
     assert_eq!(
         *manager.released.borrow(),
-        ["thread", "indicator", "keys", "thread", "keyboard"]
+        ["thread", "indicator", "keys", "thread", "focus", "keyboard"]
     );
 }
 
@@ -556,10 +622,12 @@ fn activation_opens_a_closed_keyboard_and_reopens_it_until_deactivated() {
             "indicator",
             "keys",
             "thread",
+            "focus",
             "keyboard",
             "indicator",
             "keys",
             "thread",
+            "focus",
             "keyboard"
         ]
     );
@@ -604,6 +672,110 @@ fn unavailable_backend_or_inactive_service_passes_keys_without_touching_the_docu
     assert!(active.current_popup().is_none());
     // SAFETY: 停用释放 sink。
     unsafe { tip.Deactivate() }.unwrap();
+}
+
+#[test]
+fn taskbar_icon_follows_the_chinese_english_toggle_from_the_backend() {
+    let object = service();
+    let (server, bound) = backend(&object.namespace);
+    bound.recv().unwrap();
+    let (manager, thread_mgr) = manager();
+    let tip: ITfTextInputProcessorEx = object.to_interface();
+    // SAFETY: 合成线程管理器在本线程同步回调。
+    unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
+    let active = object.active().unwrap();
+    let (doc, context) = document();
+    let button = button(&manager);
+    // SAFETY: 本线程同步回调本 TIP 的图标按钮。
+    let tooltip = || unsafe { button.GetTooltipString() }.unwrap().to_string();
+    // SAFETY: 同上；左键单击图标。
+    let click = || unsafe { button.OnClick(TF_LBI_CLK_LEFT, POINT::default(), &RECT::default()) };
+    assert!(tooltip().contains("中文"));
+    // 单击 Shift 经后台翻转，图标按回复显示；再切回中文。
+    assert!(active.input(&context, Key::ToggleAscii, later()).unwrap());
+    assert!(tooltip().contains("英文"));
+    assert!(active.input(&context, Key::ToggleAscii, later()).unwrap());
+    assert!(tooltip().contains("中文"));
+    // 单击图标同样切换：无组合时直接交换，不碰文档。
+    click().unwrap();
+    assert!(tooltip().contains("英文"));
+    assert_eq!(text(&doc), "");
+    click().unwrap();
+    assert!(tooltip().contains("中文"));
+    // 组合中单击图标：经异步会话把编码原样上屏、收起候选并切到英文，同单击 Shift。
+    assert!(
+        active
+            .input(&context, Key::Character('u'), later())
+            .unwrap()
+    );
+    assert!(shown(&active).is_some());
+    click().unwrap();
+    assert_eq!(text(&doc), "u");
+    assert!(tooltip().contains("英文") && shown(&active).is_none());
+    assert!(
+        !active
+            .input(&context, Key::Character('u'), later())
+            .unwrap()
+    );
+    // 右键菜单第三项切换全角：只翻开关，不碰文档、不唤起窗口；再打开菜单时该项写成“切换到半角”（见 indicator 测试）。
+    assert!(!active.look().1);
+    right_click(&button, &[VK_DOWN, VK_DOWN, VK_DOWN, VK_RETURN]);
+    assert!(active.look().1);
+    assert_eq!(text(&doc), "u");
+    // SAFETY: 停用注销图标与 sink 并关闭管道。
+    unsafe { tip.Deactivate() }.unwrap();
+    let (log, panels, _) = server.join().unwrap();
+    assert!(panels.is_empty());
+    let toggles = log
+        .iter()
+        .filter(|command| {
+            matches!(
+                command,
+                Command::Key {
+                    key: Key::ToggleAscii,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(toggles, 5, "{log:?}");
+    assert_eq!(
+        log.last(),
+        Some(&Command::Key {
+            key: Key::ToggleFullShape,
+            epoch: 1
+        })
+    );
+}
+
+#[test]
+fn thread_focus_tells_the_backend_whether_the_taskbar_shows_this_input_method() {
+    let object = service();
+    let (server, bound) = backend(&object.namespace);
+    bound.recv().unwrap();
+    let (manager, thread_mgr) = manager();
+    manager.thread_focus.set(true);
+    let tip: ITfTextInputProcessorEx = object.to_interface();
+    // 在持有焦点的线程里激活即报告取得；之后失去、再取得各报告一次。
+    // SAFETY: 合成线程管理器在本线程同步回调。
+    unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
+    let sink = manager.focus.borrow().clone().unwrap();
+    // SAFETY: 模拟系统的线程焦点通知。
+    unsafe {
+        sink.OnKillThreadFocus().unwrap();
+        sink.OnSetThreadFocus().unwrap();
+    }
+    // 停用断开连接即等同失去，不另发报告。
+    // SAFETY: 停用注销 sink 并关闭管道。
+    unsafe { tip.Deactivate() }.unwrap();
+    assert_eq!(
+        *manager.released.borrow(),
+        ["indicator", "keys", "thread", "focus", "keyboard"]
+    );
+    let (log, panels, indicated) = server.join().unwrap();
+    assert_eq!(indicated, [true, false, true]);
+    // 焦点报告不打开会话、不唤起窗口。
+    assert!(log.is_empty() && panels.is_empty());
 }
 
 /// 当前展示的编号与候选行；未显示时为 None。
@@ -657,13 +829,11 @@ fn activated_service_shows_candidates_selects_by_click_and_refocuses_after_focus
     assert_eq!(text(&doc), "的");
     assert!(shown(&active).is_none() && !popup.showing(serial));
     // 后台可用：走系统右键的真实入口 OnClick(右键)，真实菜单里选“设置”“查字”，Esc 取消不发；
-    // 再左键单击。都经同一连接唤起，不另开会话（下方请求记录里没有新的 Open）。
+    // 都经同一连接唤起，不另开会话（下方请求记录里没有新的 Open）。
     let button = button(&manager);
     right_click(&button, &[VK_DOWN, VK_RETURN]);
     right_click(&button, &[VK_DOWN, VK_DOWN, VK_RETURN]);
     right_click(&button, &[VK_ESCAPE]);
-    // SAFETY: 本线程同步回调本 TIP 的图标按钮。
-    unsafe { button.OnClick(TF_LBI_CLK_LEFT, POINT::default(), &RECT::default()) }.unwrap();
     let focus: ITfThreadMgrEventSink = object.to_interface();
     // SAFETY: 模拟文档焦点变化；参数为空表示焦点离开本线程文档。
     unsafe { focus.OnSetFocus(None, None) }.unwrap();
@@ -696,15 +866,17 @@ fn activated_service_shows_candidates_selects_by_click_and_refocuses_after_focus
     assert!(active.current_popup().is_none() && !popup.showing(serial));
     assert_eq!(
         *manager.released.borrow(),
-        ["indicator", "keys", "thread", "keyboard"]
+        ["indicator", "keys", "thread", "focus", "keyboard"]
     );
     let key = |key, epoch| Command::Key { key, epoch };
     let focus = |epoch| Command::Focus {
         epoch,
         focused: true,
     };
-    let (log, panels) = server.join().unwrap();
-    assert_eq!(panels, [Panel::Settings, Panel::Lookup, Panel::Settings]);
+    let (log, panels, indicated) = server.join().unwrap();
+    assert_eq!(panels, [Panel::Settings, Panel::Lookup]);
+    // 线程未持有输入焦点：任务栏不显示本输入法图标，不报告、不让后台隐藏通知区图标。
+    assert!(indicated.is_empty());
     let Command::Select { revision, .. } = log[6] else {
         panic!("第七个请求应是选字：{log:?}");
     };

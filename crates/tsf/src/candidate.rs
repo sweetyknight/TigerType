@@ -168,7 +168,7 @@ const fn themed(p: Palette) -> Colors {
         muted: rgb(p.muted),
         faint: rgb(p.faint),
         highlight: rgb(p.highlight),
-        chosen: rgb(p.text),
+        chosen: rgb(p.chosen),
         chosen_hint: rgb(p.highlight_text),
         bar: rgb(p.accent),
     }
@@ -604,7 +604,7 @@ impl Popup {
             let _ = EndPaint(self.hwnd, &paint);
         }
     }
-    /// 按设计稿绘制：高亮行为圆角底色加左侧指示条，注释列对齐，页脚以分隔线隔开。
+    /// 按设计稿绘制：高亮行为圆角底色加左侧指示条（无底色主题只换字色），注释列对齐，页脚以分隔线隔开。
     pub(crate) fn draw(&self, dc: HDC, client: &RECT) {
         let Ok(view) = self.view.try_borrow() else {
             return;
@@ -630,7 +630,8 @@ impl Popup {
         };
         for (index, (candidate, rect)) in state.candidates.iter().zip(&layout.rows).enumerate() {
             let chosen = state.highlighted == Some(index);
-            if chosen {
+            // 高亮底与窗口同色的主题（玫红）只靠字色区分，不画底色与指示条。
+            if chosen && c.highlight != c.window {
                 round(dc, rect, s(4), Some(c.highlight), c.highlight);
                 let top = (rect.top + rect.bottom - s(16)) / 2;
                 let bar = RECT {

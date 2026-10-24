@@ -1,12 +1,19 @@
 //! 后台常驻的通知区图标：不依赖前台程序与当前输入法，任何时候单击都打开设置页，右键菜单打开设置页或查字窗。
+//! 前台程序正用 TigerType 时任务栏已有本输入法图标，此时隐藏通知区图标，同一时刻只显示一个。
+//! 打开溢出区等操作把前台交给任务栏，宿主随之报告失去焦点，但任务栏仍显示先前程序的输入法图标，
+//! 所以前台是任务栏或其弹出面板时保持隐藏，等前台换到其他窗口（进程外 WinEvent 回调，不注入）再定。
 //! 只在后台固定 UI 线程；回调不存业务状态、不分配，选择经线程消息交给事件循环。
-//! 登录早期资源管理器尚未就绪或其后重启时，都靠 TaskbarCreated 广播重新挂上。
+//! 登录早期资源管理器尚未就绪或其后重启时，都靠 TaskbarCreated 广播重新挂上（保持当前显隐）。
 use super::*;
+use crate::Latest;
+use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows_sys::Win32::UI::{
+    Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
     Controls::ODT_MENU,
     Shell::{
-        NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION,
-        NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
+        NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_STATE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+        NIM_SETVERSION, NIN_SELECT, NIS_HIDDEN, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
+        Shell_NotifyIconW,
     },
 };
 
@@ -23,6 +30,67 @@ const ITEMS: [(u32, &str, Panel); 2] = [(1, "设置", Panel::Settings), (2, "查
 thread_local! {
     // 当前登记给通知区的图标；系统未承诺复制图标，登记期间保持有效，换新或删除后才释放。
     static ICON: Cell<HICON> = const { Cell::new(null_mut()) };
+    // 已应用的显隐；资源管理器重启后重新登记时沿用。
+    static HIDDEN: Cell<bool> = const { Cell::new(false) };
+    // 后台最近给出的：是否有宿主持有任务栏输入法图标。
+    static HELD: Cell<bool> = const { Cell::new(false) };
+    // 本线程的图标窗口：前台切换回调不带上下文，借此找到要改的图标。
+    static WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
+}
+
+/// 任务栏及其弹出面板的窗口类：它们取得前台时任务栏仍显示先前程序的输入法图标。
+const SHELL: [&str; 5] = [
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "NotifyIconOverflowWindow",
+    "TopLevelWindowForOverflowXamlIsland",
+    "XamlExplorerHostIslandWindow",
+];
+fn shell(class: &[u16]) -> bool {
+    SHELL
+        .iter()
+        .any(|name| name.encode_utf16().eq(class.iter().copied()))
+}
+/// 有宿主持有时隐藏；无人持有时，前台是任务栏面板则维持现状，否则显示。
+fn decide(held: bool, hidden: bool, shell: bool) -> bool {
+    held || (hidden && shell)
+}
+/// 按当前持有与前台重新决定显隐，变化时才改登记的图标。不分配。
+fn refresh(hwnd: HWND) {
+    let mut class = [0u16; 64];
+    // SAFETY: 只读前台窗口类名到栈缓冲；无前台窗口时得 0 个字符。
+    let length = unsafe { GetClassNameW(GetForegroundWindow(), class.as_mut_ptr(), 64) };
+    let foreground = &class[..length.max(0) as usize];
+    let hidden = decide(HELD.get(), HIDDEN.get(), shell(foreground));
+    if hidden == HIDDEN.replace(hidden) {
+        return;
+    }
+    let data = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: ICON_ID,
+        uFlags: NIF_STATE,
+        dwState: if hidden { NIS_HIDDEN } else { 0 },
+        dwStateMask: NIS_HIDDEN,
+        ..Default::default()
+    };
+    // SAFETY: 结构大小已填，只改本窗口登记图标的隐藏位；未登记时系统只返回失败。
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
+}
+// SAFETY: 系统在本 UI 线程取消息时调用（进程外钩子）；只读线程局部状态并改本线程的图标，不分配。
+unsafe extern "system" fn foreground(
+    _: HWINEVENTHOOK,
+    _: u32,
+    _: HWND,
+    _: i32,
+    _: i32,
+    _: u32,
+    _: u32,
+) {
+    let hwnd = WINDOW.get();
+    if !hwnd.is_null() {
+        refresh(hwnd);
+    }
 }
 
 pub(super) fn encode(panel: Panel) -> WPARAM {
@@ -51,6 +119,8 @@ fn utf16<const N: usize>(text: &str) -> [u16; N] {
 pub(super) struct Tray {
     hwnd: HWND,
     class: [u16; 32],
+    // 前台切换钩子；装不上时只是打开溢出区后图标可能多显示一会儿。
+    hook: HWINEVENTHOOK,
 }
 impl Tray {
     /// 隐藏的顶层窗口接收图标回调与 TaskbarCreated 广播（仅消息窗口收不到广播），从不显示。
@@ -87,7 +157,18 @@ impl Tray {
                 UnregisterClassW(class.as_ptr(), GetModuleHandleW(null()));
                 return Err(failure);
             }
-            Ok(Self { hwnd, class })
+            WINDOW.set(hwnd);
+            // 进程外钩子：回调在本线程取消息时执行，不向其他进程注入；Drop 时配对注销。
+            let hook = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                null_mut(),
+                Some(foreground),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
+            Ok(Self { hwnd, class, hook })
         }
     }
     /// 建窗口并挂图标；资源管理器尚未就绪时登记失败，等 TaskbarCreated 再挂，不算故障。
@@ -95,6 +176,14 @@ impl Tray {
         let tray = Self::window()?;
         add(tray.hwnd);
         Ok(tray)
+    }
+    /// 取走后台给出的最新持有状态并重新决定显隐；图标尚未登记时只记下，登记时生效。
+    pub(super) fn sync(&self, taskbar: &Latest<bool>) -> Result<(), String> {
+        if let Some(held) = taskbar.take()? {
+            HELD.set(held);
+            refresh(self.hwnd);
+        }
+        Ok(())
     }
 }
 impl Drop for Tray {
@@ -105,8 +194,12 @@ impl Drop for Tray {
             uID: ICON_ID,
             ..Default::default()
         };
-        // SAFETY: 删除本窗口登记的图标（未登记时系统只返回失败），再释放图标、销毁窗口并注销类，均在创建线程。
+        // SAFETY: 注销钩子、删除本窗口登记的图标（未登记时系统只返回失败），再释放图标、销毁窗口并注销类，均在创建线程。
         unsafe {
+            if !self.hook.is_null() {
+                UnhookWinEvent(self.hook);
+            }
+            WINDOW.set(null_mut());
             Shell_NotifyIconW(NIM_DELETE, &data);
             let icon = ICON.with(|icon| icon.replace(null_mut()));
             if !icon.is_null() {
@@ -127,10 +220,12 @@ fn add(hwnd: HWND) -> bool {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: ICON_ID,
-        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
+        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP | NIF_STATE,
         uCallbackMessage: NOTIFY,
         hIcon: icon,
         szTip: utf16("TigerType 虎码：单击打开设置，右键更多"),
+        dwState: if HIDDEN.get() { NIS_HIDDEN } else { 0 },
+        dwStateMask: NIS_HIDDEN,
         ..Default::default()
     };
     data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
@@ -152,10 +247,58 @@ fn add(hwnd: HWND) -> bool {
     }
 }
 
-/// 现画小图标，与 TSF 任务栏输入法图标同样式：琥珀主题强调色圆角底上的白色“虎”，圆角外透明，无蓝色。
+/// 深浅色切换后重画图标并原位替换（不删再加，图标不挪位置）；成功后才释放旧图标。
+fn recolor(hwnd: HWND) {
+    let Some(icon) = icon() else {
+        return;
+    };
+    let data = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: ICON_ID,
+        uFlags: NIF_ICON,
+        hIcon: icon,
+        ..Default::default()
+    };
+    // SAFETY: 结构大小已填，图标在调用期间有效；未登记时系统只返回失败，新图标随即释放。
+    unsafe {
+        let old = if Shell_NotifyIconW(NIM_MODIFY, &data) != 0 {
+            ICON.with(|slot| slot.replace(icon))
+        } else {
+            icon
+        };
+        if !old.is_null() {
+            DestroyIcon(old);
+        }
+    }
+}
+
+/// 任务栏是否为浅色：系统“Windows 模式”设置，读不到按深色（Win10 默认）。
+fn light_taskbar() -> bool {
+    let mut value = 0u32;
+    let mut size = size_of::<u32>() as u32;
+    let key = utf16::<64>(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let name = utf16::<24>("SystemUsesLightTheme");
+    // SAFETY: 名称 NUL 结尾，输出缓冲为本地 DWORD 且大小已填；只读当前用户的一个值。
+    let read = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            null_mut(),
+            (&mut value as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    read == 0 && value != 0
+}
+
+/// 现画小图标：与任务栏输入法图标同风格，只画一个“虎”字、底全透明，字色随任务栏深浅，无蓝色。
+/// TSF 输入法图标显示中英状态，品牌“虎”只在此处，两处不重复。
 fn icon() -> Option<HICON> {
     const MAX: i32 = 256;
-    let accent = rgb(Theme::Amber.preset()?.accent);
+    let ink = if light_taskbar() { 0x1A1A1A } else { 0xFFFFFF };
     // SAFETY: 系统度量查询无副作用。
     let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, MAX);
     let info = BITMAPINFO {
@@ -182,13 +325,13 @@ fn icon() -> Option<HICON> {
         let mut bits = null_mut();
         let color = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
         let mask = CreateBitmap(size, size, 1, 1, mask_bits.as_ptr().cast());
-        // 灰度抗锯齿：ClearType 的彩色边缘可能偏蓝。
+        // 灰度抗锯齿：ClearType 的彩色边缘可能偏蓝。字身取图标的 3/4，与任务栏输入法图标一致。
         let font = CreateFontW(
-            -(size * 7 / 8),
+            -(size * 3 / 4),
             0,
             0,
             0,
-            FW_BOLD as i32,
+            FW_NORMAL as i32,
             0,
             0,
             0,
@@ -206,30 +349,24 @@ fn icon() -> Option<HICON> {
             && !font.is_null()
             && !bits.is_null()
         {
+            // 新 DIB 全零（黑）；白字画上去后各通道即覆盖率。
             let old_bitmap = SelectObject(dc, color);
-            let area = RECT {
-                left: 0,
-                top: 0,
-                right: size,
-                bottom: size,
-            };
-            round(dc, &area, size / 4, Some(accent), accent);
-            draw_text(
-                dc,
-                font,
-                rgb(0xFFFFFF),
-                &glyph[..1],
-                area,
-                DT_CENTER | DT_NOPREFIX,
-            );
+            let old_font = SelectObject(dc, font);
+            SetBkMode(dc, TRANSPARENT as _);
+            SetTextColor(dc, rgb(0xFFFFFF));
+            let (x, y) = centered(dc, glyph[0], size);
+            SetTextAlign(dc, TA_BASELINE | TA_LEFT);
+            TextOutW(dc, x, y, glyph.as_ptr(), 1);
             GdiFlush();
+            SelectObject(dc, old_font);
             SelectObject(dc, old_bitmap);
-            // GDI 不写 alpha：底色与字都非零，圆角外仍为 0，据此补出不透明区域。
+            // 覆盖率当 alpha、像素换成字色（非预乘 ARGB），覆盖率为 0 处全透明。
             for pixel in std::slice::from_raw_parts_mut(bits.cast::<u32>(), (size * size) as usize)
             {
-                if *pixel != 0 {
-                    *pixel |= 0xFF00_0000;
-                }
+                let alpha = (*pixel >> 16 & 0xFF)
+                    .max(*pixel >> 8 & 0xFF)
+                    .max(*pixel & 0xFF);
+                *pixel = if alpha == 0 { 0 } else { alpha << 24 | ink };
             }
             let icon = CreateIconIndirect(&ICONINFO {
                 fIcon: 1,
@@ -250,6 +387,42 @@ fn icon() -> Option<HICON> {
         }
         result
     }
+}
+
+/// 按字形墨迹框居中，返回基线起点：GDI 的垂直居中按字符单元算，雅黑的单元比汉字高，
+/// 字会偏下甚至被裁掉底边。取不到字形度量时退回按字身估算。
+/// SAFETY: 调用方保证 dc 有效且已选入目标字体。
+unsafe fn centered(dc: HDC, glyph: u16, size: i32) -> (i32, i32) {
+    let one = FIXED { fract: 0, value: 1 };
+    let identity = MAT2 {
+        eM11: one,
+        eM12: FIXED { fract: 0, value: 0 },
+        eM21: FIXED { fract: 0, value: 0 },
+        eM22: one,
+    };
+    // SAFETY: GLYPHMETRICS 为纯数据，全零合法。
+    let mut metrics: GLYPHMETRICS = unsafe { std::mem::zeroed() };
+    // SAFETY: 只取度量（GGO_METRICS 不写缓冲），输出结构为本地值。
+    let read = unsafe {
+        GetGlyphOutlineW(
+            dc,
+            glyph.into(),
+            GGO_METRICS,
+            &mut metrics,
+            0,
+            null_mut(),
+            &identity,
+        )
+    };
+    if read == GDI_ERROR as u32 {
+        return (size / 8, size * 7 / 8);
+    }
+    let (width, height) = (metrics.gmBlackBoxX as i32, metrics.gmBlackBoxY as i32);
+    let origin = metrics.gmptGlyphOrigin;
+    (
+        (size - width) / 2 - origin.x,
+        (size - height) / 2 + origin.y,
+    )
 }
 
 /// 右键菜单：自绘菜单项（保留文字供读屏器朗读），底色与高亮按主题，不用系统蓝色高亮。
@@ -354,6 +527,21 @@ fn draw_menu_item(item: &DRAWITEMSTRUCT) {
     }
 }
 
+/// 逐单元比对 NUL 结尾的宽字符串，不分配；遇到首个不同（含对方提前结束的 NUL）即停，不越过其结尾。
+/// SAFETY: 调用方保证 text 指向 NUL 结尾的宽字符串。
+unsafe fn named(text: *const u16, name: &str) -> bool {
+    let mut index = 0;
+    for unit in name.encode_utf16() {
+        // SAFETY: 之前各单元都相等且非 NUL，故尚未越过结尾。
+        if unsafe { *text.add(index) } != unit {
+            return false;
+        }
+        index += 1;
+    }
+    // SAFETY: 同上。
+    unsafe { *text.add(index) == 0 }
+}
+
 // SAFETY: 系统在后台 UI 线程调用；不解引用业务指针、不保存状态、不分配；自绘结构只在本次回调内读取。
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     // SAFETY: 自绘结构指针由系统给出且已判空，只在本次回调内使用。
@@ -390,6 +578,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 draw_menu_item(item);
                 1
             }
+            // 切换深浅色时系统广播设置名 ImmersiveColorSet，按新任务栏底色重画图标。
+            WM_SETTINGCHANGE if l != 0 && named(l as *const u16, "ImmersiveColorSet") => {
+                recolor(hwnd);
+                0
+            }
             // 登记消息编号从 0xC000 起，只在这一段比对，避免每条消息都查询。
             _ if message >= 0xC000
                 && message == RegisterWindowMessageW(utf16::<16>("TaskbarCreated").as_ptr()) =>
@@ -402,18 +595,29 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
     }
 }
 
-/// 首次唤起前只有通知区图标：等唤起信号或图标操作，期间照常派发图标消息；不建查字/设置窗。
+/// 首次唤起前只有通知区图标：等唤起信号或图标操作，期间照常派发图标消息、同步图标显隐；不建查字/设置窗。
 /// 返回 None 表示后台停止（唤起邮箱断开或收到正常退出）。
-pub(super) fn first(show: &Inbox<Panel>) -> Result<Option<Panel>, String> {
-    let event = show.event.as_raw_handle();
+pub(super) fn first(
+    show: &Inbox<Panel>,
+    tray: &Tray,
+    taskbar: &Latest<bool>,
+) -> Result<Option<Panel>, String> {
+    let events = [show.event.as_raw_handle(), taskbar.event().as_raw_handle()];
     loop {
-        // SAFETY: Inbox 持有事件直到函数返回；消息与唤起共用一次阻塞等待，空闲不耗 CPU。
+        // SAFETY: Inbox 与交接槽持有事件直到函数返回；消息、唤起与显隐共用一次阻塞等待，空闲不耗 CPU。
         let wait = unsafe {
-            MsgWaitForMultipleObjectsEx(1, &event, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+            MsgWaitForMultipleObjectsEx(
+                2,
+                events.as_ptr(),
+                INFINITE,
+                QS_ALLINPUT,
+                MWMO_INPUTAVAILABLE,
+            )
         };
         if wait == WAIT_FAILED {
             return Err(error());
         }
+        tray.sync(taskbar)?;
         match show.receiver.try_recv() {
             Ok(panel) => return Ok(Some(panel)),
             Err(TryRecvError::Empty) => {}
@@ -445,6 +649,8 @@ mod tests {
     fn icon_events_and_show_signals_open_the_right_panel_without_touching_the_tray() {
         let tray = Tray::window().unwrap();
         let (sender, show) = crate::mailbox::<Panel>().unwrap();
+        let taskbar = Latest::new().unwrap();
+        let first = |show| first(show, &tray, &taskbar);
         // 单击与键盘确认都打开设置页；其他鼠标事件不打开任何窗口。
         for event in [WM_MOUSEMOVE, NIN_SELECT, NIN_KEYSELECT] {
             // SAFETY: 本线程同步调用隐藏窗口的过程，参数为值类型。
@@ -452,10 +658,15 @@ mod tests {
         }
         assert_eq!(first(&show).unwrap(), Some(Panel::Settings));
         assert_eq!(first(&show).unwrap(), Some(Panel::Settings));
+        // 等待首次唤起期间也取走后台给出的持有状态（本测试未登记图标，只改线程状态）；持有即隐藏。
+        taskbar.set(true).unwrap();
         post(tray.hwnd, OPEN, encode(Panel::Lookup));
         assert_eq!(first(&show).unwrap(), Some(Panel::Lookup));
+        assert!(HELD.get() && HIDDEN.get());
+        taskbar.set(false).unwrap();
         sender.send(Panel::Lookup).unwrap();
         assert_eq!(first(&show).unwrap(), Some(Panel::Lookup));
+        assert!(!HELD.get());
         drop(sender);
         assert_eq!(first(&show).unwrap(), None);
         for panel in [Panel::Settings, Panel::Lookup] {
@@ -464,7 +675,24 @@ mod tests {
     }
 
     #[test]
-    fn icon_is_an_opaque_badge_with_transparent_corners_and_no_blue() {
+    fn taskbar_flyouts_keep_the_icon_hidden_until_another_window_takes_the_foreground() {
+        let wide = |text: &str| text.encode_utf16().collect::<Vec<_>>();
+        assert!(shell(&wide("TopLevelWindowForOverflowXamlIsland")));
+        assert!(shell(&wide("Shell_TrayWnd")));
+        // 只认完整类名：前缀、普通程序窗口与桌面都不算任务栏。
+        for class in ["Shell_Tray", "Notepad", "Progman", ""] {
+            assert!(!shell(&wide(class)), "{class}");
+        }
+        // 有宿主持有即隐藏；失去时前台在任务栏面板则维持隐藏，换到其他窗口才显示；
+        // 原本显示时任务栏面板取得前台不会让它隐藏。
+        assert!(decide(true, false, false));
+        assert!(decide(false, true, true));
+        assert!(!decide(false, true, false));
+        assert!(!decide(false, false, true));
+    }
+
+    #[test]
+    fn icon_is_a_bare_glyph_in_the_taskbar_ink_on_a_transparent_background() {
         let icon = icon().unwrap();
         let mut info = ICONINFO::default();
         // SAFETY: 读回本测试刚建的图标位图，读完删除位图与图标。
@@ -505,12 +733,44 @@ mod tests {
             DeleteObject(info.hbmMask);
             DestroyIcon(icon);
             assert_eq!(rows, size);
+            // 没有底板：角上透明、可见像素只占少数且有完全不透明的笔画，可见像素一律是任务栏字色（无蓝）。
+            let ink = if light_taskbar() { 0x1A1A1A } else { 0xFFFFFF };
             assert_eq!(pixels[0] >> 24, 0);
-            assert_eq!(pixels[(size / 2 * size + size / 2) as usize] >> 24, 0xFF);
-            for pixel in pixels.iter().filter(|p| *p >> 24 != 0) {
-                let (r, g, b) = (pixel >> 16 & 0xFF, pixel >> 8 & 0xFF, pixel & 0xFF);
-                assert!(b <= r && b <= g, "{pixel:08X}");
+            let visible: Vec<u32> = pixels.iter().copied().filter(|p| p >> 24 != 0).collect();
+            assert!(
+                visible.len() * 2 < pixels.len(),
+                "{}/{}",
+                visible.len(),
+                pixels.len()
+            );
+            assert!(visible.iter().any(|p| p >> 24 == 0xFF));
+            // 字形按墨迹居中：四边都不贴边，上下、左右留白相差不超过 1px。
+            let inked = |at: &dyn Fn(i32) -> bool| (0..size).filter(|&k| at(k)).collect::<Vec<_>>();
+            let rows = inked(&|y| (0..size).any(|x| pixels[(y * size + x) as usize] >> 24 != 0));
+            let cols = inked(&|x| (0..size).any(|y| pixels[(y * size + x) as usize] >> 24 != 0));
+            for span in [rows, cols] {
+                let (first, last) = (span[0], span[span.len() - 1]);
+                assert!(first >= 1 && last <= size - 2, "{first}..{last} / {size}");
+                assert!(
+                    (first - (size - 1 - last)).abs() <= 1,
+                    "{first}..{last} / {size}"
+                );
             }
+            for pixel in visible {
+                assert_eq!(pixel & 0xFF_FFFF, ink, "{pixel:08X}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_color_mode_setting_name_triggers_a_recolor() {
+        let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        // SAFETY: 测试字符串均 NUL 结尾。
+        let named = |text: &str| unsafe { named(wide(text).as_ptr(), "ImmersiveColorSet") };
+        assert!(named("ImmersiveColorSet"));
+        // 前缀、加长与其他设置名都不算。
+        for other in ["Immersive", "ImmersiveColorSetX", "Policy", ""] {
+            assert!(!named(other), "{other}");
         }
     }
 }

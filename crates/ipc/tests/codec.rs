@@ -124,6 +124,9 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
         Message::Show(Panel::Lookup),
         Message::Show(Panel::Settings),
         Message::Shown,
+        Message::Indicator(true),
+        Message::Indicator(false),
+        Message::Noted,
         Message::Welcome {
             generation: 7,
             host: 8,
@@ -261,6 +264,14 @@ fn old_bodies_are_rejected_under_the_current_header() {
         .remove("ascii_punctuation")
         .unwrap();
     assert!(decode(&raw(&serde_json::to_vec(&v5_state).unwrap())).is_err());
+    // v10 状态缺少全角开关，同样拒绝。
+    let mut v10_state = serde_json::to_value(reply(Reply::Opened(InputState::default()))).unwrap();
+    v10_state["value"]["reply"]["value"]
+        .as_object_mut()
+        .unwrap()
+        .remove("full_shape")
+        .unwrap();
+    assert!(decode(&raw(&serde_json::to_vec(&v10_state).unwrap())).is_err());
     for body in [
         r#"{"type":"notification","value":{"token":{"host":1,"generation":1,"session":1,"focus":1,"revision":1},"reset":false}}"#,
         r#"{"type":"request","value":{"route":{"generation":1,"request_id":1,"session_id":1},"command":{"type":"take_selection","value":{"epoch":1}}}}"#,

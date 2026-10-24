@@ -1,6 +1,6 @@
 //! 隐藏候选窗：不在桌面显示、不注入系统输入，鼠标消息直接发给本测试线程的窗口。
 use super::*;
-use tigertype_contracts::{Candidate, Theme};
+use tigertype_contracts::{Candidate, Theme, without_blue};
 use windows::{
     Win32::{
         System::{
@@ -88,9 +88,10 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
         }
         .palette();
         let c = themed(palette);
-        for color in [c.window, c.highlight, c.bar, c.text, c.border] {
+        for color in [c.window, c.highlight, c.bar, c.text, c.chosen, c.border] {
             let [red, green, blue, _] = color.0.to_le_bytes();
-            assert!(blue <= red && blue <= green, "{theme:?} {color:?}");
+            let value = u32::from_be_bytes([0, red, green, blue]);
+            assert!(without_blue(value), "{theme:?} {color:?}");
         }
     }
     let popup = Popup::new(|_, _| {}, true).unwrap();
@@ -115,6 +116,24 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
             pixel(chosen.left + 1, (chosen.top + chosen.bottom) / 2),
             c.bar
         );
+        // 玫红主题高亮行无底色、无指示条，只把字染成玫红。
+        shown.options.theme = Theme::Rose;
+        popup.show(&shown, CARET, HWND::default()).unwrap();
+        let layout = popup.view.borrow().layout.clone();
+        let c = themed(shown.options.palette());
+        let pixel = render(&popup, layout.size);
+        let chosen = layout.rows[1];
+        let middle = (chosen.top + chosen.bottom) / 2;
+        assert_eq!(pixel(chosen.left + 1, middle), c.window);
+        assert_eq!(pixel(chosen.left + 10, chosen.top + 2), c.window);
+        let reddish = (layout.text_x..chosen.right).any(|x| {
+            (chosen.top..chosen.bottom).any(|y| {
+                let [red, green, ..] = pixel(x, y).0.to_le_bytes();
+                red > green.saturating_add(96)
+            })
+        });
+        assert!(reddish, "高亮候选字应为玫红");
+        shown.options.theme = Theme::Bamboo;
     }
     // 还有下一页或拼音反查时才出现页脚。
     shown.is_last_page = false;

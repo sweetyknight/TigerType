@@ -1,12 +1,12 @@
 //! 每登录会话一后台：固定反应器/引擎线程，16 个预建请求管道，不按连接创建线程。
 //! 宿主只凭 DACL 与同会话接纳，不打开宿主进程；断开由常驻读失败发现，始终保留至少一个空闲监听槽。
 //! 查字/设置窗在同进程的固定 UI 线程，保存后的设置经交接槽热重载到引擎线程，输入路径不读盘。
+//! 持有输入焦点的宿主线程会报告任务栏正显示本输入法图标，此时经另一交接槽让 UI 线程隐藏通知区图标。
 use crate::{Result, data::Data, dispatch::Dispatcher, import, lookup::Controller};
 use std::{
-    io,
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    os::windows::io::AsRawHandle,
     path::Path,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -21,41 +21,43 @@ use tigertype_ipc::{
     pipe::{Listener, Pending, Pipe, Runtime, grant_app_container_query},
     service::HOST_SLOTS,
 };
-use tigertype_ui::ReplySender;
+use tigertype_ui::{Latest, ReplySender};
 use windows_sys::Win32::{
     Foundation::WAIT_FAILED,
     Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
-    System::Threading::{CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects},
+    System::Threading::{INFINITE, SetEvent, WaitForMultipleObjects},
 };
 
-/// 查字工作线程保存设置后交给引擎线程的最新设置：只留最后一份，事件唤醒引擎，不排队、不轮询。
-struct Reload {
-    latest: Mutex<Option<Options>>,
-    event: OwnedHandle,
+/// 交给后台 UI 线程的信号：唤起查字/设置窗，与通知区图标显隐。正式后台才有 UI 线程，测试可接入核对。
+/// 任务栏输入法图标的持有者是最近报告取得输入焦点的宿主：有持有者时任务栏已显示本输入法图标，
+/// 通知区图标隐藏，同一时刻只显示一个；旧版宿主从不报告，通知区图标照常可用。
+#[derive(Default)]
+struct Ui {
+    // 随 Server 释放而断开，UI 线程据此退出。
+    show: Option<ReplySender<Panel>>,
+    holder: Option<u64>,
+    hidden: bool,
+    taskbar: Option<Arc<Latest<bool>>>,
 }
-impl Reload {
-    fn new() -> Result<Self> {
-        // SAFETY: 无命名、不可继承的自动复位事件；成功后立即交给 OwnedHandle 配对释放。
-        let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
-        if event.is_null() {
-            return Err(io::Error::last_os_error().into());
+impl Ui {
+    /// 后到的取得覆盖先前持有者；失去只清除自己，与他人取得乱序到达时不会误显通知区图标。
+    fn report(&mut self, host: u64, visible: bool) {
+        if visible {
+            self.holder = Some(host);
+        } else if self.holder == Some(host) {
+            self.holder = None;
         }
-        Ok(Self {
-            latest: Mutex::new(None),
-            // SAFETY: 句柄刚创建，尚无其他所有者。
-            event: unsafe { OwnedHandle::from_raw_handle(event) },
-        })
+        self.publish();
     }
-    fn set(&self, options: Options) -> Result<()> {
-        *self.latest.lock().map_err(|_| "设置交接锁已损坏")? = Some(options);
-        // SAFETY: self 持有事件句柄；失败必须报错，不能让已保存的设置静默不生效。
-        if unsafe { SetEvent(self.event.as_raw_handle()) } == 0 {
-            return Err(io::Error::last_os_error().into());
+    /// 显隐只影响图标：交接失败不中断输入服务，下次事件再同步。
+    fn publish(&mut self) {
+        let hidden = self.holder.is_some();
+        if hidden != self.hidden
+            && let Some(taskbar) = &self.taskbar
+            && taskbar.set(hidden).is_ok()
+        {
+            self.hidden = hidden;
         }
-        Ok(())
-    }
-    fn take(&self) -> Result<Option<Options>> {
-        Ok(self.latest.lock().map_err(|_| "设置交接锁已损坏")?.take())
     }
 }
 
@@ -190,7 +192,7 @@ impl Slot {
         options: Options,
         image: &Path,
         clock: &mut u64,
-        show: Option<&ReplySender<Panel>>,
+        ui: &mut Ui,
     ) -> Result<()> {
         let Some(event) = self.end.tick()? else {
             return Ok(());
@@ -213,8 +215,13 @@ impl Slot {
             }
             Message::Show(panel) if self.host.is_some() => {
                 // 宿主图标菜单与管理端都可唤起：只投递信号、不改数据，因此不核对映像；窗口由 UI 线程创建。
-                show.ok_or("此后台未提供查字窗")?.send(panel)?;
+                ui.show.as_ref().ok_or("此后台未提供查字窗")?.send(panel)?;
                 tigertype_ipc::encode(&Message::Shown)?
+            }
+            Message::Indicator(visible) if self.host.is_some() => {
+                // 先交给 UI 线程再确认，宿主收到确认时图标显隐已经提交。
+                ui.report(self.host.ok_or("握手前收到图标报告")?, visible);
+                tigertype_ipc::encode(&Message::Noted)?
             }
             Message::Hello if self.host.is_none() => {
                 let host = dispatch.add_host()?;
@@ -246,9 +253,8 @@ pub struct Server<'a> {
     options: Options,
     image: std::path::PathBuf,
     clock: u64,
-    reload: Arc<Reload>,
-    // 正式后台才有查字 UI 线程；随 Server 释放而断开，UI 线程据此退出。
-    show: Option<ReplySender<Panel>>,
+    reload: Arc<Latest<Options>>,
+    ui: Ui,
 }
 impl<'a> Server<'a> {
     /// namespace 在正式入口固定为 backend；测试使用新建独立标签，不连接现用后台。
@@ -286,14 +292,16 @@ impl<'a> Server<'a> {
             options,
             image: std::env::current_exe()?,
             clock: 0,
-            reload: Arc::new(Reload::new()?),
-            show: None,
+            reload: Arc::new(Latest::new()?),
+            ui: Ui::default(),
         })
     }
     fn remove(&mut self, index: usize) {
         if let Some(slot) = self.slots[index].take() {
             if let Some(host) = slot.host {
                 self.dispatch.remove_host(host);
+                // 宿主停用或断开等同失去输入焦点。
+                self.ui.report(host, false);
             }
             // 立即断开，宿主下次发送前的非阻塞检查即可发现，不必等取消回调关闭句柄。
             slot.end.pipe.disconnect();
@@ -304,7 +312,8 @@ impl<'a> Server<'a> {
             }
         }
     }
-    /// 最后一个空槽被占用或会话达上限时，回收最久未用、非焦点、无组合且无未读字节的宿主。
+    /// 最后一个空槽被占用或会话达上限时，回收最久未用、非焦点、无组合且无未读字节的宿主；
+    /// 持有任务栏图标的宿主不回收，否则通知区图标会与任务栏图标同时出现。
     /// 待重建的槽位算作空槽，避免旧实例释放前重复回收。
     fn reclaim(&mut self) {
         let free = self
@@ -320,7 +329,9 @@ impl<'a> Server<'a> {
             .enumerate()
             .filter_map(|(index, slot)| {
                 let slot = slot.as_ref()?;
-                (slot.quiet() && self.dispatch.idle(slot.host?)).then_some((slot.used, index))
+                let host = slot.host?;
+                (slot.quiet() && self.dispatch.idle(host) && self.ui.holder != Some(host))
+                    .then_some((slot.used, index))
             })
             .min();
         if let Some((_, index)) = victim {
@@ -354,7 +365,7 @@ impl<'a> Server<'a> {
                             self.options,
                             &self.image,
                             &mut self.clock,
-                            self.show.as_ref(),
+                            &mut self.ui,
                         )
                         .is_err()
                     {
@@ -369,6 +380,8 @@ impl<'a> Server<'a> {
                 }
             }
             self.reclaim();
+            // 补交此前交接失败的图标显隐。
+            self.ui.publish();
             let deadline = self
                 .slots
                 .iter()
@@ -383,9 +396,9 @@ impl<'a> Server<'a> {
             });
             let events = [
                 self.runtime.completion_event().as_raw_handle(),
-                self.reload.event.as_raw_handle(),
+                self.reload.event().as_raw_handle(),
             ];
-            // SAFETY: Runtime 与 Reload 持有两个事件；完成、热重载与最近期限共用一次等待，不等待宿主进程句柄。
+            // SAFETY: Runtime 与热重载交接槽持有两个事件；完成、热重载与最近期限共用一次等待，不等待宿主进程句柄。
             if unsafe { WaitForMultipleObjects(2, events.as_ptr(), 0, timeout) } == WAIT_FAILED {
                 return Err(std::io::Error::last_os_error().into());
             }
@@ -412,7 +425,9 @@ pub fn run(package: &Path, directory: &Path, show: bool) -> Result<()> {
     if show {
         show_sender.send(Panel::Lookup)?;
     }
-    server.show = Some(show_sender);
+    server.ui.show = Some(show_sender);
+    let taskbar = Arc::new(Latest::new()?);
+    server.ui.taskbar = Some(taskbar.clone());
     let (requests, receiver) = mpsc::sync_channel(1);
     let (replies, inbox) = tigertype_ui::mailbox()?;
     thread::scope(|scope| {
@@ -439,7 +454,7 @@ pub fn run(package: &Path, directory: &Path, show: bool) -> Result<()> {
             .name("tiger-lookup-ui".into())
             .spawn_scoped(scope, move || {
                 // 启动即挂通知区图标，查字/设置窗首次唤起才建；后台停止时唤起邮箱断开，UI 线程随之退出。
-                tigertype_ui::run(requests, inbox, show_inbox, options)
+                tigertype_ui::run(requests, inbox, show_inbox, &taskbar, options)
             })?;
         // run 结束即释放 Server 与唤起邮箱：UI 退出并断开请求通道，工作线程随之结束。
         let result = server.run();
@@ -458,6 +473,7 @@ mod tests {
     use tigertype_contracts::{OutputForm, protocol::Reply};
     use tigertype_engine::{Data as EngineData, Entry};
     use tigertype_ipc::service::Client;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
     /// 真实管道与引擎线程在限时子进程内运行：任何一步卡住都由父测试到期终止，不会挂起整轮测试。
     #[test]
@@ -489,7 +505,9 @@ mod tests {
         let mut server = Server::new(&dictionary, &namespace, Options::default())?;
         let reload = server.reload.clone();
         let (show, shown) = tigertype_ui::mailbox()?;
-        server.show = Some(show);
+        server.ui.show = Some(show);
+        let taskbar = Arc::new(Latest::new()?);
+        server.ui.taskbar = Some(taskbar.clone());
         let changed = Options {
             output_form: OutputForm::Traditional,
             ..Default::default()
@@ -503,6 +521,22 @@ mod tests {
                 let mut client = Client::connect(&runtime, &image, &namespace, deadline()).unwrap();
                 client.show(Panel::Settings, deadline()).unwrap();
                 assert_eq!(shown.try_receive(), Ok(Panel::Settings));
+                // 宿主线程取得输入焦点：确认前已让 UI 线程隐藏通知区图标。
+                client.indicate(true, deadline()).unwrap();
+                assert_eq!(taskbar.take(), Ok(Some(true)));
+                // 另一宿主线程取得后，先前持有者迟到的“失去”不会让图标重现。
+                let mut other = Client::connect(&runtime, &image, &namespace, deadline()).unwrap();
+                other.indicate(true, deadline()).unwrap();
+                client.indicate(false, deadline()).unwrap();
+                assert_eq!(taskbar.take(), Ok(None));
+                // 持有者断开等同失去：通知区图标恢复。事件可能残留旧信号，按值判断，最多等三次。
+                drop(other);
+                let restored = (0..3).any(|_| {
+                    // SAFETY: 交接槽在本闭包期间有效，等待有明确上限。
+                    unsafe { WaitForSingleObject(taskbar.event().as_raw_handle(), 3000) };
+                    taskbar.take() == Ok(Some(false))
+                });
+                assert!(restored);
                 // 保存交接之后发出的 Open 一定拿到新设置，无需重启后台。
                 reload.set(changed).unwrap();
                 let Reply::Opened(state) = client

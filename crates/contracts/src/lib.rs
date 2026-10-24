@@ -76,9 +76,12 @@ impl Options {
             if color > 0xFF_FFFF {
                 return Err(format!("自定义颜色 {color:X} 超出 RGB 范围"));
             }
+        }
+        // 推导色也逐个核对：混色向下取整可能让临界的玫红基色越界一点。
+        for color in custom.palette().colors() {
             if !without_blue(color) {
                 return Err(format!(
-                    "自定义颜色 #{color:06X} 偏蓝：蓝色分量不能高于红、绿分量"
+                    "自定义颜色 #{color:06X} 偏蓝：只允许红、橙、黄、绿、灰与玫红"
                 ));
             }
         }
@@ -124,6 +127,7 @@ pub enum Theme {
     Ink,
     Bamboo,
     Night,
+    Rose,
     Custom,
 }
 /// 自定义主题只取四个基色，其余按比例混色推导；线性混合不会让蓝分量超过红、绿，
@@ -172,6 +176,7 @@ impl CustomColors {
             faint: toward(36),
             highlight: self.highlight,
             highlight_text: self.text,
+            chosen: self.text,
             accent: self.accent,
             on_accent,
             selection: self.highlight,
@@ -231,16 +236,19 @@ pub struct Palette {
     pub highlight: u32,
     /// 高亮行内的序号与注释。
     pub highlight_text: u32,
+    /// 高亮候选字本身；多数主题同正文，玫红主题只靠字色区分高亮。
+    pub chosen: u32,
     pub accent: u32,
     pub on_accent: u32,
     pub selection: u32,
 }
 impl Theme {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Amber,
         Self::Ink,
         Self::Bamboo,
         Self::Night,
+        Self::Rose,
         Self::Custom,
     ];
     pub const fn name(self) -> &'static str {
@@ -249,6 +257,7 @@ impl Theme {
             Self::Ink => "墨",
             Self::Bamboo => "竹",
             Self::Night => "夜",
+            Self::Rose => "玫红",
             Self::Custom => "自定义",
         }
     }
@@ -268,6 +277,7 @@ impl Theme {
                 faint: 0xB9B2A7,
                 highlight: 0xF6E6D0,
                 highlight_text: 0x9A4708,
+                chosen: 0x1C1A17,
                 accent: 0xB45309,
                 on_accent: 0xFFFFFF,
                 selection: 0xF1D9B8,
@@ -284,6 +294,7 @@ impl Theme {
                 faint: 0xB3B3B3,
                 highlight: 0xEBEBEB,
                 highlight_text: 0x1A1A1A,
+                chosen: 0x1A1A1A,
                 accent: 0x262626,
                 on_accent: 0xFFFFFF,
                 selection: 0xDCDCDC,
@@ -300,6 +311,7 @@ impl Theme {
                 faint: 0xAFB5A5,
                 highlight: 0xE4EDD3,
                 highlight_text: 0x3F6212,
+                chosen: 0x1A1C17,
                 accent: 0x4D7C0F,
                 on_accent: 0xFFFFFF,
                 selection: 0xD6E5BC,
@@ -316,9 +328,29 @@ impl Theme {
                 faint: 0x6B655D,
                 highlight: 0x4A3A28,
                 highlight_text: 0xF2B66B,
+                chosen: 0xEDEAE4,
                 accent: 0xE0913A,
                 on_accent: 0x1C1A17,
                 selection: 0x5C4630,
+            },
+            // 取自小狼毫配色 MacRoseo：白底黑字、高亮行无底色只把字染成玫红。
+            // 原玫红 #FA114F 在白底仅约 4.0:1，等比压暗到 4.5:1；序号原为 #999999，同理加深。
+            Self::Rose => Palette {
+                window: 0xFFFFFF,
+                surface: 0xFFFFFF,
+                border: 0xCCCCCC,
+                line: 0xEBEBEB,
+                field: 0xCCCCCC,
+                text: 0x000000,
+                label: 0x767676,
+                muted: 0x707070,
+                faint: 0xBDBDBD,
+                highlight: 0xFFFFFF,
+                highlight_text: 0xE8114E,
+                chosen: 0xE8114E,
+                accent: 0xE8114E,
+                on_accent: 0xFFFFFF,
+                selection: 0xF9EDED,
             },
         })
     }
@@ -338,13 +370,14 @@ impl Palette {
             (self.muted, self.surface),
             (self.muted, self.window),
             (self.highlight_text, self.highlight),
+            (self.chosen, self.highlight),
             (self.on_accent, self.accent),
             (self.text, self.selection),
         ]
         .into_iter()
         .find(|&(fore, back)| contrast(fore, back) < 4.5)
     }
-    pub const fn colors(&self) -> [u32; 14] {
+    pub const fn colors(&self) -> [u32; 15] {
         [
             self.window,
             self.surface,
@@ -357,16 +390,18 @@ impl Palette {
             self.faint,
             self.highlight,
             self.highlight_text,
+            self.chosen,
             self.accent,
             self.on_accent,
             self.selection,
         ]
     }
 }
-/// 蓝分量不超过红、绿分量即不呈蓝、青、紫；中性灰三者相等也满足。
+/// 蓝分量不超过红、绿即不呈蓝、青、紫（中性灰三者相等也满足）；另放行红为最大、蓝只略高于绿的
+/// 玫红/粉红（色相 330°–360°），品红与紫仍拒绝。两条约束都是线性半空间，混色不会越界。
 pub const fn without_blue(rgb: u32) -> bool {
     let (red, green, blue) = (rgb >> 16 & 0xFF, rgb >> 8 & 0xFF, rgb & 0xFF);
-    blue <= red && blue <= green
+    blue <= red && 2 * blue <= red + green
 }
 
 /// 修饰键组合由 TSF 转成动作；无对应动作的系统快捷键保持透传。
@@ -391,6 +426,18 @@ pub enum Key {
     ToggleAscii,
     ToggleLearning,
     TogglePunctuation,
+    /// 全角/半角：只由任务栏输入法图标菜单发出。
+    ToggleFullShape,
+}
+impl Key {
+    /// 全角时本会放行给宿主的可打印 ASCII 与空格改为对应全角字符（U+FF01–FF5E、U+3000），同小狼毫 full_shape。
+    pub fn full_width(self) -> Option<char> {
+        match self {
+            Key::Space => Some('\u{3000}'),
+            Key::Character(c @ '!'..='~') => char::from_u32(c as u32 + 0xFEE0),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,6 +475,8 @@ pub struct InputState {
     pub ascii_mode: bool,
     /// 英文标点开关；TSF 本地按键判定须据此预判未组合时的标点是否由引擎处理。
     pub ascii_punctuation: bool,
+    /// 全角开关；与英文标点同理，TSF 本地判定须据此预判未组合时放行的字符是否改由引擎上屏全角。
+    pub full_shape: bool,
     pub composing: bool,
     pub revision: u64,
 }
@@ -435,8 +484,15 @@ impl InputState {
     /// TSF 的 OnTestKeyDown 不发 IPC，只凭上次状态判断是否吃键；
     /// 必须与引擎在该状态下的 handled 完全一致，由引擎测试穷举核对，多吃会吞掉应用按键。
     pub fn consumes(&self, key: Key) -> bool {
+        self.consumes_half(key) || (self.full_shape && key.full_width().is_some())
+    }
+    /// 半角下的判定；全角只把其余放行的可打印字符也吃下。
+    fn consumes_half(&self, key: Key) -> bool {
         match key {
-            Key::ToggleAscii | Key::ToggleLearning | Key::TogglePunctuation => true,
+            Key::ToggleAscii
+            | Key::ToggleLearning
+            | Key::TogglePunctuation
+            | Key::ToggleFullShape => true,
             _ if self.ascii_mode => false,
             Key::Character(c) => {
                 c == '`'
@@ -496,8 +552,12 @@ mod tests {
     #[test]
     fn every_theme_is_free_of_blue_and_keeps_text_readable() {
         // 反例：系统强调蓝、青色与偏蓝灰都必须被拒绝。
-        for blue in [0x0078D4, 0x00B7C3, 0x707080] {
+        for blue in [0x0078D4, 0x00B7C3, 0x707080, 0xFF00FF, 0xC040FF, 0xE05AC8] {
             assert!(!without_blue(blue), "{blue:06X}");
+        }
+        // 玫红、粉红不算蓝：Rime 原色与其半透明叠白都放行。
+        for rose in [0xFA114F, 0xFC80A1, 0xE8114E, 0xF9EDED] {
+            assert!(without_blue(rose), "{rose:06X}");
         }
         for theme in Theme::ALL {
             let p = Options {

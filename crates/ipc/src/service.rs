@@ -26,14 +26,21 @@ impl Client {
     /// 请求后台显示查字或设置窗：一问一答，不占用会话序号；成功后连接照常用于输入，失败即作废。
     /// 调用方应先放行前台切换，否则窗口可能停在后面。
     pub fn show(&mut self, panel: Panel, deadline: Instant) -> Result<()> {
+        self.signal(Message::Show(panel), Message::Shown, deadline)
+    }
+    /// 报告本宿主线程是否持有输入焦点（任务栏正显示本输入法图标），后台据此隐藏或恢复通知区图标。
+    pub fn indicate(&mut self, visible: bool, deadline: Instant) -> Result<()> {
+        self.signal(Message::Indicator(visible), Message::Noted, deadline)
+    }
+    /// 与会话无关的一问一答：成功后连接照常用于输入，失败即作废。
+    fn signal(&mut self, request: Message, expected: Message, deadline: Instant) -> Result<()> {
         if self.closed {
             return Err(Error::Closed);
         }
         let result = (|| {
-            self.pipe
-                .send_frame(&encode(&Message::Show(panel))?, deadline)?;
-            if decode(&self.pipe.receive_frame(deadline)?)? != Message::Shown {
-                return Err(Error::Invalid("唤起回复不符"));
+            self.pipe.send_frame(&encode(&request)?, deadline)?;
+            if decode(&self.pipe.receive_frame(deadline)?)? != expected {
+                return Err(Error::Invalid("信号回复不符"));
             }
             Ok(())
         })();
