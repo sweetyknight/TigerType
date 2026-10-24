@@ -114,7 +114,8 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
     // 两张 tigress 词表已包含按虎码编码器生成的词码，导入最终四码而不执行 Lua。
     for name in ["tigress_ci.dict.yaml", "tigress_simp_ci.dict.yaml"] {
         for line in lines(dictionary_body(&files[name])?) {
-            let row = fields(line, 4)?;
+            // 锁定词表正文实际省略 stem 列，只保留文本、权重和最终词码。
+            let row = fields(line, 3)?;
             data.phrases.push(Phrase {
                 text: row[0].to_owned(),
                 weight: row[1].parse()?,

@@ -4,7 +4,7 @@
 
 ## 总体
 
-最近提交 `f2ae53b`（协议 v11，直接拒绝 v2–v10）；本批 UI/候选刷新修复仍在工作区未提交。基于该提交重新生成的安装包未安装。本机曾多次以安装包部署并在记事本、Notepad++、Chrome、VS Code 等宿主实测出字；用户已于 10-24 卸载 TigerType，当前工作区修复**未部署、未真机验收**。未读取个人词库。
+最近提交 `6f5c036`（DPI/候选刷新与性能修复，协议 v11，直接拒绝 v2–v10）；本批修复已提交并重新打包，但安装包未安装。本机曾多次以安装包部署并在记事本、Notepad++、Chrome、VS Code 等宿主实测出字；用户已于 10-24 卸载 TigerType，当前工作区修复**未部署、未真机验收**。未读取个人词库。
 
 | 组件 | 现状 |
 |---|---|
@@ -73,7 +73,7 @@
 ## 最近验证
 
 - UI 清晰度/候选刷新批次（2026-10-24）：统一入口在隔离绝对 target/temp 下通过架构/文档、fmt、Clippy、x64/x86 常规测试与文档测试；新增 IPC、8,192 条短码桶和候选窗压力测试均通过。未安装或真实宿主验收。
-- 基线打包（2026-10-24，`f2ae53b`，不含当前工作区修复）：统一入口通过（架构/文档、fmt、Clippy、x64/x86 常规测试，各 143 passed、8 ignored，不重复计入辅助子进程），日志 `artifacts/package-check-20261024.log`；离线打包驱动构建两种位数 release、核对锁定字体与语言文件、由锁定资源重新生成 v2 数据包并经 Inno Setup 编译成功，日志 `artifacts/package-build-20261024.log`。产物 `target/package/TigerType-Setup-0.1.0.exe`，SHA256 `2d44c93e9adee5f0e2079fc468fcad9237578f74dd270942bc43a66310d96dff`；只打包，未安装、注册或进行真机/长期验收，仅限个人本地使用。
+- 当前打包（2026-10-24，`6f5c036` 及资源导入修正）：统一入口通过（架构/文档、fmt、Clippy、x64/x86 常规测试），离线打包驱动构建两种位数 release、核对锁定字体与语言文件、由锁定资源重新生成含词组数据的 v2 数据包并经 Inno Setup 编译成功。产物 `target/package/TigerType-Setup-0.1.0.exe`，SHA256 `e69ffec852d8ebd16269bf0555831fcb2c7ad9d2d45f3ed7a265797db36cc1d6`；只打包，未安装、注册或进行真机/长期验收，仅限个人本地使用。
 - 本批统一入口（2026-10-24）：架构/文档 5 passed，fmt、Clippy 无告警，x64、x86 各 **143 passed、8 ignored**（新增 5 项、删去旧外观解析 2 项；不重复计入辅助子进程）；`artifacts/review-fix-check-20261024.log`。补齐复审三处后复跑，结果相同（新增断言并入既有测试函数，项数不变）；`artifacts/review-fix-2-check-20261024.log`。补文本框右键菜单后首次运行因上述并发弹菜单失败（托盘测试“模态未展开”），加锁后复跑通过，结果相同，`git diff --check` 无告警；日志 `artifacts/review-fix-3-check-20261024.log`（覆盖了失败那次）。修正测试计时后再跑，结果相同；`artifacts/review-fix-4-check-20261024.log`。
 - 审阅前统一入口（`22d060a`）：架构/文档、fmt、Clippy 通过，x64、x86 各 140 passed、8 ignored；`artifacts/review-check-20261024-approved.log`。
 - 最近一次真机部署与实测（v10，10-24 01:39）：安装包 `d0c10b50…6a43235`，记事本中通知区图标随输入法切换隐藏/恢复；`artifacts/single-icon-install-2-20261024.log`、`artifacts/single-icon-notepad-20261024/`。
