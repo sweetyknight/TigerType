@@ -38,9 +38,10 @@ impl<'a> Controller<'a> {
     pub(crate) fn options(&self) -> Options {
         self.options
     }
-    /// 将数据层已规范化的配置路径交给设置页，避免 UI 根据输入参数自行拼路径。
+    /// 将数据层已规范化的配置路径交给设置页显示与打开，避免 UI 根据输入参数自行拼路径；
+    /// 去掉 `\\?\` 前缀，用户看到的、编辑器收到的都是常见写法。
     pub(crate) fn settings_path(&self) -> PathBuf {
-        self.data.settings_path()
+        crate::plain(&self.data.settings_path())
     }
     pub(crate) fn execute(&mut self, request: Request) -> Reply {
         match request {
@@ -182,6 +183,10 @@ mod tests {
         let written = std::fs::read(root.join("config/settings.toml"))?;
         assert_eq!(settings::parse(&written)?, Options::default());
         assert_eq!(controller.options(), Options::default());
+        // 设置页显示并交给编辑器的路径不带 canonicalize 的 `\\?\` 前缀，且仍指向同一文件。
+        let shown = controller.settings_path();
+        assert!(!shown.to_string_lossy().starts_with(r"\\?\"), "{shown:?}");
+        assert_eq!(std::fs::read(&shown)?, written);
         drop(controller);
         let root =
             resources::new_directory(&std::env::temp_dir(), "tiger-lookup-invalid")?.join("data");

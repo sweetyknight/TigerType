@@ -1,7 +1,7 @@
 //! 安装包打包驱动：构建 release 程序（静态 CRT）、校验锁定码表、随包字体与语言文件（均在仓库内），
 //! 再调用 Inno Setup 编译 installer/tigertype.iss。不安装、不注册、不修改系统；产物在 target\package。
-use std::{fs, path::Path, process::Command, time::Duration};
-use tigertype_app::{Result, TABLES, fonts, import, process, project_root, resources};
+use std::{ffi::OsString, fs, path::Path, process::Command, time::Duration};
+use tigertype_app::{Result, TABLES, fonts, import, plain, process, project_root, resources};
 use tigertype_engine::Dictionary;
 
 /// 取自 Inno Setup 官方仓库 is-6_7_3 标签的 Files/Languages/Unofficial/ChineseSimplified.isl。
@@ -17,15 +17,6 @@ fn cargo(root: &Path, args: &[&str]) -> Result<()> {
         return Err(format!("构建失败：cargo {} ({status})", args.join(" ")).into());
     }
     Ok(())
-}
-
-/// ISCC 不认 canonicalize 产生的 `\\?\` 前缀；本地盘符路径去掉前缀即为同一路径，UNC 原样交给 ISCC 报错。
-fn plain(path: &Path) -> Result<String> {
-    let text = path.to_str().ok_or("路径不是有效 Unicode")?;
-    Ok(match text.strip_prefix(r"\\?\") {
-        Some(rest) if !rest.starts_with(r"UNC\") => rest.to_owned(),
-        _ => text.to_owned(),
-    })
 }
 
 /// 安装脚本按文件名硬写随包字体与码表；清单变动而脚本未跟上时在打包前失败，不产出缺文件的安装包。
@@ -126,16 +117,17 @@ fn run() -> Result<()> {
 
     let version = env!("CARGO_PKG_VERSION");
     println!("\n== ISCC ==");
-    let status = plain(&icon).and_then(|icon| {
-        process::run(
-            // 不加静默参数：编译输出逐个列出打包文件，留作打包记录。
-            Command::new(&iscc)
-                .arg(format!("/DVersion={version}"))
-                .arg(format!("/DIcon={icon}"))
-                .arg(plain(&script)?),
-            Duration::from_secs(1800),
-        )
-    });
+    // ISCC 不认 canonicalize 产生的 `\\?\` 前缀，路径都先转成常见写法；UNC 原样交给 ISCC 报错。
+    let mut define = OsString::from("/DIcon=");
+    define.push(plain(&icon));
+    let status = process::run(
+        // 不加静默参数：编译输出逐个列出打包文件，留作打包记录。
+        Command::new(&iscc)
+            .arg(format!("/DVersion={version}"))
+            .arg(define)
+            .arg(plain(&script)),
+        Duration::from_secs(1800),
+    );
     fs::remove_file(&icon)?;
     fs::remove_dir(&staging)?;
     let status = status?;
@@ -145,7 +137,7 @@ fn run() -> Result<()> {
     let setup = output.join(format!("TigerType-Setup-{version}.exe"));
     println!(
         "\n安装包：{}\nSHA256：{}\n资源整体授权未确认，仅限个人在自己的电脑上使用，不公开分发。",
-        plain(&setup)?,
+        plain(&setup).display(),
         resources::sha256(&setup)?
     );
     Ok(())
@@ -163,13 +155,6 @@ fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn verbatim_drive_prefix_is_removed_but_unc_is_kept() -> Result<()> {
-        assert_eq!(plain(Path::new(r"\\?\D:\a\b.iss"))?, r"D:\a\b.iss");
-        assert_eq!(plain(Path::new(r"\\?\UNC\srv\s\a"))?, r"\\?\UNC\srv\s\a");
-        assert_eq!(plain(Path::new(r"D:\a"))?, r"D:\a");
-        Ok(())
-    }
     #[test]
     fn script_must_list_every_locked_font_and_table() -> Result<()> {
         let script = std::fs::read_to_string(project_root()?.join("installer/tigertype.iss"))?;

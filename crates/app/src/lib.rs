@@ -32,3 +32,33 @@ pub fn installed() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     let appdata = std::env::var_os("APPDATA").ok_or("缺少 APPDATA")?;
     Ok((tables, std::path::PathBuf::from(appdata).join("TigerType")))
 }
+
+/// canonicalize 给出的 `\\?\` 本地盘符路径去掉前缀即为同一路径：用户看到的、交给编辑器或 ISCC 的
+/// 都用常见写法（ISCC 不认该前缀）。UNC 等其他形式原样返回。
+pub fn plain(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, Path, Prefix};
+    let mut parts = path.components();
+    if let Some(Component::Prefix(prefix)) = parts.next()
+        && let Prefix::VerbatimDisk(drive) = prefix.kind()
+    {
+        return Path::new(&format!("{}:", drive as char)).join(parts.as_path());
+    }
+    path.to_owned()
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::path::Path;
+    #[test]
+    fn verbatim_drive_prefix_is_removed_but_unc_is_kept() {
+        assert_eq!(
+            super::plain(Path::new(r"\\?\D:\a\b.iss")),
+            Path::new(r"D:\a\b.iss")
+        );
+        assert_eq!(
+            super::plain(Path::new(r"\\?\UNC\srv\s\a")),
+            Path::new(r"\\?\UNC\srv\s\a")
+        );
+        assert_eq!(super::plain(Path::new(r"D:\a")), Path::new(r"D:\a"));
+    }
+}
