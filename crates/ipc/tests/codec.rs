@@ -2,9 +2,11 @@
 
 use tigertype_contracts::{
     Candidate, Composition, InputState, KeyOutcome, MAX_CANDIDATES, MAX_TEXT_BYTES,
-    protocol::{Command, Message, Panel, Rejection, Reply, Request, Response, Route, VERSION},
+    protocol::{Command, Panel, Rejection, Reply, Request, Response, Route},
 };
-use tigertype_ipc::{HEADER_LEN, MAX_BODY_LEN, decode, decode_response, encode, frame_len};
+use tigertype_ipc::{
+    HEADER_LEN, MAX_BODY_LEN, Message, VERSION, decode, decode_response, encode, frame_len,
+};
 
 fn request(command: Command) -> Request {
     Request {

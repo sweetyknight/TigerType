@@ -1,7 +1,7 @@
 //! 按锁定清单为当前用户安装随包字体：先校验全部来源的大小与 SHA256，再复制到用户字体目录并登记。
 //! 不需要管理员；已有同名而内容不同的文件一律不覆盖。字体装进系统后候选窗在任何宿主里按字体名取用，
 //! DLL 仍不读盘。
-use crate::{Result, data, resources};
+use crate::Result;
 use serde::Deserialize;
 use std::{
     ffi::OsStr,
@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     ptr::{null, null_mut},
 };
+use tigertype_backend::{data, resources};
 use windows_sys::Win32::{
     Foundation::ERROR_SUCCESS,
     Graphics::Gdi::AddFontResourceW,
@@ -40,7 +41,7 @@ struct Lock {
     fonts: Vec<Font>,
 }
 pub fn locked() -> Result<Vec<Font>> {
-    Ok(serde_json::from_str::<Lock>(include_str!("../../../resources/fonts.lock.json"))?.fonts)
+    Ok(serde_json::from_str::<Lock>(include_str!("../../../../resources/fonts.lock.json"))?.fonts)
 }
 
 /// 当前用户字体登记键；Drop 时关闭。

@@ -11,9 +11,9 @@ use std::{
 };
 use tigertype_contracts::{
     Candidate, Composition, InputState, KeyOutcome,
-    protocol::{Message, Rejection, Response},
+    protocol::{Rejection, Response},
 };
-use tigertype_ipc::{decode, encode};
+use tigertype_ipc::{Message, decode, encode};
 use windows::{
     Win32::{
         Foundation::{E_NOTIMPL, HWND, POINT, RECT, S_OK},

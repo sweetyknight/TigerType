@@ -9,6 +9,7 @@ use super::{
     },
     *,
 };
+use crate::Message;
 use std::{
     ffi::OsString,
     os::windows::ffi::{OsStrExt, OsStringExt},
@@ -16,7 +17,7 @@ use std::{
 };
 use tigertype_contracts::{
     InputState,
-    protocol::{Command, Message, Reply, Response, Route},
+    protocol::{Command, Reply, Response, Route},
 };
 use windows_sys::Win32::{
     Foundation::{CloseHandle, ERROR_ACCESS_DENIED},

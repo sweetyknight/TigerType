@@ -194,11 +194,22 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tigertype-backend",
+ "tigertype-contracts",
+ "tigertype-ipc",
+ "tigertype-ui",
+ "windows-sys",
+]
+
+[[package]]
+name = "tigertype-backend"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "sha2",
  "tigertype-contracts",
  "tigertype-engine",
- "tigertype-ipc",
- "tigertype-ui",
  "toml",
  "windows-sys",
 ]
@@ -218,9 +229,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tigertype-frontend"
+version = "0.1.0"
+dependencies = [
+ "tigertype-contracts",
+]
+
+[[package]]
 name = "tigertype-ipc"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "tigertype-contracts",
  "windows-sys",
@@ -231,6 +250,7 @@ name = "tigertype-tsf"
 version = "0.1.0"
 dependencies = [
  "tigertype-contracts",
+ "tigertype-frontend",
  "tigertype-ipc",
  "windows",
  "windows-core",

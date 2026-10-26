@@ -1,9 +1,10 @@
-//! 固定引擎线程的多宿主路由；宿主标识来自连接所有者，不接受协议正文冒认宿主。
+//! 引擎线程独占的多宿主路由与回收策略；宿主标识由通道所有者给出（跨进程为认证后的连接），不接受正文冒认宿主。
+//! 类型化收发：跨进程的编解码与协议版本在 ipc，进程内通道直接传 Request/Response。
 use crate::Result;
 use std::collections::BTreeMap;
 use tigertype_contracts::{
     Options,
-    protocol::{Command, Message, Rejection, Reply, Request, Response},
+    protocol::{Command, Rejection, Reply, Request, Response},
 };
 use tigertype_engine::{Dictionary, Session};
 const MAX_HOSTS: usize = 16;
@@ -15,6 +16,8 @@ struct Host<'a> {
     last_request: u64,
     last_session: u64,
     last_focus: u64,
+    // 最近一次往来的逻辑时钟，回收时选最久未用者；不读取系统时钟。
+    used: u64,
 }
 #[derive(Clone, Copy)]
 struct Focus {
@@ -29,12 +32,14 @@ pub struct Dispatcher<'a> {
     last_host: u64,
     active: Option<Focus>,
     failed: bool,
-    // 最近一次热重载的设置及其版本；版本 0 表示仍是启动时设置。
+    // 当前设置及其版本；版本 0 为启动时设置，每次热重载递增。
     options: Options,
     settings: u64,
+    clock: u64,
 }
 impl<'a> Dispatcher<'a> {
-    pub fn new(dictionary: &'a Dictionary, generation: u64) -> Result<Self> {
+    /// options 为启动时已校验的设置；宿主不读盘，会话一律以此（及其后的热重载）打开。
+    pub fn new(dictionary: &'a Dictionary, generation: u64, options: Options) -> Result<Self> {
         if generation == 0 {
             return Err("后台代次不能为零".into());
         }
@@ -45,22 +50,23 @@ impl<'a> Dispatcher<'a> {
             last_host: 0,
             active: None,
             failed: false,
-            options: Options::default(),
+            options,
             settings: 0,
+            clock: 0,
         })
     }
-    /// 设置热重载：已打开会话在下一次请求时交给引擎，无组合即换上，组合中等本次组合结束（含顶屏）再换；
-    /// 新会话的设置由调用方随 Open 给出。
+    /// 设置热重载：新会话立即使用；已打开会话在下一次请求时交给引擎，无组合即换上，组合中等本次组合结束（含顶屏）再换。
     pub fn reconfigure(&mut self, options: Options) {
         self.options = options;
         self.settings += 1;
     }
-    /// 只在认证成功的连接建立时分配；连接断开后必须 remove_host，不能复用编号。
+    /// 只在通道认证成功、建立宿主时分配；断开后必须 remove_host，不能复用编号。
     pub fn add_host(&mut self) -> Result<u64> {
         if self.failed || self.hosts.len() >= MAX_HOSTS {
             return Err("后台不可用或宿主数超限".into());
         }
         self.last_host = self.last_host.checked_add(1).ok_or("宿主编号耗尽")?;
+        self.clock += 1;
         self.hosts.insert(
             self.last_host,
             Host {
@@ -68,6 +74,7 @@ impl<'a> Dispatcher<'a> {
                 last_request: 0,
                 last_session: 0,
                 last_focus: 0,
+                used: self.clock,
             },
         );
         Ok(self.last_host)
@@ -78,33 +85,29 @@ impl<'a> Dispatcher<'a> {
             self.active = None;
         }
     }
-    pub fn dispatch(&mut self, host: u64, frame: &[u8]) -> Result<Vec<u8>> {
-        let Message::Request(request) = tigertype_ipc::decode(frame)? else {
-            return Err("需要请求帧".into());
-        };
+    /// 宿主的会话外往来（唤起窗口、图标报告等）同样算作使用，推迟其回收。
+    pub fn touch(&mut self, host: u64) {
+        self.clock += 1;
+        if let Some(owner) = self.hosts.get_mut(&host) {
+            owner.used = self.clock;
+        }
+    }
+    /// 引擎内部失败使整个调度失效：本请求与之后的请求都回复不可用，宿主随之取消未上屏组合、放行原键。
+    pub fn handle(&mut self, host: u64, request: Request) -> Response {
+        self.touch(host);
         let reply = if self.failed {
             Reply::Rejected(Rejection::Unavailable)
         } else if let Err(reason) = self.admit(host, &request) {
             Reply::Rejected(reason)
         } else {
-            match self.execute(host, &request) {
-                Ok(reply) => reply,
-                Err(error) => {
-                    self.invalidate();
-                    return Err(error);
-                }
-            }
+            self.execute(host, &request).unwrap_or_else(|_| {
+                self.invalidate();
+                Reply::Rejected(Rejection::Unavailable)
+            })
         };
-        // 编码失败后不能重放已改变状态的请求；整条调度失效，宿主应取消未上屏组合。
-        match tigertype_ipc::encode(&Message::Response(Response {
+        Response {
             route: request.route,
             reply,
-        })) {
-            Ok(frame) => Ok(frame),
-            Err(error) => {
-                self.invalidate();
-                Err(error.into())
-            }
         }
     }
     fn admit(&mut self, id: u64, request: &Request) -> std::result::Result<(), Rejection> {
@@ -189,8 +192,9 @@ impl<'a> Dispatcher<'a> {
         }
         let owner = self.hosts.get_mut(&host).ok_or("宿主准入状态不一致")?;
         Ok(match command {
-            Command::Open { options } => {
-                let engine = Session::new(self.dictionary, options);
+            // 宿主携带的选项只是占位：以后台当前设置打开，输入路径不读盘。
+            Command::Open { .. } => {
+                let engine = Session::new(self.dictionary, self.options);
                 let state = engine.snapshot();
                 owner.sessions.insert(session, (engine, self.settings));
                 Reply::Opened(state)
@@ -227,7 +231,7 @@ impl<'a> Dispatcher<'a> {
             }
         })
     }
-    /// 可回收：非当前焦点且所有会话都无组合；回收后宿主下次按键重连并重新打开会话，不丢未上屏内容。
+    /// 可回收：非当前焦点且所有会话都无组合；回收后宿主下次请求重连并重新打开会话，不丢未上屏内容。
     pub fn idle(&self, host: u64) -> bool {
         self.active.is_none_or(|focus| focus.host != host)
             && self
@@ -235,9 +239,21 @@ impl<'a> Dispatcher<'a> {
                 .get(&host)
                 .is_some_and(|owner| owner.sessions.values().all(|(s, _)| !s.composing()))
     }
-    /// 合计会话已达上限时由应用层回收空闲宿主，避免新宿主的 Open 被长期拒绝。
+    /// 合计会话已达上限：新宿主的 Open 会被拒绝，须先回收空闲宿主。
     pub fn full(&self) -> bool {
         self.hosts.values().map(|h| h.sessions.len()).sum::<usize>() >= MAX_SESSIONS
+    }
+    /// 回收策略（各平台共用）：已无空闲接入位（`spare` 为假）或合计会话达上限时，在空闲（见 [`Self::idle`]）
+    /// 且平台另行认可（`quiet`：如传输无半帧、无在途回复、不持有任务栏图标）的宿主中选最久未用者。
+    pub fn reclaimable(&self, spare: bool, quiet: impl Fn(u64) -> bool) -> Option<u64> {
+        if spare && !self.full() {
+            return None;
+        }
+        self.hosts
+            .iter()
+            .filter(|&(&host, _)| self.idle(host) && quiet(host))
+            .min_by_key(|(_, owner)| owner.used)
+            .map(|(&host, _)| host)
     }
     pub fn invalidate(&mut self) {
         self.failed = true;

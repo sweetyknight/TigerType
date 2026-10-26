@@ -1,11 +1,12 @@
 //! 真实本机管道与取消回归；测试线程模拟对端，不进入产品线程模型。
 
 use super::*;
+use crate::Message;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 use tigertype_contracts::{
     InputState, KeyOutcome,
-    protocol::{Command, Message, Reply, Route},
+    protocol::{Command, Reply, Route},
 };
 
 fn label() -> String {

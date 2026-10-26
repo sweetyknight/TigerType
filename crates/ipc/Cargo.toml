@@ -12,6 +12,8 @@ test = false
 
 [dependencies]
 tigertype-contracts.workspace = true
+# 跨进程信封 Message 的序列化派生。
+serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]

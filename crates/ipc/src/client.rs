@@ -1,8 +1,9 @@
 //! 单通道在途请求状态；不拥有系统句柄，cancel 不能替代传输层的 CancelIoEx。
 
+use crate::Message;
 use crate::{Error, FrameAssembler, Result, decode_response, encode};
 use std::time::{Duration, Instant};
-use tigertype_contracts::protocol::{Message, Request, Response};
+use tigertype_contracts::protocol::{Request, Response};
 
 struct Pending {
     request: Request,

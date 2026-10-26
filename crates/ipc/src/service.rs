@@ -1,13 +1,13 @@
 //! 固定槽位发现与宿主客户端；宿主在首个需要引擎的编辑会话内懒连接，不在输入回调启动后台。
 use crate::{
-    ClientState, Error, Result, decode, encode,
+    ClientState, Error, Message, Result, decode, encode,
     pipe::{Pipe, Runtime},
 };
 use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
-use tigertype_contracts::protocol::{Command, Message, Panel, Reply, Request, Route};
+use tigertype_contracts::protocol::{Command, Panel, Reply, Request, Route};
 pub const HOST_SLOTS: usize = 16;
 
 pub struct Client {

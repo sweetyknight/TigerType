@@ -220,6 +220,13 @@ const KEYMAP: [(&str, &str); 12] = [
     ("显示拆分与编码", "[Ctrl] + [L]"),
 ];
 const UI_FACE: &str = "Microsoft YaHei UI";
+/// 候选字体的 Windows 字体名；未安装时由 create_font 回退到界面字体。
+const fn font_face(font: CandidateFont) -> &'static str {
+    match font {
+        CandidateFont::WenKai => "LXGW WenKai GB Screen",
+        CandidateFont::KaiTi => "KaiTi",
+    }
+}
 const MONO_FACES: [&str; 2] = ["Cascadia Mono", "Consolas"];
 /// 图标字体：Win11 为 Fluent，Win10 为 MDL2，常用码位相同。
 const ICON_FACES: [&str; 2] = ["Segoe Fluent Icons", "Segoe MDL2 Assets"];
@@ -1051,7 +1058,7 @@ fn draw_button(hwnd: HWND, dc: HDC) {
             };
             round(dc, &mini, s(5), Some(rgb(p.window)), rgb(p.window));
             round(dc, &mini, s(5), None, rgb(p.border));
-            let glyphs = TempFont::new(dc, &[CandidateFont::WenKai.face(), UI_FACE], 12, 400);
+            let glyphs = TempFont::new(dc, &[font_face(CandidateFont::WenKai), UI_FACE], 12, 400);
             for (row, (label, ink)) in [("1 拉", p.chosen), ("2 隹", p.text)]
                 .into_iter()
                 .enumerate()
@@ -1094,7 +1101,7 @@ fn draw_button(hwnd: HWND, dc: HDC) {
                 .then(|| {
                     TempFont::new(
                         dc,
-                        &[CandidateFont::ALL[id - FONT].face(), UI_FACE],
+                        &[font_face(CandidateFont::ALL[id - FONT]), UI_FACE],
                         15,
                         400,
                     )
@@ -1361,7 +1368,7 @@ fn draw_preview(item: &DRAWITEMSTRUCT, c: &Colors) {
     round(dc, &rect, s(8), None, c.line);
     let body = TempFont::new(dc, &[UI_FACE], 15, 400);
     let mono = TempFont::new(dc, &MONO_FACES, 12, 400);
-    let glyphs = TempFont::new(dc, &[face.face(), UI_FACE], 19, 400);
+    let glyphs = TempFont::new(dc, &[font_face(face), UI_FACE], 19, 400);
     let lead = units("明天我们一起去");
     let line = RECT {
         left: rect.left + s(20),
@@ -2298,8 +2305,8 @@ impl Window {
             (&[UI_FACE], 12, 400),
             (&[UI_FACE], 20, 600),
             (&MONO_FACES, 13, 400),
-            (&[face.face(), UI_FACE], 20, 400),
-            (&[face.face(), UI_FACE], 76, 400),
+            (&[font_face(face), UI_FACE], 20, 400),
+            (&[font_face(face), UI_FACE], 76, 400),
             (&[UI_FACE], 13, 600),
         ];
         let mut result = Ok(());

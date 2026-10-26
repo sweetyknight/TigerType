@@ -1,14 +1,14 @@
 //! 完整锁定码表验收单列；不加载 DLL，不运行脚本，不接触个人词库。
 use serde_json::json;
 use std::time::Instant;
-use tigertype_app::{Result, TABLES, import, project_root, resources};
+use tigertype_backend::{Result, import, resources};
 use tigertype_contracts::{Key, Options, OutputForm, TypingMode};
 use tigertype_engine::{Dictionary, Session};
 
 fn verify(root: &std::path::Path) -> Result<serde_json::Value> {
     // 与后台启动同一路径：核对锁定清单、解析原文、建立词表。
     let started = Instant::now();
-    let data = import::load(&root.join("resources").join(TABLES))?;
+    let data = import::load(&root.join("resources/tiger"))?;
     let dictionary = Dictionary::new(data.clone())?;
     let load_ms = started.elapsed().as_millis();
     let mut missing_full_codes = 0;
@@ -93,7 +93,10 @@ fn verify(root: &std::path::Path) -> Result<serde_json::Value> {
 #[test]
 #[ignore = "完整码表验收单列；必须显式执行，不能把 ignored 计为通过"]
 fn locked_text_resources_build_and_regress_without_rime() -> Result<()> {
-    let root = project_root()?;
+    // 源码工作区根：码表在 resources/tiger，证据写入 artifacts（不入库）。
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
     let report = resources::new_directory(&root.join("artifacts"), "rust-tiger")?;
     let result = verify(&root);
     let evidence = match &result {

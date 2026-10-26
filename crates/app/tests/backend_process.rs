@@ -7,12 +7,12 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
-use tigertype_app::{Result, backend::Server};
+use tigertype_app::{Result, windows::server::Server};
+use tigertype_backend::{Data, Dictionary, Entry};
 use tigertype_contracts::{
     Key, Options,
     protocol::{Command, Panel, Rejection, Reply},
 };
-use tigertype_engine::{Data, Dictionary, Entry};
 use tigertype_ipc::{
     pipe::Runtime,
     service::{Client, Link},

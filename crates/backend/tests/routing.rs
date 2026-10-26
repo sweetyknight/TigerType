@@ -1,8 +1,8 @@
-//! 多宿主序号/焦点隔离与回收判定；合成数据，不注册或向真实应用写字。
-use tigertype_app::{Result, dispatch::Dispatcher};
+//! 多宿主序号/焦点隔离与回收策略；合成数据，类型化收发，不经编解码、不向真实应用写字。
+use tigertype_backend::{Result, dispatch::Dispatcher};
 use tigertype_contracts::{
-    InputState, Key, Options, OutputForm,
-    protocol::{Command, Message, Rejection, Reply, Request, Route},
+    InputState, Key, Options, OutputForm, Theme,
+    protocol::{Command, Rejection, Reply, Request, Route},
 };
 use tigertype_engine::{Data, Dictionary, Entry};
 fn dictionary() -> Dictionary {
@@ -32,8 +32,10 @@ fn exchange(
         },
         command,
     };
-    let frame = tigertype_ipc::encode(&Message::Request(request.clone()))?;
-    Ok(tigertype_ipc::decode_response(&dispatch.dispatch(host, &frame)?, &request)?.reply)
+    let response = dispatch.handle(host, request.clone());
+    // 回复只回送请求的路由，宿主据此丢弃不匹配的回复。
+    assert_eq!(response.route, request.route);
+    Ok(response.reply)
 }
 fn focus(epoch: u64, focused: bool) -> Command {
     Command::Focus { epoch, focused }
@@ -68,7 +70,7 @@ fn state(reply: Reply) -> InputState {
 fn multi_host_sequences_and_sessions_are_isolated_and_focus_switch_cancels_old_composition()
 -> Result<()> {
     let dictionary = dictionary();
-    let mut dispatch = Dispatcher::new(&dictionary, 7)?;
+    let mut dispatch = Dispatcher::new(&dictionary, 7, Options::default())?;
     let a = dispatch.add_host()?;
     let b = dispatch.add_host()?;
     open(&mut dispatch, a)?;
@@ -139,7 +141,7 @@ fn multi_host_sequences_and_sessions_are_isolated_and_focus_switch_cancels_old_c
 #[test]
 fn reclaim_queries_protect_focused_or_composing_hosts_and_track_session_capacity() -> Result<()> {
     let dictionary = dictionary();
-    let mut dispatch = Dispatcher::new(&dictionary, 7)?;
+    let mut dispatch = Dispatcher::new(&dictionary, 7, Options::default())?;
     let a = dispatch.add_host()?;
     let b = dispatch.add_host()?;
     open(&mut dispatch, a)?;
@@ -174,7 +176,7 @@ fn reclaim_queries_protect_focused_or_composing_hosts_and_track_session_capacity
 #[test]
 fn stale_snapshot_blur_and_disconnect_reject_selection() -> Result<()> {
     let dictionary = dictionary();
-    let mut dispatch = Dispatcher::new(&dictionary, 7)?;
+    let mut dispatch = Dispatcher::new(&dictionary, 7, Options::default())?;
     let host = dispatch.add_host()?;
     open(&mut dispatch, host)?;
     let old = state(exchange(
@@ -233,7 +235,7 @@ fn stale_snapshot_blur_and_disconnect_reject_selection() -> Result<()> {
 #[test]
 fn global_capacity_old_generations_and_session_reuse_are_rejected() -> Result<()> {
     let dictionary = dictionary();
-    let mut dispatch = Dispatcher::new(&dictionary, 7)?;
+    let mut dispatch = Dispatcher::new(&dictionary, 7, Options::default())?;
     let host = dispatch.add_host()?;
     for id in 1..=64 {
         assert!(matches!(
@@ -287,12 +289,8 @@ fn global_capacity_old_generations_and_session_reuse_are_rejected() -> Result<()
         },
         command: Command::Clear,
     };
-    let frame = dispatch.dispatch(
-        host,
-        &tigertype_ipc::encode(&Message::Request(old.clone()))?,
-    )?;
     assert_eq!(
-        tigertype_ipc::decode_response(&frame, &old)?.reply,
+        dispatch.handle(host, old).reply,
         Reply::Rejected(Rejection::StaleGeneration)
     );
     dispatch.invalidate();
@@ -305,7 +303,7 @@ fn global_capacity_old_generations_and_session_reuse_are_rejected() -> Result<()
 #[test]
 fn reloaded_settings_wait_until_the_composition_ends() -> Result<()> {
     let dictionary = dictionary();
-    let mut dispatch = Dispatcher::new(&dictionary, 7)?;
+    let mut dispatch = Dispatcher::new(&dictionary, 7, Options::default())?;
     let host = dispatch.add_host()?;
     open(&mut dispatch, host)?;
     assert!(
@@ -345,5 +343,89 @@ fn reloaded_settings_wait_until_the_composition_ends() -> Result<()> {
         state(exchange(&mut dispatch, host, 6, 1, focus(2, true))?).options,
         changed
     );
+    Ok(())
+}
+#[test]
+fn sessions_open_with_backend_settings_not_the_placeholder_from_the_host() -> Result<()> {
+    let dictionary = dictionary();
+    let started = Options {
+        theme: Theme::Rose,
+        ..Default::default()
+    };
+    let mut dispatch = Dispatcher::new(&dictionary, 7, started)?;
+    let host = dispatch.add_host()?;
+    // 宿主不读盘，Open 只带默认值占位；会话以后台启动时的设置打开。
+    let Reply::Opened(state) = exchange(
+        &mut dispatch,
+        host,
+        1,
+        1,
+        Command::Open {
+            options: Options::default(),
+        },
+    )?
+    else {
+        panic!("需要 Opened 回复");
+    };
+    assert_eq!(state.options, started);
+    // 热重载之后打开的会话立即用上新设置。
+    let changed = Options {
+        page_size: 7,
+        ..started
+    };
+    dispatch.reconfigure(changed);
+    let Reply::Opened(state) = exchange(
+        &mut dispatch,
+        host,
+        2,
+        2,
+        Command::Open {
+            options: Options::default(),
+        },
+    )?
+    else {
+        panic!("需要 Opened 回复");
+    };
+    assert_eq!(state.options, changed);
+    Ok(())
+}
+#[test]
+fn reclaim_picks_the_least_recently_used_idle_host_only_when_capacity_runs_out() -> Result<()> {
+    let dictionary = dictionary();
+    let mut dispatch = Dispatcher::new(&dictionary, 7, Options::default())?;
+    let a = dispatch.add_host()?;
+    let b = dispatch.add_host()?;
+    let c = dispatch.add_host()?;
+    let any = |_| true;
+    // 仍有空闲接入位且会话未满：不回收。
+    assert_eq!(dispatch.reclaimable(true, any), None);
+    // 接入位用尽：选最久未用者；会话外往来同样推迟回收。
+    assert_eq!(dispatch.reclaimable(false, any), Some(a));
+    dispatch.touch(a);
+    assert_eq!(dispatch.reclaimable(false, any), Some(b));
+    // 平台不认可（传输未空闲或持有任务栏图标）的宿主跳过。
+    assert_eq!(dispatch.reclaimable(false, |host| host != b), Some(c));
+    // 当前焦点与组合中的宿主不回收；请求同样计为使用。
+    open(&mut dispatch, b)?;
+    exchange(&mut dispatch, b, 3, 1, key(1, Key::Character('u')))?;
+    assert_eq!(dispatch.reclaimable(false, any), Some(c));
+    assert_eq!(dispatch.reclaimable(false, |host| host != c), Some(a));
+    assert_eq!(dispatch.reclaimable(false, |host| host == b), None);
+    // 合计会话达上限时即使还有空闲接入位也要回收。
+    for id in 2..=64 {
+        exchange(
+            &mut dispatch,
+            c,
+            id - 1,
+            id,
+            Command::Open {
+                options: Options::default(),
+            },
+        )?;
+    }
+    assert!(dispatch.full());
+    assert_eq!(dispatch.reclaimable(true, any), Some(a));
+    dispatch.remove_host(a);
+    assert_eq!(dispatch.reclaimable(true, any), Some(c));
     Ok(())
 }

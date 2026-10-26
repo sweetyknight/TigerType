@@ -51,7 +51,8 @@ fn information(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION> {
     Ok(info)
 }
 
-pub(crate) fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
+/// 有界读取单个文件：父目录逐级固定，拒绝链接、硬链接与目录；码表、设置与随包字体共用。
+pub fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let _parent = Directories::pin(path.parent().ok_or("文件缺少父目录")?)?;
     let file = OpenOptions::new()
         .read(true)

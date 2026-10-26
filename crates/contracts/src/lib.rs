@@ -18,7 +18,7 @@ pub const MAX_LEARNING_ITEMS: usize = 64;
 #[serde(deny_unknown_fields)]
 pub struct Composition {
     pub text: String,
-    /// 内部位置使用 UTF-8 字节，TSF 边界再转换 UTF-16。
+    /// 内部位置使用 UTF-8 字节，平台前端边界再转换 UTF-16。
     pub cursor: usize,
     pub selection: Range<usize>,
 }
@@ -129,7 +129,7 @@ impl Options {
     }
 }
 
-/// 候选字与查字字形的字体；未安装时由界面回退到微软雅黑。
+/// 候选字与查字字形的字体，只是语义选项；系统字体名与回退由各平台视图决定。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CandidateFont {
@@ -139,12 +139,6 @@ pub enum CandidateFont {
 }
 impl CandidateFont {
     pub const ALL: [Self; 2] = [Self::WenKai, Self::KaiTi];
-    pub const fn face(self) -> &'static str {
-        match self {
-            Self::WenKai => "LXGW WenKai GB Screen",
-            Self::KaiTi => "KaiTi",
-        }
-    }
     pub const fn name(self) -> &'static str {
         match self {
             Self::WenKai => "霞鹜文楷",
@@ -431,7 +425,7 @@ pub const fn without_blue(rgb: u32) -> bool {
     blue <= red && 2 * blue <= red + green
 }
 
-/// 修饰键组合由 TSF 转成动作；无对应动作的系统快捷键保持透传。
+/// 逻辑按键与平台键码无关；修饰键组合由前端规则转成动作，无对应动作的系统快捷键保持透传。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -500,15 +494,15 @@ pub struct InputState {
     pub mode: InputMode,
     pub options: Options,
     pub ascii_mode: bool,
-    /// 英文标点开关；TSF 本地按键判定须据此预判未组合时的标点是否由引擎处理。
+    /// 英文标点开关；前端本地按键判定须据此预判未组合时的标点是否由引擎处理。
     pub ascii_punctuation: bool,
-    /// 全角开关；与英文标点同理，TSF 本地判定须据此预判未组合时放行的字符是否改由引擎上屏全角。
+    /// 全角开关；与英文标点同理，前端本地判定须据此预判未组合时放行的字符是否改由引擎上屏全角。
     pub full_shape: bool,
     pub composing: bool,
     pub revision: u64,
 }
 impl InputState {
-    /// TSF 的 OnTestKeyDown 不发 IPC，只凭上次状态判断是否吃键；
+    /// 前端预判（TSF 的 OnTestKeyDown、IMK 按键处理前）不发请求，只凭上次状态判断是否吃键；
     /// 必须与引擎在该状态下的 handled 完全一致，由引擎测试穷举核对，多吃会吞掉应用按键。
     pub fn consumes(&self, key: Key) -> bool {
         self.consumes_half(key) || (self.full_shape && key.full_width().is_some())

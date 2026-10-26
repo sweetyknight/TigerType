@@ -1,6 +1,6 @@
 # TigerType：Rust 专用虎码引擎与工程治理
 
-批准：2026-10-22；同日修订 UWP/AppContainer 宿主、认证、宿主内候选窗、编辑会话与槽位回收，并在 A 批实现时补充 AppContainer 配置前提、回收与停止细节，B1 实现时补充协议 v6、按键映射、焦点上报与外部改写处理，B2 实现时补充交换结论、候选窗登记与点击受理细节；10-23 界面重设计补充配色主题、候选字体与协议 v7，同日补充安装包（Inno Setup）、查字窗并入后台与设置热重载，并按用户要求删除候选窗提示行（协议 v8），加入任务栏输入法图标作为设置入口（协议 v9）；10-24 任务栏输入法图标改显示中英状态，前台程序正用本输入法时隐藏通知区图标，同一时刻只显示一个（协议 v10）；同日任务栏与通知区图标改为无底板单字（字色随任务栏深浅），并加入小狼毫 MacRoseo 风格的玫红主题（协议 v11）；同日按外部审阅改为选中文字后输入替换选区、热重载在顶屏处生效，并删去数据包中的旧外观段（包格式 v2）；10-26 候选窗登记宿主布局变化通知，组合矩形晚到时补显示或移动，取不到位置时按组合起点、系统光标、原位置、上次组合位置、输入区域逐级退；同日按用户批准的 UI 重设计：设置窗分输入/外观/快捷键/高级四区并即时生效，配置改为带中文注释的 `settings.toml`（可手工修改后重新载入），加入每页候选数（3–9，默认 5，协议 v13），候选窗只在多页时显示翻页指示，查字窗改为紧凑的字块行加详情卡，任务栏输入法图标右键菜单改为显示当前状态的中英/全半角/标点三项加查字与设置，输入法配置图标、通知区与窗口统一用虎码印章；同日按用户要求锁定码表、字体与安装语言文件随仓库入库，码表不再生成 JSON 数据包，改为启动时核对原文后直接解析；10-27 因升级后已打开程序仍载旧 DLL 只出英文，安装包改为经重启管理器列出并关闭/重启这些程序（含历次改名的 `*.old`），`stop` 改为等后台进程退出才返回；同日批准多平台架构与 macOS 端方案：平台无关层另立 frontend/backend，macOS 为 IMK 输入法进程，管理员安装、不做代码签名、打包与安装全用 Rust，Linux 只预留。唯一当前范围与架构依据。实际进度见 [项目状态](project-status.md)。开发期不向后兼容，旧路线代码和文档直接删除，不保留兼容层或归档副本。
+批准：2026-10-22；同日修订 UWP/AppContainer 宿主、认证、宿主内候选窗、编辑会话与槽位回收，并在 A 批实现时补充 AppContainer 配置前提、回收与停止细节，B1 实现时补充协议 v6、按键映射、焦点上报与外部改写处理，B2 实现时补充交换结论、候选窗登记与点击受理细节；10-23 界面重设计补充配色主题、候选字体与协议 v7，同日补充安装包（Inno Setup）、查字窗并入后台与设置热重载，并按用户要求删除候选窗提示行（协议 v8），加入任务栏输入法图标作为设置入口（协议 v9）；10-24 任务栏输入法图标改显示中英状态，前台程序正用本输入法时隐藏通知区图标，同一时刻只显示一个（协议 v10）；同日任务栏与通知区图标改为无底板单字（字色随任务栏深浅），并加入小狼毫 MacRoseo 风格的玫红主题（协议 v11）；同日按外部审阅改为选中文字后输入替换选区、热重载在顶屏处生效，并删去数据包中的旧外观段（包格式 v2）；10-26 候选窗登记宿主布局变化通知，组合矩形晚到时补显示或移动，取不到位置时按组合起点、系统光标、原位置、上次组合位置、输入区域逐级退；同日按用户批准的 UI 重设计：设置窗分输入/外观/快捷键/高级四区并即时生效，配置改为带中文注释的 `settings.toml`（可手工修改后重新载入），加入每页候选数（3–9，默认 5，协议 v13），候选窗只在多页时显示翻页指示，查字窗改为紧凑的字块行加详情卡，任务栏输入法图标右键菜单改为显示当前状态的中英/全半角/标点三项加查字与设置，输入法配置图标、通知区与窗口统一用虎码印章；同日按用户要求锁定码表、字体与安装语言文件随仓库入库，码表不再生成 JSON 数据包，改为启动时核对原文后直接解析；10-27 因升级后已打开程序仍载旧 DLL 只出英文，安装包改为经重启管理器列出并关闭/重启这些程序（含历次改名的 `*.old`），`stop` 改为等后台进程退出才返回；同日批准多平台架构与 macOS 端方案：平台无关层另立 frontend/backend，macOS 为 IMK 输入法进程，管理员安装、不做代码签名、打包与安装全用 Rust，Linux 只预留；同日实施 P0 时补充：ipc 为信封派生另依赖 serde，backend 另依赖 serde_json（锁定清单与设置模板），backend 公开词表类型供组装层借用（app 不直接依赖 engine），调度器自记最近使用、平台只补传输条件，引擎内部失败改为回复不可用。唯一当前范围与架构依据。实际进度见 [项目状态](project-status.md)。开发期不向后兼容，旧路线代码和文档直接删除，不保留兼容层或归档副本。
 
 ## 产品范围
 - 产品名统一为 TigerType，crate 使用 `tigertype-*`、程序为 `tigertype.exe`，工作区目录为 `TigerType`，正式数据目录为 `%APPDATA%\TigerType`。窗口、IPC 管道/帧标识及目录所有权标记同步使用新名称；开发期不兼容旧名称的程序或受管目录，不迁移或改写已有数据。
@@ -19,20 +19,11 @@
 - 不做 librime、Lua、OpenCC 运行库、数据库、英文补全、计算器、日期、Emoji、网址启动或通用 YAML 配置兼容。
 
 ## 架构与接口
-本节为 Windows 现行实现；多平台目标分层见“多平台架构”，P0 重构完成后下表以该节为准。
+本节为 Windows 实现细节；crate 分层、职责与依赖以“多平台架构”为准（P0 已落地）。
 
 每登录会话一个后台，固定引擎线程，查字/设置另有固定 UI 线程；宿主内只有 TSF DLL，经认证 IPC 连接，候选窗由 DLL 在宿主 TSF 线程内绘制。后台主动/随登录启动，输入回调不拉起程序。严重故障取消组合、放行原键，由用户重启；不再要求双后台自动监督。
 
-| 模块 | 职责 | 项目内直接依赖 |
-|---|---|---|
-| contracts | 按键、候选、学习信息、会话、协议 | 无 |
-| engine | 纯 Rust 状态机、索引、字形转换 | contracts |
-| ipc | 编解码、认证、截止时间、取消 | contracts |
-| tsf | TIP DLL、组合、上屏、宿主内候选窗 | contracts、ipc |
-| ui | 查字/设置原生窗口与操作事件 | contracts |
-| app | 数据加载、配置、调度、生命周期、组装 | contracts、engine、ipc、ui |
-
-tsf 随真实 `ITfEditSession` / `ITfCompositionSink` 编辑组件加入，COM 绑定使用锁定 `windows` / `windows-core`，不手写系统 vtable；这些平台依赖只允许在 tsf，不能进入 contracts/engine。ui 随独立查字工具加入。核心不做文件/进程/窗口操作；UI 不直接调用 engine；contracts/engine 禁止 unsafe。
+tsf 的 COM 绑定使用锁定 `windows` / `windows-core`，不手写系统 vtable，这两个包只允许在 tsf。tsf 只做系统绑定：虚拟键换成 `PhysicalKey`、修饰键与布局字符读取、编辑会话、候选窗绘制与系统矩形换算；宿主侧会话 `Host`、逻辑键规则、单击 Shift 判定、候选行/页脚与摆放退路取自 frontend。核心不做文件/进程/窗口操作；UI 不直接调用 engine；contracts/engine/frontend 禁止 unsafe。
 
 tsf 同时产出 cdylib（TIP DLL）和 rlib（测试）。TIP 只含类工厂、`ITfTextInputProcessorEx`、`ITfKeyEventSink`、`ITfThreadMgrEventSink`、编辑组件、候选窗和任务栏输入法图标；图标是 `GUID_LBI_INPUTMODE` 语言栏按钮，激活时登记、停用时注销，图标每次现画（像微软拼音、小狼毫那样只画“中”或“英”一个字、底全透明，字色随任务栏深浅：激活时读一次系统“Windows 模式”，深色白字、浅色近黑字；按回复中的英文模式切换并通知系统重取图标与提示，不读盘；品牌印章另由输入法配置图标与通知区图标显示），按钮只声明普通按钮样式，系统右键只调用 `OnClick(右键)`、不调用 `InitMenu`，因此点击都在 `OnClick` 内处理：左键切换中英——不在按键事件内拿不到同步编辑会话，有自有组合时复用点击选字的异步编辑会话交换 `ToggleAscii`（后台把编码原样上屏），无组合时不碰文档直接交换并先让后台丢弃宿主已终止的残留组合；右键菜单由 TIP 以本线程临时隐藏窗口为所有者 `TrackPopupMenuEx` 自绘弹出（无蓝色，项保留文字供读屏器），弹出前在单次回调预算内确认后台可连接并取上次回复的中英、标点与全角状态，状态项写当前状态（分隔线为自绘分隔项，方向键跳过），选“查字/设置”经本宿主已有连接请后台唤起窗口，选中英项同左键，选全角或标点项则不碰文档直接交换 `ToggleFullShape`/`TogglePunctuation`；注册类别含 `GUID_TFCAT_TIP_KEYBOARD`、`GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT`、`GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT`；`DllCanUnloadNow` 恒为 `S_FALSE`。延迟只记固定区间计数，不记输入内容。
 
@@ -91,8 +82,8 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 | contracts | 数据、逻辑按键、输入状态与 `InputState::consumes`、会话命令（`Request`/`Command`/`Reply`/`Rejection`/`Route`）、`Panel`、主题配色 | 无 | serde |
 | engine | 状态机、索引、字形转换 | contracts | 无 |
 | frontend | 宿主侧会话 `Host<C>` 与 `Channel`；物理键到逻辑键的规则（各平台只把系统键码换成 `PhysicalKey`）；单击 Shift 判定；候选窗视图模型（行、注释、页脚、仅多页显示翻页、拼音标签）；候选窗摆放与位置退路选择（左上原点的可移植矩形） | contracts | 无 |
-| backend | 码表核对与加载、`settings.toml`、受管目录（所有权标记、会话租约、链接拒绝、事务替换）、类型化调度 `Dispatcher::handle(host, Request) -> Response`、宿主表与回收策略、查字/设置控制器、进程内引擎线程运行器 | contracts、engine | serde、toml、sha2；文件原语：windows-sys（Windows）、libc（unix，macOS 与 Linux 共用） |
-| ipc | 跨进程线协议：帧、编解码与校验、握手/管理信封 `Message`（Hello/Welcome/Stop/Show/Indicator 等）与协议版本、Windows 命名管道传输；Linux 选插件形态时再加 Unix 套接字传输 | contracts | serde_json、windows-sys |
+| backend | 码表核对与加载、`settings.toml`、受管目录（所有权标记、会话租约、链接拒绝、事务替换）、类型化调度 `Dispatcher::handle(host, Request) -> Response`、宿主表与回收策略、查字/设置控制器、进程内引擎线程运行器（M1 随 macOS 组装加入）；公开其接口所用的词表类型（`Dictionary` 及构造合成词表的 `Data`/`Entry`） | contracts、engine | serde、serde_json（锁定清单与设置模板）、toml、sha2；文件原语：windows-sys（Windows）、libc（unix，macOS 与 Linux 共用） |
+| ipc | 跨进程线协议：帧、编解码与校验、握手/管理信封 `Message`（Hello/Welcome/Stop/Show/Indicator 等）与协议版本、Windows 命名管道传输；Linux 选插件形态时再加 Unix 套接字传输 | contracts | serde（信封派生）、serde_json、windows-sys |
 | tsf | Windows TIP DLL | contracts、frontend、ipc | windows、windows-core |
 | imk | macOS IMK 前端：控制器、NSEvent 到物理键、标记文本与上屏、候选面板、输入法菜单 | contracts、frontend | objc2、objc2-foundation、objc2-app-kit、objc2-input-method-kit（M1 锁定版本） |
 | ui | 查字/设置：`model` 共用，`win32` 与 `appkit` 两套视图；Linux 视图预留 | contracts | windows-sys、objc2-app-kit |
@@ -103,7 +94,7 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 - backend 不得依赖 ipc、frontend、ui 与任何前端；平台包只许文件原语所需的 windows-sys（文件系统/安全特性）与 libc，不得到达界面框架。
 - 前端 crate（tsf、imk 及将来的 Linux 前端，架构测试以同一清单列出）只依赖 contracts、frontend 与跨进程形态所需的 ipc；不得依赖 engine、backend、ui，彼此不互相依赖。
 - ui 不得依赖 engine、backend、frontend、ipc 与任何前端。
-- 只有 app 依赖 backend 与前端；app 内各平台模块只由 `cfg(target_os)` 选入，互不引用。
+- 只有 app 依赖 backend 与前端；app 不直接依赖 engine（词表类型经 backend 公开）；app 内各平台模块只由 `cfg(target_os)` 选入，互不引用。
 
 由此形成分层有向无环图：contracts → {engine、frontend、ipc、ui} → {backend、tsf、imk} → app。
 

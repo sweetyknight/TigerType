@@ -4,11 +4,10 @@
 //! 激活时登记任务栏输入法图标，按每次回复显示中英状态，其菜单经同一连接请后台显示设置/查字窗。
 //! 线程取得/失去输入焦点时告诉后台任务栏是否正显示本输入法图标，后台据此隐藏/恢复通知区图标。
 use crate::{
-    candidate::{Popup, bounded, fallback_caret, window_area},
+    candidate::{Popup, fallback_caret, portable, window_area},
     edit::{EditReport, Editor, Verdict},
-    host::{Channel, Host},
     indicator::{Indicator, Status},
-    key::{self, Modifiers},
+    key,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -23,6 +22,9 @@ use std::{
 use tigertype_contracts::{
     InputState, Key, Options, Palette,
     protocol::{Command, Panel, Reply},
+};
+use tigertype_frontend::{
+    Channel, Error as SessionError, Host, Modifiers, ShiftTap, bounded, locate, map,
 };
 use tigertype_ipc::{Error as IpcError, pipe::Runtime, service::Link};
 use windows::{
@@ -147,39 +149,51 @@ pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 fn busy<T>(_: T) -> Error {
     E_FAIL.into()
 }
+/// 传输层错误对会话只意味着连接已作废。
+fn lost(_: IpcError) -> SessionError {
+    SessionError::Transport
+}
 
 struct Backend {
     link: Link,
     runtime: &'static Runtime,
 }
 impl Channel for Backend {
-    fn ensure(&mut self, deadline: Instant) -> std::result::Result<bool, IpcError> {
+    fn ensure(&mut self, deadline: Instant) -> std::result::Result<bool, SessionError> {
         self.link
             .ensure(self.runtime, deadline)
             .map(|(_, fresh)| fresh)
+            .map_err(lost)
     }
     fn request(
         &mut self,
         session: u64,
         command: Command,
         deadline: Instant,
-    ) -> std::result::Result<Reply, IpcError> {
+    ) -> std::result::Result<Reply, SessionError> {
         self.link
             .client()
-            .ok_or(IpcError::Closed)?
+            .ok_or(SessionError::Transport)?
             .request(session, command, deadline)
+            .map_err(lost)
     }
-    fn show(&mut self, panel: Panel, deadline: Instant) -> std::result::Result<(), IpcError> {
+    fn show(&mut self, panel: Panel, deadline: Instant) -> std::result::Result<(), SessionError> {
         self.link
             .client()
-            .ok_or(IpcError::Closed)?
+            .ok_or(SessionError::Transport)?
             .show(panel, deadline)
+            .map_err(lost)
     }
-    fn indicate(&mut self, visible: bool, deadline: Instant) -> std::result::Result<(), IpcError> {
+    fn indicate(
+        &mut self,
+        visible: bool,
+        deadline: Instant,
+    ) -> std::result::Result<(), SessionError> {
         self.link
             .client()
-            .ok_or(IpcError::Closed)?
+            .ok_or(SessionError::Transport)?
             .indicate(visible, deadline)
+            .map_err(lost)
     }
     fn cancel(&mut self) {
         // 直接释放管道：后台立即发现断开，下次 ensure 重新连接。
@@ -323,7 +337,12 @@ impl Active {
             .current_editor()
             .is_some_and(|editor| editor.is(context) && editor.composing());
         let previous = self.host.try_borrow().ok()?.state().composing;
-        let key = key::map(vk, modifiers(), typed(vk, lparam), composing && previous)?;
+        let key = map(
+            key::physical(vk),
+            modifiers(),
+            typed(vk, lparam),
+            composing && previous,
+        )?;
         // SAFETY: GetStatus 不需要编辑锁，只读宿主动态标志；读不到与只读一样放行（会话内同样会拒绝）。
         match unsafe { context.GetStatus() } {
             Ok(status) if status.dwDynamicFlags & TS_SD_READONLY == 0 => {}
@@ -425,14 +444,14 @@ impl Active {
             return self.hide();
         }
         let anchor = || self.current_popup().and_then(|popup| popup.anchor());
-        let place = report
-            .caret
-            .filter(bounded)
-            .or_else(fallback_caret)
-            .or_else(anchor)
-            .or(report.recent.filter(bounded))
-            .or(report.area.filter(bounded))
-            .or_else(|| window_area(report.owner));
+        let place = locate(&[
+            &|| report.caret.map(portable),
+            &fallback_caret,
+            &anchor,
+            &|| report.recent.map(portable),
+            &|| report.area.map(portable),
+            &|| window_area(report.owner),
+        ]);
         match (place, self.popup()) {
             (Some(caret), Some(popup)) => {
                 if popup.show(state, caret, report.owner).is_err() {
@@ -460,7 +479,9 @@ impl Active {
                 return;
             };
             // 布局通知只按真实组合矩形移动，不走退路位置。
-            if report.error.is_some() || !report.caret.is_some_and(|caret| bounded(&caret)) {
+            if report.error.is_some()
+                || !report.caret.is_some_and(|caret| bounded(&portable(caret)))
+            {
                 return;
             }
             let Ok(state) = active.host.try_borrow().map(|host| host.state().clone()) else {
@@ -627,8 +648,8 @@ impl Active {
 )]
 pub struct TextService {
     active: RefCell<Option<Rc<Active>>>,
-    // 单击 Shift 切换中英；期间按下其他键或带 Ctrl/Alt 即作废。
-    shift: Cell<bool>,
+    // 单击 Shift 切换中英；判定规则在 frontend。
+    shift: Cell<ShiftTap>,
     // 测试改用独立命名空间与预期映像，不连接用户正在运行的后台；quiet 保持候选窗隐藏。
     namespace: String,
     image: Option<PathBuf>,
@@ -638,7 +659,7 @@ impl TextService {
     fn new() -> Self {
         Self {
             active: RefCell::new(None),
-            shift: Cell::new(false),
+            shift: Cell::new(ShiftTap::default()),
             namespace: "backend".into(),
             image: None,
             quiet: false,
@@ -648,13 +669,12 @@ impl TextService {
         self.active.try_borrow().ok()?.clone()
     }
     fn press(&self, wparam: WPARAM) {
-        let modifiers = modifiers();
-        self.shift
-            .set(wparam.0 == VK_SHIFT.0 as usize && !modifiers.control && !modifiers.alt);
+        let shift = wparam.0 == VK_SHIFT.0 as usize;
+        self.shift.set(self.shift.get().press(shift, modifiers()));
     }
     fn released(&self, wparam: WPARAM) -> bool {
-        let modifiers = modifiers();
-        wparam.0 == VK_SHIFT.0 as usize && self.shift.get() && !modifiers.control && !modifiers.alt
+        let shift = wparam.0 == VK_SHIFT.0 as usize;
+        self.shift.get().released(shift, modifiers())
     }
 }
 
@@ -664,7 +684,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
     }
     fn Deactivate(&self) -> Result<()> {
         guarded(|| {
-            self.shift.set(false);
+            self.shift.set(ShiftTap::default());
             let active = self.active.try_borrow_mut().map_err(busy)?.take();
             if let Some(active) = active {
                 active.close();
@@ -749,7 +769,7 @@ impl ITfThreadFocusSink_Impl for TextService_Impl {
 }
 impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnSetFocus(&self, foreground: BOOL) -> Result<()> {
-        self.shift.set(false);
+        self.shift.set(ShiftTap::default());
         // 本 TIP 不再是前台按键处理者时收起候选窗，组合留给下一键或失焦处理。
         if !foreground.as_bool()
             && let Some(active) = self.active()
@@ -793,7 +813,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             if !self.released(wparam) {
                 return Ok(false);
             }
-            self.shift.set(false);
+            self.shift.set(ShiftTap::default());
             let active = self.active().ok_or(E_UNEXPECTED)?;
             active.input(pic.ok()?, Key::ToggleAscii, deadline)
         }))

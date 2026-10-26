@@ -9,9 +9,9 @@ use std::{
 };
 use tigertype_contracts::{
     InputState, KeyOutcome,
-    protocol::{Command, Message, Reply, Request, Response, Route},
+    protocol::{Command, Reply, Request, Response, Route},
 };
-use tigertype_ipc::{ClientState, Error, decode, encode, pipe::Runtime};
+use tigertype_ipc::{ClientState, Error, Message, decode, encode, pipe::Runtime};
 use windows_sys::Win32::{
     Foundation::WAIT_OBJECT_0,
     System::Threading::{CREATE_NO_WINDOW, WaitForSingleObject},

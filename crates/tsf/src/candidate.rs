@@ -8,9 +8,8 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     rc::{Rc, Weak},
 };
-use tigertype_contracts::{
-    CandidateFont, InputMode, InputState, MAX_CANDIDATES, Options, Palette, mix,
-};
+use tigertype_contracts::{CandidateFont, InputState, MAX_CANDIDATES, Options, Palette, mix};
+use tigertype_frontend::{Rect, bounded, footer, position, rows};
 use windows::{
     Win32::{
         Foundation::{
@@ -59,6 +58,13 @@ const FOOTER: i32 = 26;
 const MIN_WIDTH: i32 = 112;
 const MAX_WIDTH: i32 = 480;
 pub(crate) const UI_FACE: &str = "Microsoft YaHei UI";
+/// 候选字体的 Windows 字体名；未安装时由 create_font 回退到界面字体。
+pub(crate) const fn font_face(font: CandidateFont) -> &'static str {
+    match font {
+        CandidateFont::WenKai => "LXGW WenKai GB Screen",
+        CandidateFont::KaiTi => "KaiTi",
+    }
+}
 
 thread_local! {
     // 窗口过程按句柄找回本线程的候选窗；弱引用随候选窗释放自动失效，不经窗口数据传指针。
@@ -79,34 +85,25 @@ fn forget(hwnd: HWND) {
     });
 }
 
-/// 屏幕矩形须有序且数值有界，防止尺寸运算溢出；保留多显示器负坐标。
-pub(crate) fn bounded(rect: &RECT) -> bool {
-    rect.left <= rect.right
-        && rect.top <= rect.bottom
-        && [rect.left, rect.top, rect.right, rect.bottom]
-            .iter()
-            .all(|v| (-1_000_000..=1_000_000).contains(v))
-}
-/// 在工作区内放置：优先放在组合下方，下方不足则翻到上方，左右夹取。
-pub(crate) fn position(caret: RECT, work: RECT, width: i32, height: i32) -> RECT {
-    let width = width.min(work.right - work.left).max(0);
-    let height = height.min(work.bottom - work.top).max(0);
-    let left = caret.left.clamp(work.left, work.right - width);
-    let top = if caret.bottom <= work.bottom - height {
-        caret.bottom
-    } else {
-        caret.top - height
+/// 系统屏幕矩形与 frontend 可移植矩形同为左上原点，逐字段互换；摆放与退路规则在 frontend。
+pub(crate) const fn portable(rect: RECT) -> Rect {
+    Rect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
     }
-    .clamp(work.top, work.bottom - height);
+}
+const fn native(rect: Rect) -> RECT {
     RECT {
-        left,
-        top,
-        right: left + width,
-        bottom: top + height,
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
     }
 }
 /// 视图区域也取不到时的输入区域：视图窗口（为空则焦点窗口）的屏幕矩形。
-pub(crate) fn window_area(owner: HWND) -> Option<RECT> {
+pub(crate) fn window_area(owner: HWND) -> Option<Rect> {
     let hwnd = if owner.is_invalid() {
         // SAFETY: 只读本线程焦点窗口。
         unsafe { GetFocus() }
@@ -119,10 +116,10 @@ pub(crate) fn window_area(owner: HWND) -> Option<RECT> {
     let mut rect = RECT::default();
     // SAFETY: 只读该窗口的屏幕矩形，输出为本地值。
     unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
-    bounded(&rect).then_some(rect)
+    Some(portable(rect)).filter(bounded)
 }
 /// 组合布局不可用时退回本线程系统光标。
-pub(crate) fn fallback_caret() -> Option<RECT> {
+pub(crate) fn fallback_caret() -> Option<Rect> {
     let mut info = GUITHREADINFO {
         cbSize: size_of::<GUITHREADINFO>() as u32,
         ..Default::default()
@@ -149,13 +146,13 @@ pub(crate) fn fallback_caret() -> Option<RECT> {
             return None;
         }
     }
-    let rect = RECT {
+    let rect = Rect {
         left: corners[0].x,
         top: corners[0].y,
         right: corners[1].x,
         bottom: corners[1].y,
     };
-    bounded(&rect).then_some(rect)
+    Some(rect).filter(bounded)
 }
 /// 绘制用颜色。产品要求界面不得出现蓝色，所以不用系统强调色/选中色，取主题配色；
 /// 仅在用户自己开启高对比度时改用其系统颜色，保证可读性。
@@ -370,14 +367,6 @@ pub(crate) fn draw_text(
         );
     }
 }
-/// 候选多于一页时才显示翻页指示。
-pub(crate) fn paged(state: &InputState) -> bool {
-    !state.candidates.is_empty() && (state.page_index > 0 || !state.is_last_page)
-}
-/// 页脚只为翻页指示或拼音反查标签存在。
-fn has_footer(state: &InputState) -> bool {
-    state.mode == InputMode::Pinyin || paged(state)
-}
 fn point(lparam: LPARAM) -> POINT {
     POINT {
         x: (lparam.0 & 0xffff) as i16 as i32,
@@ -420,7 +409,7 @@ pub(crate) struct View {
     pub serial: u32,
     pub layout: Layout,
     /// 当前摆放所依据的组合矩形；宿主暂时给不出位置时原位刷新。
-    caret: Option<RECT>,
+    caret: Option<Rect>,
     pressed: Option<u8>,
     /// 已排队一个点击会话；展示变化或会话结束即解除。
     pending: bool,
@@ -675,8 +664,8 @@ impl Popup {
             SetBkMode(dc, TRANSPARENT);
             SelectObject(dc, fonts.text.into())
         };
-        for (index, (candidate, rect)) in state.candidates.iter().zip(&layout.rows).enumerate() {
-            let chosen = state.highlighted == Some(index);
+        for (row, rect) in rows(state).zip(&layout.rows) {
+            let chosen = row.chosen;
             // 高亮只画圆角底色；底与窗口同色的主题（玫红）只靠字色区分。
             if chosen && c.highlight != c.window {
                 round(dc, rect, s(4), Some(c.highlight), c.highlight);
@@ -697,7 +686,7 @@ impl Popup {
                 dc,
                 fonts.small,
                 label,
-                &candidate.label,
+                row.label,
                 span(rect.left + s(ROW_LEFT)),
                 DRAW_TEXT_FORMAT(0),
             );
@@ -705,22 +694,22 @@ impl Popup {
                 dc,
                 fonts.text,
                 text,
-                &candidate.text,
+                row.text,
                 span(layout.text_x),
                 DRAW_TEXT_FORMAT(0),
             );
-            if !candidate.comment.is_empty() {
+            if !row.comment.is_empty() {
                 draw_text(
                     dc,
                     fonts.small,
                     hint,
-                    &candidate.comment,
+                    row.comment,
                     span(layout.comment_x),
                     DT_END_ELLIPSIS,
                 );
             }
         }
-        if let Some(rect) = &layout.footer {
+        if let (Some(rect), Some(view)) = (&layout.footer, footer(state)) {
             let line = RECT {
                 left: rect.left + s(6),
                 top: rect.top,
@@ -732,7 +721,7 @@ impl Popup {
                 top: rect.top + s(1),
                 ..*rect
             };
-            if state.mode == InputMode::Pinyin {
+            if view.pinyin {
                 let width = self.extent(dc, fonts.ui, "拼音") + s(12);
                 let top = (body.top + body.bottom - s(18)) / 2;
                 let tag = RECT {
@@ -744,13 +733,13 @@ impl Popup {
                 round(dc, &tag, s(4), None, c.field);
                 draw_text(dc, fonts.ui, c.muted, "拼音", tag, DT_CENTER);
             }
-            if paged(state) {
+            if let Some(pager) = view.pager {
                 let mut right = body.right - s(6);
-                let page = (state.page_index + 1).to_string();
+                let page = pager.page.to_string();
                 for (text, enabled) in [
-                    ("›", !state.is_last_page),
+                    ("›", pager.next),
                     (page.as_str(), true),
-                    ("‹", state.page_index > 0),
+                    ("‹", pager.previous),
                 ] {
                     let width = self.extent(dc, fonts.small, text) + s(4);
                     let cell = RECT {
@@ -797,7 +786,7 @@ impl Popup {
             };
             fonts.text = create_font(
                 dc,
-                &[face.face(), UI_FACE],
+                &[font_face(face), UI_FACE],
                 TEXT_POINT,
                 dpi,
                 FW_NORMAL.0 as i32,
@@ -860,7 +849,7 @@ impl Popup {
             text_x + text
         };
         let mut width = s(MIN_WIDTH).max(content + s(ROW_RIGHT + PAD));
-        let footer = has_footer(state);
+        let footer = footer(state).is_some();
         if footer {
             let tag = self.extent(dc, fonts.ui, "拼音") + s(12);
             width =
@@ -905,7 +894,7 @@ impl Popup {
         })
     }
     /// 显示或刷新：owner 取视图窗口（空则取焦点窗口），按组合位置放在工作区内，不激活。
-    pub fn show(self: &Rc<Self>, state: &InputState, caret: RECT, owner: HWND) -> Result<()> {
+    pub fn show(self: &Rc<Self>, state: &InputState, caret: Rect, owner: HWND) -> Result<()> {
         if !bounded(&caret) || state.candidates.len() > MAX_CANDIDATES {
             return Err(E_INVALIDARG.into());
         }
@@ -969,7 +958,7 @@ impl Popup {
         // SAFETY: 输出结构大小已填写，矩形为本地值。
         if !unsafe {
             GetMonitorInfoW(
-                MonitorFromRect(&caret, MONITOR_DEFAULTTONEAREST),
+                MonitorFromRect(&native(caret), MONITOR_DEFAULTTONEAREST),
                 &mut monitor,
             )
         }
@@ -977,7 +966,7 @@ impl Popup {
         {
             return Err(E_FAIL.into());
         }
-        let place = position(caret, monitor.rcWork, size.cx, size.cy);
+        let place = position(caret, portable(monitor.rcWork), size.cx, size.cy);
         // SAFETY: 工作区夹取后的位置与尺寸；不激活、不改 z 序。
         unsafe {
             SetWindowPos(
@@ -1036,7 +1025,7 @@ impl Popup {
         Ok(())
     }
     /// 正在显示时的组合矩形。
-    pub fn anchor(&self) -> Option<RECT> {
+    pub fn anchor(&self) -> Option<Rect> {
         let view = self.view.try_borrow().ok()?;
         view.state.as_ref().and(view.caret)
     }

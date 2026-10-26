@@ -1,4 +1,4 @@
-//! 后台进程内查字/设置的固定工作线程控制器：与引擎线程共用只读词表，独占受管目录租约；
+//! 查字/设置的固定工作线程控制器：与引擎线程共用只读词表，独占受管目录租约；
 //! 不创建输入会话，查询不产生上屏提交。
 use crate::{Result, data::Data, settings};
 use sha2::{Digest, Sha256};
@@ -10,14 +10,14 @@ use tigertype_contracts::{
 use tigertype_engine::Dictionary;
 
 /// 受管设置独占归工作线程；窗口只接收拥有所有权的 contracts 数据。
-pub(crate) struct Controller<'a> {
+pub struct Controller<'a> {
     dictionary: &'a Dictionary,
     data: Data,
     options: Options,
     digest: Option<String>,
 }
 impl<'a> Controller<'a> {
-    pub(crate) fn new(dictionary: &'a Dictionary, data: Data) -> Result<Self> {
+    pub fn new(dictionary: &'a Dictionary, data: Data) -> Result<Self> {
         let bytes = data.settings()?;
         let options = match &bytes {
             Some(bytes) => settings::parse(bytes)?,
@@ -35,15 +35,15 @@ impl<'a> Controller<'a> {
         }
         Ok(controller)
     }
-    pub(crate) fn options(&self) -> Options {
+    pub fn options(&self) -> Options {
         self.options
     }
     /// 将数据层已规范化的配置路径交给设置页显示与打开，避免 UI 根据输入参数自行拼路径；
     /// 去掉 `\\?\` 前缀，用户看到的、编辑器收到的都是常见写法。
-    pub(crate) fn settings_path(&self) -> PathBuf {
+    pub fn settings_path(&self) -> PathBuf {
         crate::plain(&self.data.settings_path())
     }
-    pub(crate) fn execute(&mut self, request: Request) -> Reply {
+    pub fn execute(&mut self, request: Request) -> Reply {
         match request {
             Request::Lookup { query, page } => Reply::Lookup(
                 self.dictionary

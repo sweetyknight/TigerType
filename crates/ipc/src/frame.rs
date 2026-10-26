@@ -50,8 +50,8 @@ impl FrameAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MAX_BODY_LEN, encode};
-    use tigertype_contracts::protocol::{Command, Message, Request, Route};
+    use crate::{MAX_BODY_LEN, Message, encode};
+    use tigertype_contracts::protocol::{Command, Request, Route};
 
     fn test_frame() -> Vec<u8> {
         encode(&Message::Request(Request {

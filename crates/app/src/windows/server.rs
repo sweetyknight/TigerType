@@ -1,8 +1,8 @@
-//! 每登录会话一后台：固定反应器/引擎线程，16 个预建请求管道，不按连接创建线程。
+//! Windows 每登录会话一后台：固定反应器/引擎线程，16 个预建请求管道，不按连接创建线程；调度与回收策略在 backend。
 //! 宿主只凭 DACL 与同会话接纳，不打开宿主进程；断开由常驻读失败发现，始终保留至少一个空闲监听槽。
 //! 查字/设置窗在同进程的固定 UI 线程，保存后的设置经交接槽热重载到引擎线程，输入路径不读盘。
 //! 持有输入焦点的宿主线程会报告任务栏正显示本输入法图标，此时经另一交接槽让 UI 线程隐藏通知区图标。
-use crate::{Result, data::Data, dispatch::Dispatcher, import, lookup::Controller};
+use crate::Result;
 use std::{
     os::windows::io::AsRawHandle,
     path::Path,
@@ -10,14 +10,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tigertype_contracts::{
-    Options,
-    protocol::{Command, Message, Panel},
-    ui::Reply as UiReply,
-};
-use tigertype_engine::Dictionary;
+use tigertype_backend::{Dictionary, data::Data, dispatch::Dispatcher, import, lookup::Controller};
+use tigertype_contracts::{Options, protocol::Panel, ui::Reply as UiReply};
 use tigertype_ipc::{
-    FrameAssembler,
+    FrameAssembler, Message,
     pipe::{Listener, Pending, Pipe, Runtime, grant_app_container_query},
     service::HOST_SLOTS,
 };
@@ -166,8 +162,6 @@ struct Slot {
     end: Endpoint,
     host: Option<u64>,
     stopping: bool,
-    // 最近一次收到帧的逻辑时钟，回收时选最久未用者；不读取系统时钟。
-    used: u64,
 }
 impl Slot {
     fn bind(runtime: &Runtime, namespace: &str, index: usize) -> Result<Self> {
@@ -175,7 +169,6 @@ impl Slot {
             end: Endpoint::listen(runtime.bind(&format!("{namespace}-request-{index}"))?)?,
             host: None,
             stopping: false,
-            used: 0,
         })
     }
     /// 已握手且只剩常驻空闲读取：无半帧、无在途回复；组合与焦点另由调度器判定。
@@ -189,9 +182,7 @@ impl Slot {
         &mut self,
         dispatch: &mut Dispatcher<'_>,
         generation: u64,
-        options: Options,
         image: &Path,
-        clock: &mut u64,
         ui: &mut Ui,
     ) -> Result<()> {
         let Some(event) = self.end.tick()? else {
@@ -203,10 +194,15 @@ impl Slot {
             Event::Connected | Event::Written => return self.end.read(),
             Event::Frame(frame) => frame,
         };
-        *clock += 1;
-        self.used = *clock;
         let deadline = self.end.deadline.ok_or("请求缺少期限")?;
-        let reply = match tigertype_ipc::decode(&frame)? {
+        let message = tigertype_ipc::decode(&frame)?;
+        // 会话外往来同样推迟回收；会话请求由调度器自行计时。
+        if let Some(host) = self.host
+            && !matches!(message, Message::Request(_))
+        {
+            dispatch.touch(host);
+        }
+        let reply = match message {
             Message::Stop if self.host.is_some() => {
                 // 停止命令仍打开调用进程核对映像；普通宿主不经过此路径，也不被打开。
                 self.end.pipe.verify_client_image(image)?;
@@ -228,14 +224,12 @@ impl Slot {
                 self.host = Some(host);
                 tigertype_ipc::encode(&Message::Welcome { generation, host })?
             }
-            Message::Request(mut request) => {
+            Message::Request(request) => {
                 let host = self.host.ok_or("握手前收到输入请求")?;
-                // 输入配置来自后台启动时已校验的设置，不在输入路径读盘。
-                if matches!(request.command, Command::Open { .. }) {
-                    request.command = Command::Open { options };
-                }
-                let frame = tigertype_ipc::encode(&Message::Request(request))?;
-                dispatch.dispatch(host, &frame)?
+                let response = dispatch.handle(host, request);
+                // 编码失败时已改变的会话状态无法交给宿主，也不能重放：整条调度失效，宿主随断开取消未上屏组合。
+                tigertype_ipc::encode(&Message::Response(response))
+                    .inspect_err(|_| dispatch.invalidate())?
             }
             _ => return Err("宿主请求类型不符".into()),
         };
@@ -250,14 +244,13 @@ pub struct Server<'a> {
     dispatch: Dispatcher<'a>,
     generation: u64,
     namespace: String,
-    options: Options,
     image: std::path::PathBuf,
-    clock: u64,
     reload: Arc<Latest<Options>>,
     ui: Ui,
 }
 impl<'a> Server<'a> {
     /// namespace 在正式入口固定为 backend；测试使用新建独立标签，不连接现用后台。
+    /// options 为启动时已校验的设置，会话据此打开，之后经热重载更新。
     pub fn new(dictionary: &'a Dictionary, namespace: &str, options: Options) -> Result<Self> {
         // 沙箱宿主须以受限查询打开后台核对映像；只改本进程对象 DACL，退出即失效。
         grant_app_container_query()?;
@@ -286,12 +279,10 @@ impl<'a> Server<'a> {
             runtime,
             owner: Some(owner),
             slots,
-            dispatch: Dispatcher::new(dictionary, generation)?,
+            dispatch: Dispatcher::new(dictionary, generation, options)?,
             generation,
             namespace: namespace.into(),
-            options,
             image: std::env::current_exe()?,
-            clock: 0,
             reload: Arc::new(Latest::new()?),
             ui: Ui::default(),
         })
@@ -312,29 +303,24 @@ impl<'a> Server<'a> {
             }
         }
     }
-    /// 最后一个空槽被占用或会话达上限时，回收最久未用、非焦点、无组合且无未读字节的宿主；
-    /// 持有任务栏图标的宿主不回收，否则通知区图标会与任务栏图标同时出现。
+    /// 回收策略在调度器（最后一个空槽被占用或会话达上限时选最久未用、非焦点、无组合者）；
+    /// 这里只补传输条件：无半帧、无在途回复；持有任务栏图标的宿主不回收，否则通知区图标会与任务栏图标同时出现。
     /// 待重建的槽位算作空槽，避免旧实例释放前重复回收。
     fn reclaim(&mut self) {
-        let free = self
+        let spare = self
             .slots
             .iter()
             .any(|slot| slot.as_ref().is_none_or(|slot| !slot.end.connected));
-        if free && !self.dispatch.full() {
-            return;
-        }
-        let victim = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                let slot = slot.as_ref()?;
-                let host = slot.host?;
-                (slot.quiet() && self.dispatch.idle(host) && self.ui.holder != Some(host))
-                    .then_some((slot.used, index))
-            })
-            .min();
-        if let Some((_, index)) = victim {
+        let slot = |host| {
+            self.slots
+                .iter()
+                .position(|slot| slot.as_ref().is_some_and(|slot| slot.host == Some(host)))
+        };
+        let quiet = |host| {
+            self.ui.holder != Some(host)
+                && slot(host).is_some_and(|index| self.slots[index].as_ref().unwrap().quiet())
+        };
+        if let Some(index) = self.dispatch.reclaimable(spare, quiet).and_then(slot) {
             self.remove(index);
         }
     }
@@ -352,7 +338,6 @@ impl<'a> Server<'a> {
             // 热重载先于本轮请求生效：保存完成之后发出的请求一定用上新设置。
             // 新会话随 Open 拿到新设置，已打开的会话等组合结束再换。
             if let Some(options) = self.reload.take()? {
-                self.options = options;
                 self.dispatch.reconfigure(options);
             }
             // 每次事件只访问固定 16 槽；空闲等待内核事件，不遍历词表、不忙轮询。
@@ -362,9 +347,7 @@ impl<'a> Server<'a> {
                         .tick(
                             &mut self.dispatch,
                             self.generation,
-                            self.options,
                             &self.image,
-                            &mut self.clock,
                             &mut self.ui,
                         )
                         .is_err()
@@ -478,8 +461,11 @@ pub fn run(tables: &Path, directory: &Path, show: bool) -> Result<()> {
 mod tests {
     use super::*;
     use std::process::Command as ProcessCommand;
-    use tigertype_contracts::{OutputForm, protocol::Reply};
-    use tigertype_engine::{Data as EngineData, Entry};
+    use tigertype_backend::{Data as EngineData, Entry};
+    use tigertype_contracts::{
+        OutputForm,
+        protocol::{Command, Reply},
+    };
     use tigertype_ipc::service::Client;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
@@ -490,7 +476,7 @@ mod tests {
             ProcessCommand::new(std::env::current_exe()?).args([
                 "--ignored",
                 "--exact",
-                "backend::tests::show_and_reload_worker",
+                "windows::server::tests::show_and_reload_worker",
             ]),
             Duration::from_secs(20),
         )?;

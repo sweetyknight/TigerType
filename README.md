@@ -37,7 +37,7 @@ cargo run --locked --offline -p tigertype-app -- lookup 'D:\Projects\TigerType\r
 # 核心诊断仅输出 JSON 状态，不向其他应用上屏。
 cargo run --locked --offline -p tigertype-app -- demo-input 'D:\Projects\TigerType\resources\tiger' 'unid '
 # 完整码表单列验收，不包含在普通测试的 passed 中。
-cargo test --locked --offline -p tigertype-app --test locked_resources -- --ignored --nocapture
+cargo test --locked --offline -p tigertype-backend --test locked_resources -- --ignored --nocapture
 ```
 
 CLI 查询输出第一页。锁定清单编译进程序，SHA256 用于核对来源与损坏，不是发布者签名。更换码表版本须同时替换文件、更新清单与安装脚本，打包驱动会核对三者一致。
@@ -97,7 +97,7 @@ cargo run --locked --offline -p tigertype-app -- stop
 
 `serve` 省略两个路径时使用安装版位置：程序目录下的 `tiger` 码表目录与 `%APPDATA%\TigerType`（不存在则新建）。`tigertype.exe` 为 GUI 子系统程序，开机自启与开始菜单唤起都不弹控制台；从终端直接运行时借用父控制台输出（PowerShell 不等待 GUI 程序结束，诊断请用 `cargo run`）。无控制台时 `serve`、`lookup-window` 启动失败会弹出错误框。
 
-后台独占本登录会话，预建 16 个请求管道（协议 v12，旧版程序不得混用），设置在内存中，设置页保存后热重载。用 `stop` 停止；强行结束进程不会经过停止确认。后台异常或退出由用户重新启动（安装版可点开始菜单“查字与设置”一并启动）。
+后台独占本登录会话，预建 16 个请求管道（协议 v13，旧版程序不得混用），设置在内存中，设置页保存后热重载。用 `stop` 停止；强行结束进程不会经过停止确认。后台异常或退出由用户重新启动（安装版可点开始菜单“查字与设置”一并启动）。
 
 管道只授权本登录 SID 与 ALL APPLICATION PACKAGES，并带低完整性标签：AppContainer/低完整性宿主可连接，Untrusted 级被拒。后台只核对同会话，不打开宿主进程；宿主核对管道所有者、会话和后台映像，因此后台须以普通（非提升）权限运行，提升启动时管道所有者为 Administrators，宿主会拒绝连接。16 槽占满或合计会话达上限时，后台回收最久未用、无焦点且无组合的宿主，该宿主下次发送前发现断开并重连一次。`stop` 在停止确认后还等后台进程真正退出（与确认共用 5 秒期限）才返回成功，不承诺宿主 DLL 已卸载。
 

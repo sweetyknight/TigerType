@@ -1,8 +1,8 @@
 //! 安装包打包驱动：构建 release 程序（静态 CRT）、校验锁定码表、随包字体与语言文件（均在仓库内），
 //! 再调用 Inno Setup 编译 installer/tigertype.iss。不安装、不注册、不修改系统；产物在 target\package。
 use std::{ffi::OsString, fs, path::Path, process::Command, time::Duration};
-use tigertype_app::{Result, TABLES, fonts, import, plain, process, project_root, resources};
-use tigertype_engine::Dictionary;
+use tigertype_app::{Result, TABLES, process, project_root, windows::fonts};
+use tigertype_backend::{Dictionary, import, plain, resources};
 
 /// 取自 Inno Setup 官方仓库 is-6_7_3 标签的 Files/Languages/Unofficial/ChineseSimplified.isl。
 const LANGUAGE_SHA256: &str = "7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278";

@@ -3,7 +3,8 @@
 mod policy;
 use serde_json::{Value, json};
 use std::process::Command;
-use tigertype_app::{Result, TABLES, import, project_root, resources};
+use tigertype_app::{Result, TABLES, project_root};
+use tigertype_backend::{import, resources};
 
 #[test]
 fn workspace_architecture_and_documentation() -> Result<()> {
@@ -97,6 +98,65 @@ fn dependency_policy_detects_alias_platform_dev_build_transitive_cycles_and_unkn
     assert!(policy::architecture(&bad).is_err());
 }
 
+/// 成员 origin 经直接依赖 via 传递到达名为 reached 的包。
+fn reach(origin: &str, via: &str, reached: &str) -> Value {
+    json!({
+        "workspace_members":["a"],
+        "packages":[
+            {"id":"a","name":origin,"dependencies":[{"name":via,"rename":null,"kind":null,"target":null}]},
+            {"id":"b","name":via,"dependencies":[]},
+            {"id":"c","name":reached,"dependencies":[]}
+        ],
+        "resolve":{"nodes":[{"id":"a","deps":[{"name":via,"pkg":"b"}]},{"id":"b","deps":[{"pkg":"c"}]},{"id":"c","deps":[]}]}
+    })
+}
+#[test]
+fn layering_follows_the_multi_platform_rules() {
+    // 允许：backend 经 windows-sys 到达链接支撑；app 组装 backend（及其下的 engine）；平台前端经 frontend 到 contracts。
+    for (origin, via, reached) in [
+        ("tigertype-backend", "windows-sys", "windows-link"),
+        ("tigertype-app", "tigertype-backend", "tigertype-engine"),
+        ("tigertype-tsf", "tigertype-frontend", "tigertype-contracts"),
+    ] {
+        assert!(
+            policy::architecture(&reach(origin, via, reached)).is_ok(),
+            "{origin} -> {reached}"
+        );
+    }
+    for (origin, via, reached) in [
+        // 平台无关层不得到达任何平台包。
+        ("tigertype-frontend", "tigertype-contracts", "windows-sys"),
+        ("tigertype-frontend", "tigertype-contracts", "objc2"),
+        ("tigertype-engine", "tigertype-contracts", "libc"),
+        // backend 只许文件原语，且不碰传输、前端会话与界面。
+        ("tigertype-backend", "windows-sys", "windows"),
+        ("tigertype-backend", "tigertype-contracts", "objc2-app-kit"),
+        ("tigertype-backend", "tigertype-ipc", "tigertype-contracts"),
+        ("tigertype-backend", "tigertype-engine", "tigertype-ipc"),
+        ("tigertype-backend", "tigertype-contracts", "tigertype-ui"),
+        (
+            "tigertype-backend",
+            "tigertype-contracts",
+            "tigertype-frontend",
+        ),
+        // 界面不碰引擎、后台、前端会话与传输。
+        ("tigertype-ui", "tigertype-contracts", "tigertype-backend"),
+        ("tigertype-ui", "tigertype-contracts", "tigertype-frontend"),
+        // 平台前端不碰引擎、后台与界面，彼此不依赖。
+        ("tigertype-tsf", "tigertype-ipc", "tigertype-backend"),
+        ("tigertype-tsf", "tigertype-frontend", "tigertype-imk"),
+        ("tigertype-tsf", "tigertype-frontend", "tigertype-engine"),
+        // 只有 app 组装平台前端；组装层也不直接依赖 engine。
+        ("tigertype-ipc", "tigertype-contracts", "tigertype-tsf"),
+        ("tigertype-app", "tigertype-engine", "tigertype-contracts"),
+    ] {
+        assert!(
+            policy::architecture(&reach(origin, via, reached)).is_err(),
+            "{origin} -> {reached}"
+        );
+    }
+}
+
 #[test]
 fn ui_cannot_call_engine_even_through_an_alias_or_transitive_dependency() {
     // UI 已加入工作区，必须继续拒绝绕过应用组装层直接查词表。
@@ -158,7 +218,7 @@ fn document_inventory_and_core_unsafe_policy_cannot_be_silently_removed() -> Res
     ] {
         std::fs::write(root.join(name), "# 合成文档")?;
     }
-    for name in ["engine", "contracts"] {
+    for name in ["engine", "contracts", "frontend"] {
         let dir = root.join(format!("crates/{name}/src"));
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("lib.rs"), "#![forbid(unsafe_code)]")?;

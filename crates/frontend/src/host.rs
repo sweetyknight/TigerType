@@ -1,12 +1,23 @@
-//! 宿主线程与后台的会话编号：懒连接；新连接先 Open，文档焦点变化后先 Focus，宿主终止组合后先 Clear，
-//! 均与本键共用同一截止时间。传输失败作废连接，已写出的请求不重放。
+//! 宿主侧会话：懒连接；新连接先 Open，文档焦点变化后先 Focus，宿主终止组合后先 Clear，
+//! 均与本键共用同一截止时间。通道失败即作废连接，已发出的请求不重放；各平台前端同一份。
 use std::time::Instant;
 use tigertype_contracts::{
     InputState, Key, KeyOutcome, Options,
     protocol::{Command, Panel, Rejection, Reply},
 };
-use tigertype_ipc::Error;
 
+/// 会话失败的原因；调用方一律取消未上屏组合、放行原键，原因只供诊断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    /// 通道连不上、传输失败或超时；实现已作废连接。
+    Transport,
+    /// 后台拒绝会话请求。
+    Rejected,
+    /// 会话编号或焦点代次耗尽。
+    Exhausted,
+}
+
+/// 宿主到后台的通道：跨进程（Windows 命名管道）或进程内（macOS 引擎线程）；请求带绝对截止时间。
 pub trait Channel {
     /// true 表示刚建立新连接：后台上的旧会话与焦点均已不存在。
     fn ensure(&mut self, deadline: Instant) -> Result<bool, Error>;
@@ -52,7 +63,7 @@ impl<C: Channel> Host<C> {
             indicated: false,
         }
     }
-    /// 上次回复的状态，只供 OnTestKeyDown 本地判定，不发 IPC。
+    /// 上次回复的状态，只供本地预判，不发请求。
     pub fn state(&self) -> &InputState {
         &self.state
     }
@@ -143,7 +154,7 @@ impl<C: Channel> Host<C> {
             )) => Ok(None),
             Ok(_) => {
                 self.fail();
-                Err(Error::Invalid("后台拒绝选字"))
+                Err(Error::Rejected)
             }
             Err(error) => {
                 self.fail();
@@ -177,14 +188,14 @@ impl<C: Channel> Host<C> {
     fn call(&mut self, command: Command, deadline: Instant) -> Result<(), Error> {
         // 回复类型已由协议层与请求配对校验，这里只需区分拒绝。
         match self.channel.request(self.session, command, deadline)? {
-            Reply::Rejected(_) => Err(Error::Invalid("后台拒绝会话请求")),
+            Reply::Rejected(_) => Err(Error::Rejected),
             _ => Ok(()),
         }
     }
     fn exchange(&mut self, key: Key, deadline: Instant) -> Result<KeyOutcome, Error> {
         self.ensure(deadline)?;
         if self.session == 0 {
-            self.last_session = self.last_session.checked_add(1).ok_or(Error::Closed)?;
+            self.last_session = self.last_session.checked_add(1).ok_or(Error::Exhausted)?;
             self.session = self.last_session;
             self.focused = false;
             // 选项以后台启动时读入的设置为准，宿主不读盘，Open 只携带占位默认值。
@@ -198,7 +209,7 @@ impl<C: Channel> Host<C> {
         }
         for retry in [false, true] {
             if !self.focused {
-                self.epoch = self.epoch.checked_add(1).ok_or(Error::Closed)?;
+                self.epoch = self.epoch.checked_add(1).ok_or(Error::Exhausted)?;
                 self.call(
                     Command::Focus {
                         epoch: self.epoch,
@@ -227,7 +238,7 @@ impl<C: Channel> Host<C> {
                 _ => break,
             }
         }
-        Err(Error::Invalid("后台拒绝按键"))
+        Err(Error::Rejected)
     }
 }
 
@@ -346,7 +357,10 @@ mod tests {
         assert!(indicated(&fake).is_empty());
         // 报告失败作废连接（后台随断开遗忘），仍记下取得，下个新连接补报。
         let cancelled = fake.0.borrow().cancelled;
-        fake.0.borrow_mut().indicate.push_back(Err(Error::TimedOut));
+        fake.0
+            .borrow_mut()
+            .indicate
+            .push_back(Err(Error::Transport));
         assert!(!host.indicate(true, deadline()));
         assert_eq!(fake.0.borrow().cancelled, cancelled + 1);
         fake.0.borrow_mut().fresh.push_back(Ok(true));
@@ -446,7 +460,7 @@ mod tests {
             ok(Reply::Opened),
             ok(Reply::Focused),
             Ok(outcome("u")),
-            Err(Error::TimedOut),
+            Err(Error::Transport),
         ]);
         host.key(Key::Character('u'), deadline()).unwrap();
         assert!(host.key(Key::Character('u'), deadline()).is_err());
@@ -468,7 +482,7 @@ mod tests {
     fn connect_failure_and_rejected_open_never_send_the_key() {
         let fake = Fake::default();
         let mut host = Host::new(fake.clone());
-        fake.0.borrow_mut().fresh.push_back(Err(Error::Busy));
+        fake.0.borrow_mut().fresh.push_back(Err(Error::Transport));
         assert!(host.key(Key::Character('u'), deadline()).is_err());
         assert!(take_log(&fake).is_empty());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
@@ -539,7 +553,7 @@ mod tests {
             ok(Reply::Opened),
             ok(Reply::Focused),
             Ok(outcome("u")),
-            Err(Error::TimedOut),
+            Err(Error::Transport),
         ]);
         host.key(Key::Character('u'), deadline()).unwrap();
         assert!(host.select(9, 1, deadline()).is_err());
@@ -552,7 +566,7 @@ mod tests {
         let fake = Fake::default();
         let mut host = Host::new(fake.clone());
         // 后台不在：判定不可吃键，也不发任何请求。
-        fake.0.borrow_mut().fresh.push_back(Err(Error::Busy));
+        fake.0.borrow_mut().fresh.push_back(Err(Error::Transport));
         assert!(!host.ready(deadline()));
         assert!(take_log(&fake).is_empty());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
@@ -584,7 +598,7 @@ mod tests {
         let fake = Fake::default();
         let mut host = Host::new(fake.clone());
         // 后台不在：不发唤起请求。
-        fake.0.borrow_mut().fresh.push_back(Err(Error::Busy));
+        fake.0.borrow_mut().fresh.push_back(Err(Error::Transport));
         assert!(!host.show(Panel::Settings, deadline()));
         assert!(fake.0.borrow().shown.is_empty());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
@@ -602,7 +616,7 @@ mod tests {
         host.key(Key::Character('u'), deadline()).unwrap();
         assert_eq!(take_log(&fake), [(1, key(1))]);
         // 唤起失败作废连接，下一键在新连接上重建会话。
-        fake.0.borrow_mut().show.push_back(Err(Error::TimedOut));
+        fake.0.borrow_mut().show.push_back(Err(Error::Transport));
         assert!(!host.show(Panel::Lookup, deadline()));
         assert_eq!(fake.0.borrow().cancelled, 2);
         assert_eq!(fake.0.borrow().shown, [Panel::Settings, Panel::Lookup]);

@@ -1,6 +1,6 @@
 //! 隐藏候选窗：不在桌面显示、不注入系统输入，鼠标消息直接发给本测试线程的窗口。
 use super::*;
-use tigertype_contracts::{Candidate, Theme, without_blue};
+use tigertype_contracts::{Candidate, InputMode, Theme, without_blue};
 use windows::{
     Win32::{
         System::{
@@ -30,7 +30,7 @@ fn state(count: usize, highlighted: usize) -> InputState {
         ..Default::default()
     }
 }
-const CARET: RECT = RECT {
+const CARET: Rect = Rect {
     left: 100,
     top: 100,
     right: 110,
@@ -140,13 +140,13 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
     shown.is_last_page = false;
     popup.show(&shown, CARET, HWND::default()).unwrap();
     assert!(popup.view.borrow().layout.footer.is_some());
-    assert!(paged(&shown));
+    assert!(footer(&shown).is_some_and(|footer| footer.pager.is_some()));
     // 拼音反查只有一页时页脚只留标签，不画翻页指示。
     shown.is_last_page = true;
     shown.mode = InputMode::Pinyin;
     popup.show(&shown, CARET, HWND::default()).unwrap();
     assert!(popup.view.borrow().layout.footer.is_some());
-    assert!(!paged(&shown));
+    assert!(footer(&shown).is_some_and(|footer| footer.pager.is_none()));
     // 候选文字来自后台进程：为空时不得把空 Vec 的悬空指针交给 DrawTextW 而让宿主崩溃。
     shown.candidates[0].text.clear();
     shown.candidates[0].label.clear();
@@ -166,41 +166,6 @@ fn missing_font_falls_back_to_the_next_face_in_priority_order() {
         let _ = DeleteObject(font.into());
         ReleaseDC(None, dc);
     }
-}
-
-#[test]
-fn position_stays_inside_a_negative_coordinate_monitor_and_flips_above_the_bottom_edge() {
-    let work = RECT {
-        left: -1920,
-        top: -100,
-        right: 0,
-        bottom: 980,
-    };
-    let caret = RECT {
-        left: -10,
-        top: 960,
-        right: 0,
-        bottom: 980,
-    };
-    let expected = RECT {
-        left: -300,
-        top: 560,
-        right: 0,
-        bottom: 960,
-    };
-    assert_eq!(position(caret, work, 300, 400), expected);
-    assert_eq!(position(work, work, 4000, 4000), work);
-    assert!(
-        bounded(&CARET)
-            && !bounded(&RECT {
-                left: 1,
-                ..RECT::default()
-            })
-    );
-    assert!(!bounded(&RECT {
-        right: 2_000_000,
-        ..RECT::default()
-    }));
 }
 
 #[test]

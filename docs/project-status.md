@@ -4,27 +4,30 @@
 
 ## 总体
 
-最近提交为 10-27 “新安装不生效”批次（协议仍为 v13，直接拒绝 v2–v12）：修复了打开设置外观区即令后台崩溃的空文本绘制、`stop` 不等后台退出，并让安装包经重启管理器关闭/重启仍载旧版 DLL 的程序，已打包并安装到本机（打包后只改了注释与文档）；设置窗外观区与查字输入只做了少量真机操作，其余界面仍以离屏渲染与命令行核对为主。未读取个人词库。
+最近提交为 10-27 P0 Windows 侧重构（多平台架构的第一步，行为不变，协议仍为 v13、直接拒绝 v2–v12）：平台无关层拆出 frontend 与 backend，app 分出 `windows/`，架构测试改为多平台规则；只经统一入口、完整码表验收与打包驱动验证，未安装、未做真机回归。本机安装版仍为此前“新安装不生效”批次（已安装，打包后只改了注释与文档）；设置窗外观区与查字输入只做了少量真机操作，其余界面仍以离屏渲染与命令行核对为主。未读取个人词库。
 
 | 组件 | 现状 |
 |---|---|
 | 数据/引擎 | 锁定码表原文随仓库入库（`resources/tiger`），启动时按清单核对后直接解析单字与 tigress 词码，不再生成数据包；单字/词模式（默认单字）、常用字过滤、简繁、拼音反查、查词、全角会话开关、满码顶屏 |
-| 多宿主后台 | 16 槽请求管道、AC/低完整性 DACL、双侧认证、懒连接重连一次、LRU 回收、serve/stop；查字/设置 UI 与工作线程在同进程，设置保存即热重载 |
+| 多宿主后台 | 16 槽请求管道、AC/低完整性 DACL、双侧认证、懒连接重连一次、LRU 回收（策略在 backend 调度器，反应器只补传输条件）、serve/stop；查字/设置 UI 与工作线程在同进程，设置保存即热重载 |
 | TSF TIP | 两种位数；按键同步编辑会话、宿主内自绘候选窗与 UIA（宿主布局通知补位/移动）、点击异步选字、任务栏输入法图标（中/英，单击切换；右键菜单为显示当前状态的中文/英文、半角/全角、中文/英文标点，加查字、设置）；注册时登记同目录 `tigertype.ico` 为配置图标；激活时打开并监听键盘开闭状态 |
 | 通知区图标 | 后台常驻，虎码印章图标；单击开设置、右键菜单为查字/设置；任务栏显示本输入法图标时隐藏（两处同一时刻只显示一个） |
 | 查字/设置 | 主题自绘（琥珀/墨/竹/玫红/自定义，全部无蓝）。设置窗 720×520 分输入/外观/快捷键/高级四区，修改即时保存、超出时滚动，自定义四色可点色板或输入色值并即时校验；配置为带注释的 `config/settings.toml`，可打开并重新载入。查字窗 520×400：查询框、横排字块、详情卡（编码键帽、拆分字块、复制当前字） |
 | 安装包 | Inno Setup 6.7.3；全机安装、两种位数注册（含配置图标 `tigertype.ico`，打包时现画）、随包字体、HKLM Run 自启；升级先停后台并等其退出，准备页经重启管理器列出仍载现版或历次 `*.old` 旧版的程序供关闭/重启，不关的改名后照常安装，装完清掉无人使用的 `*.old`；静默安装/升级在本机实测过，交互准备页、自动关闭真实程序、卸载与其他电脑（含 Win10）未实测 |
 | 长期使用 | 未开始 |
-| macOS 端 | 方案已定（实施方案“多平台架构”“macOS 端”），未开始实现；其前置的 P0 Windows 侧重构（frontend/backend）也未开始 |
+| macOS 端 | 方案已定（实施方案“多平台架构”“macOS 端”）；前置的 P0 Windows 侧重构已完成（frontend/backend 已建，见本批），M1 起的 Mac 代码未开始 |
 | Linux 端 | 只预留接入位置，未定框架（IBus 或 Fcitx5） |
 
-## 本批：多平台架构与 macOS 方案（2026-10-27，仅文档）
+## 本批：P0 Windows 侧重构（2026-10-27，未部署）
 
-- 来源：用户要求虎码适配 Mac，各功能解耦、无循环依赖、便于维护；开发期不向后兼容，可做完整干净的架构。随后补充：Mac 端管理员安装以免冲突，只自己用、不做代码签名，资源占用要低、能用 Rust 就用 Rust（必要时汇编），之后还要做 Linux，须预留位置；先把方案写进文档并提交，开发由用户之后分步推进。
-- 调研结论：macOS 输入法本身就是独立进程（IMK 服务端，系统按需拉起），引擎、候选面板与查字/设置窗可同进程，Windows 的命名管道、16 槽、DACL/AppContainer、DLL 驻留与注册在 Mac 上都没有对应物；objc2 有 InputMethodKit 绑定，但未找到用它子类化 `IMKInputController` 的 Rust 先例；应用自带强调色只在用户选“多色”时生效，无蓝色须像 Windows 一样自绘控件；系统绘制的输入法菜单悬停高亮无法避开强调色。
-- 决定（写入实施方案）：平台无关层另立 frontend（宿主侧会话、按键规则、单击 Shift、候选视图模型与摆放）与 backend（码表、设置、受管目录、类型化调度与回收、查字控制器、进程内引擎线程），`Message` 与协议版本移入 ipc，删除 contracts 中的平台字体名；macOS 新增 imk 前端与 ui 的 appkit 视图，app 为唯一组装点；依赖分层与禁止边由架构测试强制。Mac 为三固定线程的单进程，管理员安装到 `/Library/Input Methods`，打包与安装器全用 Rust，不签名、不做通用二进制。Linux 只记两种可选形态与届时新增的位置。
-- 改动：实施方案新增“多平台架构”“macOS 端”两节并在产品范围、架构说明、工程治理、迁移步骤中引用；AGENTS 补平台范围、Mac 打包工具、资源占用与汇编、前端依赖、FFI 回调、按键预算与数据位置；README 首段说明 Mac 尚不可用、Linux 预留。未改代码。
-- 未做：P0 重构与任何 Mac 代码；Mac 上的探针（只有链接器签名的输入法能否加载、objc2 子类化、主线程跟踪循环是否延迟按键）；Mac 芯片与系统版本待用户告知。
+- 来源：用户要求按 Mac 端接入要求先完成实施方案中的 P0（Windows 侧重构、行为不变），完成后提交。上批（多平台架构与 macOS 方案，仅文档）的决定已写入实施方案。
+- 新增 `tigertype-frontend`（只依赖 contracts，禁止 unsafe）：宿主侧会话 `Host`/`Channel` 由 tsf 移入，错误改为前端自己的 `Error`（传输/拒绝/编号耗尽，tsf 把 ipc 错误一律映射为传输失败，处理不变）；`PhysicalKey` 与逻辑键规则 `map`，tsf 只把虚拟键换成物理键；单击 Shift 判定 `ShiftTap`；候选窗视图模型 `rows`/`footer`（仅多页显示翻页、拼音标签）；左上原点的 `Rect` 与 `bounded`、`position`，以及按序惰性取第一个有界位置的 `locate`，tsf 按原顺序给出组合矩形 → 系统光标 → 原位置 → 上次组合位置 → 输入区域 → 视图/焦点窗口。
+- 新增 `tigertype-backend`（依赖 contracts、engine）：由 app 移入码表核对与加载、`settings.toml`、受管目录、查字/设置控制器与资源工具；`Dispatcher::handle(host, Request) -> Response` 类型化，不再在调度器里解码再编码；会话一律以后台当前设置打开（原先由 app 改写 Open 携带的占位选项）；回收策略 `reclaimable(spare, quiet)` 与最近使用时钟移入调度器，Windows 反应器只补“无半帧、无在途回复、不持有任务栏图标”；公开 `Dictionary`/`Data`/`Entry`，app 不再直接依赖 engine，`demo-input` 改调 `backend::demo`。
+- `Message` 与协议版本由 contracts 移入 ipc（ipc 为派生另依赖 serde），线格式不变；删除 `CandidateFont::face()`，字体名改在 tsf 与 ui 各自的 Windows 视图内。app 分出 `src/windows/`（`server` 管道反应器、`cli` 命令行、`fonts` 字体安装、安装版路径），`main.rs` 只转调；app 依赖 contracts、backend、ui，ipc 只在 Windows 目标。
+- 仅内部故障路径的差异：引擎内部失败原先让后台断开该宿主，现在回复 `Rejected(Unavailable)` 并使整条调度失效；两种情况下宿主都取消未上屏组合、放行原键并作废连接，之后请求一律“不可用”，须用户重启后台。回复编码失败仍断开该宿主并使调度失效。
+- 架构测试改为方案“多平台架构”的规则：成员表加 frontend、backend；contracts/engine/frontend 不得到达任何平台包（`windows*`、`objc2*`、`block2`、`dispatch2`、`core-foundation*`、`libc`）；backend 只许 windows-sys/libc 文件原语，不得到达 ipc、frontend、ui；只有 app 依赖 backend 与平台前端（清单 tsf、imk）；平台前端不得到达 engine、ui；ui 不得到达 engine、frontend、ipc；frontend 也须 `forbid(unsafe_code)`。统一入口命令未变，Apple 目标的 Clippy 待 M1 引入目标后加入。
+- 测试：新增按键规则、单击 Shift、视图模型、摆放与位置退路（摆放测试由 tsf 移入）、tsf 虚拟键映射、“会话以后台设置打开”、回收策略（最久未用、仍有空闲接入位不回收、会话满即回收、平台否决、焦点与组合保护）与 16 组分层正反例；路由测试改为类型化收发，完整码表验收移入 backend。反例：回收策略去掉“仍有空闲接入位且会话未满不回收”、位置退路去掉有界过滤，对应测试均失败，已恢复。
+- 未做：Windows 真机回归（记事本、Typora 首键候选窗、点击选字、热重载、安装升级）——本会话没有电脑操控工具，未安装新包；ui 的 `native` 视图未改名为 `win32`（方案未把它列入 P0）。
 
 ## 本批：新安装不生效（2026-10-27，已安装本机）
 
@@ -130,6 +133,7 @@
 
 ## 未验证
 
+- P0 重构后的 Windows 真机回归：记事本、Typora 首键候选窗、点击选字、热重载、安装升级（新包未安装）。
 - UI 重设计批次的真机交互：设置窗四区切换、即时保存与热重载、色板菜单、重新载入、滚动与键盘导航；查字窗查询/翻页/复制；候选窗按每页 5 个分页与多页翻页指示；任务栏是否显示虎码印章而不再显示“简体”；任务栏输入法图标右键菜单三个状态项的切换；读屏器朗读新控件。
 - 候选窗布局通知在 Chrome/Edge、VS Code、微信、WebView2 与 UWP 宿主中的表现（只实测了 Typora 与 Notepad++）；读屏器对布局移动时新增 `EVENT_OBJECT_IME_CHANGE` 的反应。
 - 10-24 外部审阅批次修复的真机表现（选中替换、组合中停后台与单击 Shift、点击过期、托盘/系统菜单展开时 `stop`、顶屏热重载）。
@@ -140,6 +144,7 @@
 
 ## 最近验证
 
+- P0 Windows 侧重构（2026-10-27）：统一入口通过架构/文档 6 passed、fmt、Clippy 无告警，x64、x86 各 163 passed、8 ignored（不计辅助子进程；同口径下上批为 156，新增 7 项）；`artifacts/p0-check-20261027.log`。完整码表验收 1 passed（`artifacts/p0-locked-resources-20261027.log`）；`demo-input`、`lookup` 用 `resources/tiger` 冒烟正常（`artifacts/p0-cli-20261027.log`）；两个反例见 `artifacts/p0-mutations-20261027.log`。打包驱动离线构建两种位数 release 并编译安装包成功，SHA256 `d29c4fc02ceb94fcccbbf66362d7a40d5359eac18256967846e88a8bbc6c66c5`（`artifacts/p0-package-20261027.log`）；未安装、未做真机回归。
 - 多平台架构与 macOS 方案批次（2026-10-27，仅文档）：提交内容在独立临时工作树与独立 target 下运行统一入口，架构/文档 5 passed，fmt、Clippy 无告警，x64、x86 各 158 passed、8 ignored（与上批相同，未改代码）；`artifacts/macos-plan-check-20261027.log`。之后补写方案中进程内超时须移除旧宿主的一句与本条，只重跑架构/文档检查。无 Mac 上的任何验证。
 - 新安装不生效批次（2026-10-27）：统一入口通过架构/文档 5 项、fmt、Clippy，x64、x86 各 158 passed、8 ignored（新断言并入既有测试）；`artifacts/install-fix-check-20261027.log`（覆盖了此前两次失败：一次 Clippy 报测试未用返回值，一次同进程停止测试超时，均已修复）。离线打包安装包 SHA256 `260713931460a7d174c9031cd167cf95175a2d5b09a4d90343b9951125628299`（`artifacts/install-fix-package-20261027.log`），以 `/SILENT /NOCLOSEAPPLICATIONS` 在后台运行时升级安装成功（`artifacts/install-fix-setup-2-20261027.log`）；此前同批第一次正式安装的日志 `artifacts/install-fix-setup-20261026.log`（`[InstallDelete]` 方案退出码 8 的那次被其覆盖）。崩溃转储在 `%LOCALAPPDATA%\CrashDumps\tigertype.exe.30684.dmp`（不入库）。
 

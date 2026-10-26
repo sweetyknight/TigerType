@@ -6,20 +6,34 @@ use std::{
     path::Path,
 };
 
+/// 各成员允许的直接依赖（含 dev/build/平台条件依赖），与实施方案“多平台架构”的 crate 表一致。
 const RULES: &[(&str, &[&str])] = &[
     ("tigertype-contracts", &["serde"]),
     ("tigertype-engine", &["tigertype-contracts"]),
+    ("tigertype-frontend", &["tigertype-contracts"]),
     (
         "tigertype-ipc",
-        &["tigertype-contracts", "serde_json", "windows-sys"],
+        &["tigertype-contracts", "serde", "serde_json", "windows-sys"],
     ),
     ("tigertype-ui", &["tigertype-contracts", "windows-sys"]),
+    (
+        "tigertype-backend",
+        &[
+            "tigertype-contracts",
+            "tigertype-engine",
+            "serde",
+            "serde_json",
+            "sha2",
+            "toml",
+            "windows-sys",
+        ],
+    ),
     (
         "tigertype-tsf",
         &[
             "tigertype-contracts",
+            "tigertype-frontend",
             "tigertype-ipc",
-            "windows-sys",
             "windows",
             "windows-core",
         ],
@@ -28,17 +42,59 @@ const RULES: &[(&str, &[&str])] = &[
         "tigertype-app",
         &[
             "tigertype-contracts",
-            "tigertype-engine",
+            "tigertype-backend",
             "tigertype-ipc",
             "tigertype-ui",
             "serde",
             "serde_json",
-            "sha2",
-            "toml",
             "windows-sys",
         ],
     ),
 ];
+/// 平台前端 crate 清单（将来的 imk 与 Linux 前端加入此处）：彼此不依赖，只有 app 组装它们。
+const FRONTENDS: &[&str] = &["tigertype-tsf", "tigertype-imk"];
+/// 平台包：系统绑定、Objective-C 运行时与 libc。
+fn platform(name: &str) -> bool {
+    name == "windows"
+        || name.starts_with("windows-")
+        || name.starts_with("windows_")
+        || name == "winapi"
+        || name.starts_with("objc2")
+        || name == "block2"
+        || name == "dispatch2"
+        || name.starts_with("core-foundation")
+        || name == "libc"
+}
+/// backend 只许文件原语所需的 windows-sys（及其链接支撑）与 libc，不得到达界面或 COM 绑定。
+fn file_primitive(name: &str) -> bool {
+    matches!(name, "windows-sys" | "windows-link" | "libc")
+        || name.starts_with("windows-targets")
+        || name.starts_with("windows_")
+}
+/// 传递可达的禁止边：返回违规说明，None 为允许。
+fn forbidden(origin: &str, reached: &str) -> Option<&'static str> {
+    let frontend = FRONTENDS.contains(&reached);
+    if matches!(
+        origin,
+        "tigertype-contracts" | "tigertype-engine" | "tigertype-frontend"
+    ) && platform(reached)
+    {
+        return Some("平台无关层不得到达平台包");
+    }
+    if origin == "tigertype-backend" && platform(reached) && !file_primitive(reached) {
+        return Some("backend 只许文件原语平台包");
+    }
+    if origin != "tigertype-app" && (reached == "tigertype-backend" || frontend) {
+        return Some("只有 app 依赖 backend 与平台前端");
+    }
+    let banned: &[&str] = match origin {
+        "tigertype-backend" => &["tigertype-ipc", "tigertype-frontend", "tigertype-ui"],
+        "tigertype-ui" => &["tigertype-engine", "tigertype-frontend", "tigertype-ipc"],
+        _ if FRONTENDS.contains(&origin) => &["tigertype-engine", "tigertype-ui"],
+        _ => &[],
+    };
+    banned.contains(&reached).then_some("跨层依赖")
+}
 type Result<T> = std::result::Result<T, String>;
 fn array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>> {
     value[key]
@@ -100,20 +156,12 @@ pub fn architecture(metadata: &Value) -> Result<()> {
                 continue;
             }
             let current_name = string(by_id.get(current).ok_or("解析图引用未知包")?, "name")?;
-            let forbidden = matches!(
-                (name, current_name),
-                ("tigertype-tsf", "tigertype-engine" | "tigertype-ui")
-                    | (
-                        "tigertype-ui",
-                        "tigertype-engine" | "tigertype-tsf" | "tigertype-ipc"
-                    )
-            );
-            let platform_core = matches!(name, "tigertype-contracts" | "tigertype-engine")
-                && (current_name == "windows"
-                    || current_name.starts_with("windows-")
-                    || current_name == "winapi");
-            if forbidden || platform_core {
-                return Err(format!("传递架构违规：{name} 可达 {current_name}"));
+            if current != origin
+                && let Some(reason) = forbidden(name, current_name)
+            {
+                return Err(format!(
+                    "传递架构违规（{reason}）：{name} 可达 {current_name}"
+                ));
             }
             if ["librime", "rime", "mlua", "rlua", "opencc", "libloading"].contains(&current_name) {
                 return Err(format!("产品依赖包含退役运行库 {current_name}"));
@@ -223,7 +271,7 @@ pub fn documentation(root: &Path) -> Result<()> {
             ));
         }
     }
-    for name in ["contracts", "engine"] {
+    for name in ["contracts", "engine", "frontend"] {
         let path = root.join(format!("crates/{name}/src/lib.rs"));
         let source = fs::read_to_string(&path).map_err(|e| e.to_string())?;
         if !source
