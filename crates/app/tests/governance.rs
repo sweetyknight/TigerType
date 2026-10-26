@@ -3,7 +3,7 @@
 mod policy;
 use serde_json::{Value, json};
 use std::process::Command;
-use tigertype_app::{Result, project_root, resources};
+use tigertype_app::{Result, TABLES, import, project_root, resources};
 
 #[test]
 fn workspace_architecture_and_documentation() -> Result<()> {
@@ -35,6 +35,27 @@ fn workspace_architecture_and_documentation() -> Result<()> {
     {
         policy::tracked_path(path)?;
     }
+    let mut expected: Vec<String> = import::SOURCES
+        .iter()
+        .map(|name| format!("resources/{TABLES}/{name}"))
+        .collect();
+    let fonts: Value =
+        serde_json::from_slice(&std::fs::read(root.join("resources/fonts.lock.json"))?)?;
+    for font in fonts["fonts"].as_array().ok_or("字体清单缺少 fonts")? {
+        let path = font["path"].as_str().ok_or("字体清单缺少 path")?;
+        expected.push(format!("resources/fonts/{path}"));
+    }
+    expected.push("installer/ChineseSimplified.isl".into());
+    let eol = Command::new("git")
+        .args(["ls-files", "--eol", "--", "resources", "installer"])
+        .current_dir(&root)
+        .output()?;
+    assert!(
+        eol.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eol.stderr)
+    );
+    policy::raw_resources(std::str::from_utf8(&eol.stdout)?, &expected)?;
     Ok(())
 }
 
@@ -42,7 +63,7 @@ fn metadata() -> Value {
     json!({
         "workspace_members":["core"],
         "packages":[
-            {"id":"core","name":"tigertype-engine","dependencies":[{"name":"serde","rename":"innocent","kind":null,"target":null}]},
+            {"id":"core","name":"tigertype-contracts","dependencies":[{"name":"serde","rename":"innocent","kind":null,"target":null}]},
             {"id":"serde","name":"serde","dependencies":[]}
         ],
         "resolve":{"nodes":[{"id":"core","deps":[{"name":"innocent","pkg":"serde"}]},{"id":"serde","deps":[]}]}
@@ -61,6 +82,10 @@ fn dependency_policy_detects_alias_platform_dev_build_transitive_cycles_and_unkn
     assert!(policy::architecture(&bad).is_err());
     let mut bad = metadata();
     bad["resolve"]["nodes"][1]["deps"] = json!([{"pkg":"core"}]);
+    assert!(policy::architecture(&bad).is_err());
+    // 码表不再序列化，引擎只依赖 contracts；重新引入 serde 也须先改规则。
+    let mut bad = metadata();
+    bad["packages"][0]["name"] = json!("tigertype-engine");
     assert!(policy::architecture(&bad).is_err());
     let mut bad = metadata();
     bad["packages"][0]["name"] = json!("tigertype-unapproved");
@@ -96,6 +121,15 @@ fn documentation_policy_detects_broken_links_and_forbidden_artifacts() -> Result
     assert!(policy::links(&root, &file, "[失效](missing.md)").is_err());
     assert!(policy::links(&root, &file, "[空]()").is_err());
     assert!(policy::links(&root, &file, "[网页](https://example.com)").is_ok());
+    // 反例：未跟踪、或仍按文本换行规范化的锁定资源都须被拒绝。
+    let expected = ["resources/tiger/a.yaml".to_owned()];
+    let raw = "i/crlf  w/crlf  attr/-text           \tresources/tiger/a.yaml\n";
+    assert!(policy::raw_resources(raw, &expected).is_ok());
+    assert!(policy::raw_resources("", &expected).is_err());
+    let converted = "i/lf    w/crlf  attr/text=auto eol=lf \tresources/tiger/a.yaml\n";
+    assert!(policy::raw_resources(converted, &expected).is_err());
+    let other = "i/crlf  w/crlf  attr/-text           \tresources/tiger/a.yaml.bak\n";
+    assert!(policy::raw_resources(other, &expected).is_err());
     for name in [
         "vendor/data.txt",
         "target/file.exe",

@@ -8,13 +8,22 @@
 
 | 组件 | 现状 |
 |---|---|
-| 数据/引擎 | 锁定资源导入单字与 tigress_ci 词码；数据包格式 v2（本批删去无人消费的旧 Win11Light 外观段，旧包被拒，须用 `--example package` 或 `import` 重新生成）；单字/词模式（默认单字）、常用字过滤、简繁、拼音反查、查词、全角会话开关、满码顶屏 |
+| 数据/引擎 | 锁定码表原文随仓库入库（`resources/tiger`），启动时按清单核对后直接解析单字与 tigress 词码，不再生成数据包；单字/词模式（默认单字）、常用字过滤、简繁、拼音反查、查词、全角会话开关、满码顶屏 |
 | 多宿主后台 | 16 槽请求管道、AC/低完整性 DACL、双侧认证、懒连接重连一次、LRU 回收、serve/stop；查字/设置 UI 与工作线程在同进程，设置保存即热重载 |
 | TSF TIP | 两种位数；按键同步编辑会话、宿主内自绘候选窗与 UIA（宿主布局通知补位/移动）、点击异步选字、任务栏输入法图标（中/英，单击切换，右键菜单设置/查字/全角/半角）；激活时打开并监听键盘开闭状态 |
 | 通知区图标 | 后台常驻，单击开设置、右键菜单；任务栏显示本输入法图标时隐藏（两处同一时刻只显示一个） |
 | 查字/设置 | 主题自绘（琥珀/墨/竹/玫红/自定义代码模板，全部无蓝），候选字体霞鹜文楷/楷体，设置本地与后台双重校验；设置页显示快捷键并可用系统默认编辑器打开 `config/settings.json` |
 | 安装包 | Inno Setup 6.7.3；全机安装、两种位数注册、随包字体、HKLM Run 自启；安装/升级在本机实测过，卸载与其他电脑（含 Win10）未实测 |
 | 长期使用 | 未开始 |
+
+## 本批：码表与字体入库、去掉 JSON 数据包（2026-10-26，未部署）
+
+- 来源：用户指出码表、字体被 `.gitignore` 排除，换电脑后无法重新打包，要求把需要的资源入库；码表不用 JSON（可读性差、加载慢）。
+- 入库：码表 9 项原文放 `resources/tiger`（来源：虎码官网盘 <https://huma.ysepan.com/> 下载的“虎码秃版 小狼毫（Win）”方案包，码表版本 2026.08.14，未作修改），三个字体放 `resources/fonts`，Inno 简体中文语言文件放 `installer/ChineseSimplified.isl`，共约 57MB（Git 压缩后约 28MB）。`.gitattributes` 对三者设 `-text`：`tiger.dict.yaml` 与 `tigress_ci.dict.yaml` 为 CRLF/LF 混用，原 `* text=auto eol=lf` 会在入库时改写字节，本机工作区仍正确、换机检出后 SHA256 才不符。`tiger.lock.json` 删去不再使用的 57 项（Rime 配置、Lua、其余 OpenCC 文件）并加来源。原 `vendor/tiger`（已逐字节核对与只读原件一致）、`vendor/fonts`、`vendor/inno` 已删除；`vendor/` 只剩退役路线的 librime/essay/prelude 下载，仍不入库。
+- 去掉数据包：删除 `import-resources`、`verify-package` 与 JSON 数据包（版本、摘要、保存/加载）；后台、`lookup`/`demo-input` 与打包驱动都直接读码表目录，按编译进程序的清单逐个核对大小/SHA256 后只解析所需数据段，缺文件时报错带路径。安装版码表在 `C:\Program Files\TigerType\tiger\`，安装时删除旧 `tiger-v1.json`。引擎词表类型不再序列化，engine 去掉 serde 依赖，架构规则同步收紧。
+- 顺带修复：`.cache/tiger-v1.json` 是 v1 旧包，README 开发命令用它会被拒——已删除，命令改用 `resources\tiger`；`tiger-v1.json` 文件名与包内 v2 格式对不上——随数据包一并去掉。
+- 测试：治理测试新增“锁定资源须已入库且为 `-text`”（反例：未跟踪、仍按 `text=auto` 规范化、同前缀的其他路径）与“engine 依赖 serde 即拒绝”；打包脚本测试改为逐个核对码表行与目标目录（反例：删去一行码表、把 opencc 子目录装平）；完整码表验收改为直接加载 `resources/tiger` 并记录加载耗时。
+- 实测：从索引模拟全新检出（本机系统级 `core.autocrlf=true`），13 个锁定文件 SHA256 全部与清单一致。release 版 `lookup` 冷启动（加载+一次查询）约 0.63s，旧 JSON 包约 0.80s，两者输出逐字节相同；剖析为读取+SHA256 约 30ms、文本解析约 190ms、建词表索引约 200–240ms（与数据格式无关）。安装包由 17.5MB 增至 24.0MB。
 
 ## 本批：候选窗弹出滞后（2026-10-26，已安装本机）
 
@@ -77,6 +86,7 @@
 - 安装包：提升权限的卸载 `stop` 可能被后台拒绝；从已提权进程启动安装包会拉起提权后台，所有宿主拒连，须以普通身份重启后台；升级时其他已登录用户的旧后台继续运行；安装中途失败时旧程序已改名，须重跑安装包。
 - 本机 `C:\Windows\Fonts` 自带另一版 Cascadia Mono，与随包版本并存，由系统择一。
 - 放开低完整性后同会话沙箱进程都能连接占槽，回收只能缓解拒绝服务；后台须以非提升权限运行。DLL 驻留为不可逆系统 PIN，不支持热卸载；管道关闭超时不等于资源已释放。
+- 仓库含授权未确认的码表与字体，不得推送到公开远端；更换资源版本会使 Git 历史继续增大。后台每次启动全量核对并解析码表（release 约 0.45s），登录后首次输入前须完成；未测机械硬盘或低配机。
 
 ## 未验证
 
@@ -88,6 +98,7 @@
 
 ## 最近验证
 
+- 码表入库批次（2026-10-26）：统一入口首次运行时托盘真实菜单测试“模态未展开：110ms”失败（菜单被提前关闭，该 crate 未改动），复跑通过：架构/文档 5 passed，fmt、Clippy 无告警，x64、x86 各 158 passed、8 ignored；`artifacts/tables-in-git-check-20261026.log`（失败）、`artifacts/tables-in-git-check-2-20261026.log`。单列完整码表与字体验收各 1 passed（`artifacts/tables-in-git-resources-20261026.log`，debug 加载 2.29s）。离线打包成功，ISCC 列出 9 项码表，安装包 SHA256 `0b9032e1f3f81297e289820608e8bec4cfe6d7d95e4acedb6507332c7ff1cfd5`（`artifacts/tables-in-git-package-20261026.log`）；未安装，本机仍为 UI 重设计批次的安装版。提交内容（不含工作区其他未提交改动）另在独立工作树复跑：统一入口通过，x64、x86 各 154 passed、8 ignored，完整码表验收 1 passed（`artifacts/tables-in-git-commit-check-20261026.log`、`artifacts/tables-in-git-commit-resources-20261026.log`）。
 - 候选窗布局通知批次（2026-10-26）：统一入口通过架构/文档 5 项、fmt、Clippy，x64、x86 测试日志合计各 152 passed、8 ignored（含新增 2 项）；`artifacts/popup-layout-check-20261026.log`。离线打包后静默安装（后台以原用户身份重启），安装包 SHA256 `b5535b78f4f2ecefbf5dcb39334700ff39cdf4e0608617232f2e7ed8f2d9d1ca`，日志 `artifacts/popup-layout-install-20261026.log`；Typora、Notepad++ 以 computer-use 注入按键、进程外 WinEvent 探针计时实测，结果见本批。
 - 位置退路（2026-10-26 第二步）：统一入口通过，x64、x86 各 154 passed、8 ignored（再增 2 项）；`artifacts/popup-fallback-check-20261026.log`。安装包 SHA256 `4fad5403c1b920225c9b03d3ed46d341e0de5732d02cc85cf00b4d36935b49a5`，日志 `artifacts/popup-fallback-install-20261026.log`。回归实测：Notepad++ 首键 8.5ms 显示；Typora 注入按键与同时段人工输入的每个组合首键 2–16ms 内显示，位置贴组合。实测宿主都给得出位置，末三级退路只由合成宿主测试覆盖，未找到需要它们的真实宿主。未做长期或其他宿主验收。
 - UI 清晰度/候选刷新批次（2026-10-24）：统一入口在隔离绝对 target/temp 下通过架构/文档、fmt、Clippy、x64/x86 常规测试与文档测试；新增 IPC、8,192 条短码桶和候选窗压力测试均通过。未安装或真实宿主验收。
@@ -96,4 +107,4 @@
 - 本批统一入口（2026-10-24）：架构/文档 5 passed，fmt、Clippy 无告警，x64、x86 各 **143 passed、8 ignored**（新增 5 项、删去旧外观解析 2 项；不重复计入辅助子进程）；`artifacts/review-fix-check-20261024.log`。补齐复审三处后复跑，结果相同（新增断言并入既有测试函数，项数不变）；`artifacts/review-fix-2-check-20261024.log`。补文本框右键菜单后首次运行因上述并发弹菜单失败（托盘测试“模态未展开”），加锁后复跑通过，结果相同，`git diff --check` 无告警；日志 `artifacts/review-fix-3-check-20261024.log`（覆盖了失败那次）。修正测试计时后再跑，结果相同；`artifacts/review-fix-4-check-20261024.log`。
 - 审阅前统一入口（`22d060a`）：架构/文档、fmt、Clippy 通过，x64、x86 各 140 passed、8 ignored；`artifacts/review-check-20261024-approved.log`。
 - 最近一次真机部署与实测（v10，10-24 01:39）：安装包 `d0c10b50…6a43235`，记事本中通知区图标随输入法切换隐藏/恢复；`artifacts/single-icon-install-2-20261024.log`、`artifacts/single-icon-notepad-20261024/`。
-- 完整资源验收（ignored，单列运行）：Codex 复审时以 v2 数据包补跑 `locked_resources` 1 passed（`artifacts/review-second-resources-20261024.log`）。
+- 完整资源验收（ignored，单列运行）：码表入库批次直接加载 `resources/tiger` 跑 `locked_resources` 1 passed（见上）。

@@ -6,7 +6,7 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
-use tigertype_app::{Result, import, installed, project_root};
+use tigertype_app::{Result, import, installed};
 use tigertype_contracts::{Key, Options, protocol::Panel};
 use tigertype_engine::{Dictionary, Session};
 use tigertype_ipc::{pipe::Runtime, service::Client};
@@ -50,7 +50,7 @@ fn backend(deadline: Instant) -> std::result::Result<Client, tigertype_ipc::Erro
 fn run(args: &[std::ffi::OsString]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!(
-            "TigerType Rust 核心工具\n  serve [<数据包绝对路径> <独立受管数据目录绝对路径>]\n  lookup-window\n  stop\n  import-resources <新数据包绝对路径>\n  verify-package <数据包绝对路径>\n  lookup <数据包绝对路径> <拼音、虎码或汉字/词>\n  demo-input <数据包绝对路径> <编码>\n  install-fonts <随包字体目录绝对路径>\nserve 省略路径时使用安装版位置（程序目录的数据包与 %APPDATA%\\TigerType）；lookup-window 请本会话后台显示查字窗，后台未运行时以安装版位置启动后台并显示。"
+            "TigerType Rust 核心工具\n  serve [<码表目录绝对路径> <独立受管数据目录绝对路径>]\n  lookup-window\n  stop\n  lookup <码表目录绝对路径> <拼音、虎码或汉字/词>\n  demo-input <码表目录绝对路径> <编码>\n  install-fonts <随包字体目录绝对路径>\nserve 省略路径时使用安装版位置（程序目录下的 tiger 码表目录与 %APPDATA%\\TigerType）；lookup-window 请本会话后台显示查字窗，后台未运行时以安装版位置启动后台并显示。"
         );
         return Ok(());
     }
@@ -95,28 +95,8 @@ fn run(args: &[std::ffi::OsString]) -> Result<()> {
                 println!("{name}：{state}");
             }
         }
-        (Some("import-resources"), 2) => {
-            let package = import::build(&project_root()?.join("vendor/tiger"))?;
-            import::save(&package, Path::new(&args[1]))?;
-            println!(
-                "已校验并写入 {} 条单字编码、{} 条词编码；未修改原资源。",
-                package.data.entries.len(),
-                package.data.phrases.len()
-            );
-        }
-        (Some("verify-package"), 2) => {
-            let package = import::load(Path::new(&args[1]))?;
-            println!(
-                "数据包校验通过：{} 条单字编码，{} 条词编码，{} 条单字拼音，{} 条学习资料。",
-                package.data.entries.len(),
-                package.data.phrases.len(),
-                package.data.pinyin.len(),
-                package.data.details.len()
-            );
-        }
         (Some("lookup" | "demo-input"), 3) => {
-            let package = import::load(Path::new(&args[1]))?;
-            let dictionary = Dictionary::new(package.data)?;
+            let dictionary = Dictionary::new(import::load(Path::new(&args[1]))?)?;
             let query = args[2].to_str().ok_or("查询不是有效 Unicode")?;
             if args[0] == "lookup" {
                 println!(

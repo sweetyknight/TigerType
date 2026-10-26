@@ -8,7 +8,7 @@ use std::{
 
 const RULES: &[(&str, &[&str])] = &[
     ("tigertype-contracts", &["serde"]),
-    ("tigertype-engine", &["tigertype-contracts", "serde"]),
+    ("tigertype-engine", &["tigertype-contracts"]),
     (
         "tigertype-ipc",
         &["tigertype-contracts", "serde_json", "windows-sys"],
@@ -137,6 +137,22 @@ pub fn tracked_path(path: &str) -> Result<()> {
         || path.ends_with(".userdb.txt")
     {
         return Err(format!("禁止入库的资源/产物：{path}"));
+    }
+    Ok(())
+}
+
+/// 锁定资源以原始字节入库才能换机重新打包：`git ls-files --eol` 中每个应有路径都须已跟踪且为 attr/-text，
+/// 否则添加时 CRLF 被改写，本机工作区仍正确、换机检出后 SHA256 才不符。
+pub fn raw_resources(listing: &str, expected: &[String]) -> Result<()> {
+    for path in expected {
+        let info = listing
+            .lines()
+            .find_map(|line| line.split_once('\t').filter(|(_, p)| p == path))
+            .ok_or_else(|| format!("锁定资源未入库：{path}"))?
+            .0;
+        if !info.split_whitespace().any(|field| field == "attr/-text") {
+            return Err(format!("锁定资源须标记 -text，禁止换行转换：{path}"));
+        }
     }
     Ok(())
 }

@@ -1,13 +1,10 @@
 ; TigerType 安装包定义（Inno Setup 6.7）。由打包驱动编译：
 ;   cargo run --locked --offline -p tigertype-app --example package
-; 驱动先构建 release 程序、校验字体与语言文件、生成数据包，再以 /DVersion /DPackage 调用 ISCC。
+; 驱动先构建 release 程序、校验锁定码表、字体与语言文件，再以 /DVersion 调用 ISCC。
 ; 固定装到 Program Files：自带 ALL APPLICATION PACKAGES 读/执行（UWP 宿主可加载 DLL），非管理员不可写
 ; （DLL 会进入管理员进程，可写目录即提权途径），因此不提供改目录页。
 #ifndef Version
   #error 请用打包驱动编译（缺少 /DVersion）
-#endif
-#ifndef Package
-  #error 请用打包驱动编译（缺少 /DPackage）
 #endif
 #define Root AddBackslash(SourcePath) + ".."
 
@@ -37,7 +34,7 @@ UninstallDisplayName=TigerType 虎码输入法
 UninstallDisplayIcon={app}\tigertype.exe
 
 [Languages]
-Name: "chs"; MessagesFile: "{#Root}\vendor\inno\ChineseSimplified.isl"
+Name: "chs"; MessagesFile: "{#Root}\installer\ChineseSimplified.isl"
 
 [Messages]
 FinishedLabel=TigerType 已安装，输入后台已启动并会随登录自动启动。%n%n请在“设置 → 时间和语言 → 语言和区域 → 中文(简体) → 语言选项 → 键盘”中添加“TigerType 虎码”。查字与设置可从开始菜单打开。%n%n升级时，安装前已打开的程序须重新打开才会用上新版本。
@@ -47,11 +44,24 @@ FinishedLabel=TigerType 已安装，输入后台已启动并会随登录自动�
 Source: "{#Root}\target\release\tigertype.exe"; DestDir: "{app}"; Flags: ignoreversion uninsrestartdelete
 Source: "{#Root}\target\release\tigertype_tsf.dll"; DestDir: "{app}"; Flags: ignoreversion regserver uninsrestartdelete 64bit
 Source: "{#Root}\target\i686-pc-windows-msvc\release\tigertype_tsf.dll"; DestDir: "{app}"; DestName: "tigertype_tsf_x86.dll"; Flags: ignoreversion regserver uninsrestartdelete 32bit
-Source: "{#Package}"; DestDir: "{app}"; DestName: "tiger-v1.json"; Flags: ignoreversion
+; 锁定码表原文，后台启动时逐个核对大小/SHA256 后解析；清单变动须同步此处（打包驱动会核对）。
+Source: "{#Root}\resources\tiger\tiger.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\tigress_ci.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\tigress_simp_ci.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\core2022.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\PY_c.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\opencc\hu_cf.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\opencc\PYCharacters.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\opencc\STCharacters_Tu.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\opencc\TSCharacters.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
 ; 字体为全机安装（各用户与 UWP 宿主可见）；已有同名文件（如 Win11 自带 Cascadia Mono）不覆盖，卸载不删除。
-Source: "{#Root}\vendor\fonts\LXGWWenKaiGBScreen.ttf"; DestDir: "{autofonts}"; FontInstall: "LXGW WenKai GB Screen"; Flags: onlyifdoesntexist uninsneveruninstall
-Source: "{#Root}\vendor\fonts\CascadiaMono.ttf"; DestDir: "{autofonts}"; FontInstall: "Cascadia Mono"; Flags: onlyifdoesntexist uninsneveruninstall
-Source: "{#Root}\vendor\fonts\TumanPUA.ttf"; DestDir: "{autofonts}"; FontInstall: "TumanPUA"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}\resources\fonts\LXGWWenKaiGBScreen.ttf"; DestDir: "{autofonts}"; FontInstall: "LXGW WenKai GB Screen"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}\resources\fonts\CascadiaMono.ttf"; DestDir: "{autofonts}"; FontInstall: "Cascadia Mono"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}\resources\fonts\TumanPUA.ttf"; DestDir: "{autofonts}"; FontInstall: "TumanPUA"; Flags: onlyifdoesntexist uninsneveruninstall
+
+[InstallDelete]
+; 旧版的 JSON 数据包已由 tiger 码表目录取代。
+Type: files; Name: "{app}\tiger-v1.json"
 
 [Registry]
 ; 每个用户登录时以其普通权限启动自己的后台（数据在各自 %APPDATA%\TigerType）。

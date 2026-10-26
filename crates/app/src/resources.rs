@@ -1,6 +1,6 @@
 //! 有界资源读取、hash 与安全新目录，离线导入不包含下载或脚本执行。
 use crate::Result;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
@@ -11,7 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Entry {
     pub path: String,
     pub size: u64,

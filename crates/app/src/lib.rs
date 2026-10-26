@@ -22,12 +22,12 @@ pub fn project_root() -> Result<std::path::PathBuf> {
         .canonicalize()?)
 }
 
-/// 数据包在安装包里的文件名；打包与安装版后台共用。
-pub const PACKAGE: &str = "tiger-v1.json";
+/// 码表目录名：源码中为 resources 下的同名目录，安装版在程序目录下；打包与安装版后台共用。
+pub const TABLES: &str = "tiger";
 
-/// 安装版路径：数据包与程序同目录（Program Files，只读），用户数据独立在 %APPDATA%\TigerType。
+/// 安装版路径：码表目录在程序旁（Program Files，只读），用户数据独立在 %APPDATA%\TigerType。
 pub fn installed() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
-    let package = std::env::current_exe()?.with_file_name(PACKAGE);
+    let tables = std::env::current_exe()?.with_file_name(TABLES);
     let appdata = std::env::var_os("APPDATA").ok_or("缺少 APPDATA")?;
-    Ok((package, std::path::PathBuf::from(appdata).join("TigerType")))
+    Ok((tables, std::path::PathBuf::from(appdata).join("TigerType")))
 }

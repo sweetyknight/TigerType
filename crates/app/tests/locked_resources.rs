@@ -1,15 +1,19 @@
-//! 完整锁定文本资源验收单列；不加载 DLL，不运行脚本，不接触个人词库。
+//! 完整锁定码表验收单列；不加载 DLL，不运行脚本，不接触个人词库。
 use serde_json::json;
-use tigertype_app::{Result, import, project_root, resources};
+use std::time::Instant;
+use tigertype_app::{Result, TABLES, import, project_root, resources};
 use tigertype_contracts::{Key, Options, OutputForm, TypingMode};
 use tigertype_engine::{Dictionary, Session};
 
-fn verify(root: &std::path::Path, work: &std::path::Path) -> Result<serde_json::Value> {
-    let package = import::build(&root.join("vendor/tiger"))?;
-    let dictionary = Dictionary::new(package.data.clone())?;
+fn verify(root: &std::path::Path) -> Result<serde_json::Value> {
+    // 与后台启动同一路径：核对锁定清单、解析原文、建立词表。
+    let started = Instant::now();
+    let data = import::load(&root.join("resources").join(TABLES))?;
+    let dictionary = Dictionary::new(data.clone())?;
+    let load_ms = started.elapsed().as_millis();
     let mut missing_full_codes = 0;
     // 全表交叉检查，不只对几个演示字声称数据导入正确。
-    for entry in &package.data.entries {
+    for entry in &data.entries {
         assert!(
             dictionary
                 .learning(entry.character)
@@ -17,7 +21,7 @@ fn verify(root: &std::path::Path, work: &std::path::Path) -> Result<serde_json::
                 .contains(&entry.code)
         );
     }
-    for detail in &package.data.details {
+    for detail in &data.details {
         let codes = dictionary.learning(detail.character).codes;
         missing_full_codes += detail
             .full_codes
@@ -79,38 +83,22 @@ fn verify(root: &std::path::Path, work: &std::path::Path) -> Result<serde_json::
             .any(|item| item.text == "我们")
     );
     assert!(!dictionary.learning('𠀀').codes.is_empty());
-    let target = work.join("tiger.json");
-    import::save(&package, &target)?;
-    let digest = resources::sha256(&target)?;
-    assert!(import::save(&package, &target).is_err());
-    assert_eq!(resources::sha256(&target)?, digest);
-    let mut loaded = import::load(&target)?;
-    loaded.data.entries[0].weight += 1;
-    let damaged = work.join("damaged.json");
-    std::fs::write(&damaged, serde_json::to_vec(&loaded)?)?;
-    assert!(import::load(&damaged).is_err());
-    assert_eq!(resources::sha256(&target)?, digest);
     Ok(
-        json!({"entries":package.data.entries.len(),"pinyin":package.data.pinyin.len(),
-        "details":package.data.details.len(),"full_codes_not_directly_inputtable":missing_full_codes,
-        "package_sha256":digest,"source_count":package.sources.len()}),
+        json!({"entries":data.entries.len(),"phrases":data.phrases.len(),"pinyin":data.pinyin.len(),
+        "details":data.details.len(),"full_codes_not_directly_inputtable":missing_full_codes,
+        "source_count":import::SOURCES.len(),"load_ms":load_ms}),
     )
 }
 
 #[test]
-#[ignore = "需要本地已锁定资源；必须显式执行，不能把 ignored 计为通过"]
+#[ignore = "完整码表验收单列；必须显式执行，不能把 ignored 计为通过"]
 fn locked_text_resources_build_and_regress_without_rime() -> Result<()> {
     let root = project_root()?;
     let report = resources::new_directory(&root.join("artifacts"), "rust-tiger")?;
-    let work =
-        resources::new_directory(&std::env::temp_dir().join("TigerType-tests"), "rust-tiger")?;
-    if work.canonicalize()?.starts_with(&root) {
-        return Err("测试运行目录必须在源码之外".into());
-    }
-    let result = verify(&root, &work);
+    let result = verify(&root);
     let evidence = match &result {
-        Ok(details) => json!({"passed":true,"work":work,"details":details}),
-        Err(error) => json!({"passed":false,"work":work,"error":error.to_string()}),
+        Ok(details) => json!({"passed":true,"details":details}),
+        Err(error) => json!({"passed":false,"error":error.to_string()}),
     };
     std::fs::write(
         report.join("result.json"),

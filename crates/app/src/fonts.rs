@@ -325,11 +325,11 @@ mod tests {
         fs::remove_dir_all(&root)?;
         Ok(())
     }
-    /// 完整资源验收：真实字体须先按 README 下载到 vendor/fonts，单列运行，不计入普通测试。
+    /// 完整资源验收：核对仓库内 resources/fonts 的真实字体，单列运行，不计入普通测试。
     #[test]
-    #[ignore = "需要 vendor/fonts 中的真实字体"]
-    fn vendored_fonts_match_the_lock() -> Result<()> {
-        let dir = crate::project_root()?.join("vendor/fonts");
+    #[ignore = "完整字体验收单列；必须显式执行"]
+    fn bundled_fonts_match_the_lock() -> Result<()> {
+        let dir = crate::project_root()?.join("resources/fonts");
         for font in locked()? {
             let path = dir.join(&font.path);
             assert_eq!(fs::metadata(&path)?.len(), font.size, "{}", font.path);

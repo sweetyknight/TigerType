@@ -408,8 +408,8 @@ impl<'a> Server<'a> {
 
 /// 前台线程即固定反应器/引擎线程；查字/设置另有固定 UI 线程与工作线程，三者共用只读词表，
 /// 用 stop 命令停止。show 为真时启动即显示查字窗（用户唤起时后台尚未运行）。
-pub fn run(package: &Path, directory: &Path, show: bool) -> Result<()> {
-    let dictionary = Dictionary::new(import::load(package)?.data)?;
+pub fn run(tables: &Path, directory: &Path, show: bool) -> Result<()> {
+    let dictionary = Dictionary::new(import::load(tables)?)?;
     // 受管目录租约归查字工作线程，在后台运行期间保持，退出后才释放。
     let data = if directory.try_exists()? {
         Data::open(directory)?

@@ -26,23 +26,21 @@ cargo test --locked --offline -p tigertype-ipc --test dll_residency
 
 此探针不是 TSF 输入法 DLL。进程期驻留的 DLL 不能热卸载，停止管道不代表宿主已卸载模块；宿主退出前仍会占用映像。
 
-## 离线核心工具
+## 码表与离线核心工具
 
-先将批准的原资源按锁定清单准备在本项目 `vendor/tiger`；工具只读取所需的 9 项文本（含 tigress 词表），不自动探测现用输入法目录。
+码表随仓库放在 `resources/tiger`：来源为虎码官网盘 <https://huma.ysepan.com/> 下载的“虎码秃版 小狼毫（Win）”方案包（码表版本 2026.08.14），只取所需 9 项原始文本、按包内原相对路径存放且未作修改——单字表、两张 tigress 词表、常用字集、拼音、拆分、读音与两张简繁映射，按 `resources/tiger.lock.json` 锁定大小与 SHA256，以原始字节入库（`.gitattributes` 禁止换行转换，原文 CRLF/LF 混用）。不另生成数据包：后台、命令行工具与打包驱动都直接读这个目录，核对清单后只解析所需数据段，不解释 YAML、Lua 或 OpenCC 配置；任一文件缺失或不符即拒绝启动。程序不读取现用输入法目录。
 
 ```powershell
-# 输出必须为新文件；已有包不会被覆盖。以下路径按本仓库位置填写。
-cargo run --locked --offline -p tigertype-app -- import-resources 'D:\Projects\TigerType\.cache\tiger-v1.json'
-cargo run --locked --offline -p tigertype-app -- verify-package 'D:\Projects\TigerType\.cache\tiger-v1.json'
-cargo run --locked --offline -p tigertype-app -- lookup 'D:\Projects\TigerType\.cache\tiger-v1.json' 'han'
-cargo run --locked --offline -p tigertype-app -- lookup 'D:\Projects\TigerType\.cache\tiger-v1.json' '漢'
+# 码表目录也可换成安装版的 'C:\Program Files\TigerType\tiger'。
+cargo run --locked --offline -p tigertype-app -- lookup 'D:\Projects\TigerType\resources\tiger' 'han'
+cargo run --locked --offline -p tigertype-app -- lookup 'D:\Projects\TigerType\resources\tiger' '漢'
 # 核心诊断仅输出 JSON 状态，不向其他应用上屏。
-cargo run --locked --offline -p tigertype-app -- demo-input 'D:\Projects\TigerType\.cache\tiger-v1.json' 'unid '
-# 完整锁定资源单列验收，不包含在普通测试的 passed 中。
+cargo run --locked --offline -p tigertype-app -- demo-input 'D:\Projects\TigerType\resources\tiger' 'unid '
+# 完整码表单列验收，不包含在普通测试的 passed 中。
 cargo test --locked --offline -p tigertype-app --test locked_resources -- --ignored --nocapture
 ```
 
-CLI 查询输出第一页。生成包的摘要用于损坏检测，不是发布者签名；不从不可信来源取得数据包。
+CLI 查询输出第一页。锁定清单编译进程序，SHA256 用于核对来源与损坏，不是发布者签名。更换码表版本须同时替换文件、更新清单与安装脚本，打包驱动会核对三者一致。
 
 产品名称统一为 TigerType，生成程序为 `tigertype.exe`。改名前创建的受管数据目录不兼容，请为查字或后台指定新的目录；不修改旧目录所有权标记，也不与旧后台混用。
 
@@ -71,7 +69,7 @@ cargo run --locked --offline -p tigertype-app -- lookup-window
 
 ## 随包字体
 
-候选窗与查字字形默认用霞鹜文楷屏幕阅读版（虎码融合字根版），编码与序号用 Cascadia Mono，字根用 TumanPUA；三者按 `resources/fonts.lock.json` 锁定大小与 SHA256，文件放在 `vendor/fonts`（不入 Git，仅限个人本地使用）。楷体与微软雅黑 UI 是 Windows 自带的微软字体，不随包分发；缺楷体时回退微软雅黑 UI。
+候选窗与查字字形默认用霞鹜文楷屏幕阅读版（虎码融合字根版），编码与序号用 Cascadia Mono，字根用 TumanPUA；三者按 `resources/fonts.lock.json` 锁定大小与 SHA256，文件随仓库放在 `resources/fonts`（仅限个人本地使用），来源如下，更换版本时才需重新取得。楷体与微软雅黑 UI 是 Windows 自带的微软字体，不随包分发；缺楷体时回退微软雅黑 UI。
 
 - 霞鹜文楷、TumanPUA：虎码官网盘 <https://huma.ysepan.com/> 的“06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z”，取其中 `LXGWWenKaiGBScreen.ttf` 与 `TumanPUA.ttf`。
 - Cascadia Mono：<https://github.com/microsoft/cascadia-code/releases/download/v2407.24/CascadiaCode-2407.24.zip> 中的 `ttf/CascadiaMono.ttf`。
@@ -79,7 +77,7 @@ cargo run --locked --offline -p tigertype-app -- lookup-window
 安装包把三个字体装到全机字体目录（见下文“安装包”）。不走安装包时，可以普通权限只为当前用户安装（无需管理员）：
 
 ```powershell
-cargo run --locked --offline -p tigertype-app -- install-fonts 'D:\Projects\TigerType\vendor\fonts'
+cargo run --locked --offline -p tigertype-app -- install-fonts 'D:\Projects\TigerType\resources\fonts'
 # 完整资源核对（单列，不计入普通测试）
 cargo test --locked --offline -p tigertype-app --lib fonts -- --ignored
 ```
@@ -90,12 +88,12 @@ cargo test --locked --offline -p tigertype-app --lib fonts -- --ignored
 
 ```powershell
 # 单独终端运行。首次指定不存在的新目录；后续只打开本工具创建、带所有权标记的目录，不接管旧输入法目录。
-cargo run --locked --offline -p tigertype-app -- serve 'D:\Projects\TigerType\.cache\tiger-v1.json' 'D:\Projects\TigerType\.cache\backend-data'
+cargo run --locked --offline -p tigertype-app -- serve 'D:\Projects\TigerType\resources\tiger' 'D:\Projects\TigerType\.cache\backend-data'
 # 从同一份 tigertype.exe 发出认证停止请求；无需注册或切换输入法。
 cargo run --locked --offline -p tigertype-app -- stop
 ```
 
-`serve` 省略两个路径时使用安装版位置：程序目录下的 `tiger-v1.json` 与 `%APPDATA%\TigerType`（不存在则新建）。`tigertype.exe` 为 GUI 子系统程序，开机自启与开始菜单唤起都不弹控制台；从终端直接运行时借用父控制台输出（PowerShell 不等待 GUI 程序结束，诊断请用 `cargo run`）。无控制台时 `serve`、`lookup-window` 启动失败会弹出错误框。
+`serve` 省略两个路径时使用安装版位置：程序目录下的 `tiger` 码表目录与 `%APPDATA%\TigerType`（不存在则新建）。`tigertype.exe` 为 GUI 子系统程序，开机自启与开始菜单唤起都不弹控制台；从终端直接运行时借用父控制台输出（PowerShell 不等待 GUI 程序结束，诊断请用 `cargo run`）。无控制台时 `serve`、`lookup-window` 启动失败会弹出错误框。
 
 后台独占本登录会话，预建 16 个请求管道（协议 v12，旧版程序不得混用），设置在内存中，设置页保存后热重载。用 `stop` 停止；强行结束进程不会经过停止确认。后台异常或退出由用户重新启动（安装版可点开始菜单“查字与设置”一并启动）。
 
@@ -105,24 +103,20 @@ cargo run --locked --offline -p tigertype-app -- stop
 
 ## 安装包
 
-用 Inno Setup 6.7 把程序、两种位数 DLL、数据包和随包字体做成一个 `TigerType-Setup-<版本>.exe`，拷到其他电脑上双击安装。资源整体授权未确认，安装包只用于自己的电脑，不公开分发。
+用 Inno Setup 6.7 把程序、两种位数 DLL、锁定码表和随包字体做成一个 `TigerType-Setup-<版本>.exe`，拷到其他电脑上双击安装。资源整体授权未确认，安装包只用于自己的电脑，不公开分发。
 
-打包前准备（每台打包机一次，均不入 Git）：
-
-- Inno Setup 6.7.3：官方 GitHub <https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe>，SHA256 `9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732`，以 `/CURRENTUSER` 为当前用户安装（装到 `%LOCALAPPDATA%\Programs\Inno Setup 6`，打包驱动只在此处查找）。
-- 简体中文语言文件：官方仓库同一标签的 <https://raw.githubusercontent.com/jrsoftware/issrc/is-6_7_3/Files/Languages/Unofficial/ChineseSimplified.isl>，放到 `vendor/inno/ChineseSimplified.isl`，SHA256 `7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278`。
-- `vendor/tiger` 原资源与 `vendor/fonts` 三个字体（见上文）。
+码表、字体与简体中文语言文件都随仓库保存，换电脑后克隆即可打包；每台打包机只需另装一次 Inno Setup 6.7.3：官方 GitHub <https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe>，SHA256 `9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732`，以 `/CURRENTUSER` 为当前用户安装（装到 `%LOCALAPPDATA%\Programs\Inno Setup 6`，打包驱动只在此处查找）。语言文件 `installer/ChineseSimplified.isl` 取自官方仓库同一标签的 <https://raw.githubusercontent.com/jrsoftware/issrc/is-6_7_3/Files/Languages/Unofficial/ChineseSimplified.isl>，SHA256 `7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278`。
 
 ```powershell
-# 构建 release（静态 CRT，目标机无需 VC++ 运行库）、校验字体/语言文件、由锁定资源重新生成数据包后编译；不修改系统。
+# 构建 release（静态 CRT，目标机无需 VC++ 运行库）、校验码表/字体/语言文件后编译；不修改系统。
 cargo run --locked --offline -p tigertype-app --example package
 ```
 
-产物为 `target\package\TigerType-Setup-<版本>.exe`，驱动最后打印其 SHA256。安装脚本为 [installer/tigertype.iss](installer/tigertype.iss)；驱动在打包前核对脚本列出的字体与锁定清单一致。
+产物为 `target\package\TigerType-Setup-<版本>.exe`，驱动最后打印其 SHA256。安装脚本为 [installer/tigertype.iss](installer/tigertype.iss)；驱动在打包前核对脚本逐个列出的字体与码表和锁定清单一致。
 
 安装（需管理员，Windows 10/11 x64）做这些事：
 
-- 装到 `C:\Program Files\TigerType`（不提供改目录：该目录自带 ALL APPLICATION PACKAGES 读/执行，非管理员不可写）；放入 `tigertype.exe`、`tigertype_tsf.dll`、`tigertype_tsf_x86.dll` 与 `tiger-v1.json`，并分别以 64/32 位注册两个 DLL。
+- 装到 `C:\Program Files\TigerType`（不提供改目录：该目录自带 ALL APPLICATION PACKAGES 读/执行，非管理员不可写）；放入 `tigertype.exe`、`tigertype_tsf.dll`、`tigertype_tsf_x86.dll` 与 `tiger\` 码表目录（升级时删除旧版的 `tiger-v1.json`），并分别以 64/32 位注册两个 DLL。
 - 字体装到全机字体目录；已有同名文件（如 Win11 自带的 Cascadia Mono）不覆盖，卸载时不删除。
 - 在 `HKLM\...\Run` 登记 `tigertype.exe serve`：每个用户登录时以普通权限启动自己的后台，数据在各自 `%APPDATA%\TigerType`；安装结束时以安装者的普通权限立即启动一次。
 - 开始菜单“TigerType 查字与设置”：唤起后台的查字窗；后台未运行时一并启动。
@@ -143,4 +137,4 @@ cargo test --locked --offline -p tigertype-ipc --lib -- --ignored --exact pipe::
 ## 数据边界
 原资源只读并锁定来源/hash；不读取个人词库，不修改现用输入法。安装版后台与查字窗只用 `%APPDATA%\TigerType`（带所有权标记，不接管已有的其他目录），卸载时保留。
 
-`vendor/`、`.cache/`、`artifacts/`、`target/` 与数据库不入 Git；资源整体授权未确认，仅限个人本地使用，不公开发布。
+锁定码表、字体与语言文件随仓库保存；`vendor/`（只剩退役路线的本地下载）、`.cache/`、`artifacts/`、`target/` 与数据库不入 Git。资源整体授权未确认，仅限个人本地使用：仓库不得推送到公开远端，安装包不公开发布。

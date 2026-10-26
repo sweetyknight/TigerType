@@ -1,2 +1,6 @@
 # 固定源码与清单换行，避免 Windows 自动转换造成无意义的基线校验变化。
 * text=auto eol=lf
+# 锁定资源按原始字节入库：码表换行 CRLF/LF 混用，任何换行转换都会使大小/SHA256 与锁定清单不符。
+/resources/tiger/** -text
+/resources/fonts/** -text
+/installer/ChineseSimplified.isl -text

@@ -1,17 +1,16 @@
-//! 固定版本文本导入：不解释 YAML、Lua 或 OpenCC 配置，只读取已锁定的数据段。
+//! 锁定码表加载：直接读取原始文本（不另生成数据包），逐个核对大小/SHA256 后只解析所需数据段；
+//! 不解释 YAML、Lua 或 OpenCC 配置。
 use crate::{
     Result, data,
     resources::{self, Entry, Group},
 };
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
-use tigertype_engine::{Data, Detail, Dictionary, Mapping, Phrase, Pronunciation};
+use tigertype_engine::{Data, Detail, Mapping, Phrase, Pronunciation};
 
-// 2：去掉无人消费的旧 Win11Light 外观段，旧包不兼容。
-const VERSION: u32 = 2;
 const LIMIT: u64 = 128 * 1024 * 1024;
-const SOURCES: &[&str] = &[
+/// 码表目录内须有的文件（相对路径），即 resources/tiger 与安装目录 tiger 的全部内容。
+pub const SOURCES: &[&str] = &[
     "tiger.dict.yaml",
     "tigress_ci.dict.yaml",
     "tigress_simp_ci.dict.yaml",
@@ -22,16 +21,6 @@ const SOURCES: &[&str] = &[
     "opencc/STCharacters_Tu.txt",
     "opencc/TSCharacters.txt",
 ];
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Package {
-    pub format_version: u32,
-    pub dictionary_version: String,
-    pub sources: Vec<Entry>,
-    pub data: Data,
-    pub payload_sha256: String,
-}
 
 fn source_entries() -> Result<Vec<Entry>> {
     let lock: Group = serde_json::from_str(include_str!("../../../resources/tiger.lock.json"))?;
@@ -50,12 +39,11 @@ fn source_entries() -> Result<Vec<Entry>> {
         })
         .collect()
 }
-fn digest(data: &Data) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(data)?)))
-}
 fn verified(root: &Path, entry: &Entry) -> Result<String> {
     let path = root.join(resources::relative(&entry.path)?);
-    let bytes = data::read_file(&path, entry.size.min(LIMIT))?;
+    // 缺文件时带上路径，否则开机自启弹窗只有“找不到指定的文件”。
+    let bytes = data::read_file(&path, entry.size.min(LIMIT))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     // 对实际解析的同一份字节做校验，避免校验后重新打开导致竞态。
     if bytes.len() as u64 != entry.size || format!("{:x}", Sha256::digest(&bytes)) != entry.sha256 {
         return Err(format!("资源校验失败: {}", entry.path).into());
@@ -187,48 +175,15 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
     Ok(data)
 }
 
-pub fn build(source: &Path) -> Result<Package> {
-    let sources = source_entries()?;
+/// 后台、查字与打包共用：码表目录（开发为 resources/tiger，安装版为程序目录下的 tiger）须与锁定清单逐字节一致；
+/// 词表的结构约束由调用方 Dictionary::new 检查。
+pub fn load(tables: &Path) -> Result<Data> {
     let mut files = BTreeMap::new();
-    for entry in &sources {
-        files.insert(entry.path.clone(), verified(source, entry)?);
+    for entry in source_entries()? {
+        let text = verified(tables, &entry)?;
+        files.insert(entry.path, text);
     }
-    let data = parse_data(&files).map_err(|e| format!("数据表解析失败: {e}"))?;
-    let payload_sha256 = digest(&data)?;
-    Dictionary::new(data.clone())?;
-    Ok(Package {
-        format_version: VERSION,
-        dictionary_version: "2026.08.14".into(),
-        sources,
-        data,
-        payload_sha256,
-    })
-}
-
-pub fn save(package: &Package, target: &Path) -> Result<()> {
-    validate(package)?;
-    let bytes = serde_json::to_vec(package)?;
-    if bytes.len() as u64 > LIMIT {
-        return Err("数据包超限".into());
-    }
-    // 只新建文件，不覆盖已有包；失败文件保留诊断，加载时仍会严格校验。
-    data::write_new(target, &bytes)
-}
-pub fn load(path: &Path) -> Result<Package> {
-    let package: Package = serde_json::from_slice(&data::read_file(path, LIMIT)?)?;
-    validate(&package)?;
-    Ok(package)
-}
-fn validate(package: &Package) -> Result<()> {
-    if package.format_version != VERSION
-        || package.dictionary_version != "2026.08.14"
-        || package.sources != source_entries()?
-        || digest(&package.data)? != package.payload_sha256
-    {
-        return Err("数据包版本、来源或内容摘要不符".into());
-    }
-    Dictionary::new(package.data.clone())?;
-    Ok(())
+    parse_data(&files).map_err(|e| format!("码表解析失败: {e}").into())
 }
 
 #[cfg(test)]

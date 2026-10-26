@@ -1,6 +1,5 @@
 //! 启动时验证并建立有序索引；按键路径只访问对应键的有界切片。
 use crate::{Error, Result};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use tigertype_contracts::{
     Candidate, InputMode, LearningInfo, LookupItem, LookupPage, MAX_LEARNING_ITEMS,
@@ -11,47 +10,40 @@ const MAX_ROWS: usize = 300_000;
 const MAX_MATCHES: usize = 8192;
 const MAX_VARIANTS: usize = 32;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct Entry {
     pub character: char,
     pub code: String,
     pub weight: u64,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct Phrase {
     pub text: String,
     pub code: String,
     pub weight: u64,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct Pronunciation {
     pub character: char,
     pub pinyin: String,
     pub weight: u64,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct Detail {
     pub character: char,
     pub full_codes: Vec<String>,
     pub decomposition: Option<String>,
     pub readings: Vec<String>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct Mapping {
     pub character: char,
     pub variants: Vec<char>,
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct Data {
     pub entries: Vec<Entry>,
     /// 小狼毫 tigress_ci 词表；只保留词、权重和最终四码，不加载 Lua 编码器。
-    #[serde(default)]
     pub phrases: Vec<Phrase>,
     pub common: Vec<char>,
     pub pinyin: Vec<Pronunciation>,

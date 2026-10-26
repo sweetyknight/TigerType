@@ -7,7 +7,6 @@ publish.workspace = true
 
 [dependencies]
 tigertype-contracts.workspace = true
-serde.workspace = true
 
 [lints]
 workspace = true
