@@ -816,10 +816,10 @@ fn taskbar_icon_follows_the_chinese_english_toggle_from_the_backend() {
             .input(&context, Key::Character('u'), later())
             .unwrap()
     );
-    // 右键菜单第三项固定显示“全角/半角”：只翻开关，不碰文档、不唤起窗口。
-    assert!(!active.look().1);
-    right_click(&button, &[VK_DOWN, VK_DOWN, VK_DOWN, VK_RETURN]);
-    assert!(active.look().1);
+    // 右键菜单第二项显示当前全角状态，点击只翻开关，不碰文档、不唤起窗口。
+    assert!(!active.look().1.full);
+    right_click(&button, &[VK_DOWN, VK_DOWN, VK_RETURN]);
+    assert!(active.look().1.full);
     assert_eq!(text(&doc), "u");
     // SAFETY: 停用注销图标与 sink 并关闭管道。
     unsafe { tip.Deactivate() }.unwrap();
@@ -927,11 +927,14 @@ fn activated_service_shows_candidates_selects_by_click_and_refocuses_after_focus
     assert!(active.input(&context, Key::Space, later()).unwrap());
     assert_eq!(text(&doc), "的");
     assert!(shown(&active).is_none() && !popup.showing(serial));
-    // 后台可用：走系统右键的真实入口 OnClick(右键)，真实菜单里选“设置”“查字”，Esc 取消不发；
-    // 都经同一连接唤起，不另开会话（下方请求记录里没有新的 Open）。
+    // 后台可用：走系统右键的真实入口 OnClick(右键)，真实菜单里选“设置”“查字”（三个状态项与分隔线之后），
+    // Esc 取消不发；都经同一连接唤起，不另开会话（下方请求记录里没有新的 Open）。
     let button = button(&manager);
-    right_click(&button, &[VK_DOWN, VK_RETURN]);
-    right_click(&button, &[VK_DOWN, VK_DOWN, VK_RETURN]);
+    right_click(
+        &button,
+        &[VK_DOWN, VK_DOWN, VK_DOWN, VK_DOWN, VK_DOWN, VK_RETURN],
+    );
+    right_click(&button, &[VK_DOWN, VK_DOWN, VK_DOWN, VK_DOWN, VK_RETURN]);
     right_click(&button, &[VK_ESCAPE]);
     let focus: ITfThreadMgrEventSink = object.to_interface();
     // SAFETY: 模拟文档焦点变化；参数为空表示焦点离开本线程文档。

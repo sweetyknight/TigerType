@@ -7,4 +7,4 @@ mod native;
 #[cfg(windows)]
 pub use mailbox::{Inbox, Latest, ReplySender, mailbox};
 #[cfg(windows)]
-pub use native::run;
+pub use native::{ico_file as icon_file, run};

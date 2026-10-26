@@ -2,7 +2,6 @@
 use crate::{Dictionary, Error, Result};
 use tigertype_contracts::{
     Candidate, Composition, InputMode, InputState, Key, KeyOutcome, MAX_PINYIN_BYTES, Options,
-    PAGE_SIZE,
 };
 
 pub struct Session<'a> {
@@ -92,6 +91,14 @@ impl<'a> Session<'a> {
     pub fn composing(&self) -> bool {
         !self.buffer.is_empty() || self.mode == InputMode::Pinyin
     }
+    /// 每页候选数随设置；范围已由设置校验保证在 3–9。
+    fn per_page(&self) -> usize {
+        usize::from(self.options.page_size)
+    }
+    /// 当前高亮所在页的首个候选序号。
+    fn page_start(&self) -> usize {
+        self.selected / self.per_page() * self.per_page()
+    }
     fn raw(&self) -> String {
         if self.mode == InputMode::Pinyin {
             format!("`{}", self.buffer)
@@ -100,14 +107,14 @@ impl<'a> Session<'a> {
         }
     }
     pub fn snapshot(&self) -> InputState {
-        let page = self.selected / PAGE_SIZE;
+        let page = self.selected / self.per_page();
         let show = self.options.typing_mode == tigertype_contracts::TypingMode::Single
             && (self.options.show_learning || self.mode == InputMode::Pinyin);
         let candidates: Vec<_> = self
             .candidates
             .iter()
-            .skip(page * PAGE_SIZE)
-            .take(PAGE_SIZE)
+            .skip(page * self.per_page())
+            .take(self.per_page())
             .enumerate()
             .map(|(index, candidate)| {
                 let mut candidate = candidate.clone();
@@ -139,11 +146,11 @@ impl<'a> Session<'a> {
                 selection: 0..text.len(),
                 text,
             },
-            highlighted: (!candidates.is_empty()).then_some(self.selected % PAGE_SIZE),
+            highlighted: (!candidates.is_empty()).then_some(self.selected % self.per_page()),
             candidates,
-            page_size: PAGE_SIZE,
+            page_size: self.per_page(),
             page_index: page,
-            is_last_page: (page + 1) * PAGE_SIZE >= self.candidates.len(),
+            is_last_page: (page + 1) * self.per_page() >= self.candidates.len(),
             commit_preview: self
                 .candidates
                 .get(self.selected)
@@ -168,13 +175,13 @@ impl<'a> Session<'a> {
         if revision != self.revision {
             return Err(Error("候选快照已经过期"));
         }
-        if index as usize >= PAGE_SIZE
-            || self.selected / PAGE_SIZE * PAGE_SIZE + index as usize >= self.candidates.len()
+        if index as usize >= self.per_page()
+            || self.page_start() + index as usize >= self.candidates.len()
         {
             return Err(Error("候选索引越界"));
         }
         self.advance()?;
-        let commit = self.commit(self.selected / PAGE_SIZE * PAGE_SIZE + index as usize);
+        let commit = self.commit(self.page_start() + index as usize);
         Ok(KeyOutcome {
             handled: true,
             commit,
@@ -238,13 +245,13 @@ impl<'a> Session<'a> {
                         self.mode = InputMode::Pinyin;
                     }
                 } else if self.composing() && ('1'..='9').contains(&c) {
-                    commit = self.commit(
-                        self.selected / PAGE_SIZE * PAGE_SIZE + (c as usize - '1' as usize),
-                    );
+                    // 超出本页的数字键与无对应候选一样静默忽略，不选到看不见的下一页候选。
+                    let index = c as usize - '1' as usize;
+                    if index < self.per_page() {
+                        commit = self.commit(self.page_start() + index);
+                    }
                 } else if self.composing() && (c == ';' || c == '\'') {
-                    commit = self.commit(
-                        self.selected / PAGE_SIZE * PAGE_SIZE + if c == ';' { 1 } else { 2 },
-                    );
+                    commit = self.commit(self.page_start() + if c == ';' { 1 } else { 2 });
                 } else if self.composing() && (c == '-' || c == '=') {
                     self.page(c == '=', &mut handled);
                 } else if c.is_ascii_lowercase() || (self.mode == InputMode::Pinyin && c == 'ü') {
@@ -326,8 +333,8 @@ impl<'a> Session<'a> {
         if self.candidates.is_empty() {
             return;
         }
-        let current = self.selected / PAGE_SIZE;
-        let last = (self.candidates.len() - 1) / PAGE_SIZE;
+        let current = self.selected / self.per_page();
+        let last = (self.candidates.len() - 1) / self.per_page();
         let next = if down {
             (current + 1).min(last)
         } else {
@@ -335,7 +342,7 @@ impl<'a> Session<'a> {
         };
         // 越界翻页忽略：页码不变时高亮也不动，否则随后空格会上错字。
         if next != current {
-            self.selected = next * PAGE_SIZE;
+            self.selected = next * self.per_page();
         }
     }
 }

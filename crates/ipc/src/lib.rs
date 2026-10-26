@@ -16,7 +16,7 @@ use std::{
     io::{self, Write},
 };
 use tigertype_contracts::{
-    InputState, Key, MAX_CANDIDATES, MAX_LEARNING_ITEMS, MAX_TEXT_BYTES, PAGE_SIZE,
+    InputState, Key, MAX_CANDIDATES, MAX_LEARNING_ITEMS, MAX_TEXT_BYTES,
     protocol::{Command, Message, Reply, Request, Response, Route, VERSION},
 };
 
@@ -241,7 +241,7 @@ fn validate(message: &Message) -> Result<()> {
                 }
                 Command::Select {
                     revision, index, ..
-                } if revision == 0 || index as usize >= PAGE_SIZE => {
+                } if revision == 0 || index as usize >= MAX_CANDIDATES => {
                     return Err(Error::Invalid("候选选择的快照或索引非法"));
                 }
                 Command::Key { epoch: 0, .. }

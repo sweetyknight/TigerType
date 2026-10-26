@@ -25,6 +25,8 @@ use windows::{
 pub const PROFILE: GUID = GUID::from_u128(0x2097c544_b7d6_4f5c_9f4d_6db1be3ee319);
 const LANGUAGE: u16 = 0x0804;
 const NAME: &str = "TigerType 虎码";
+/// 输入法配置图标（虎码印章），由安装包放在 DLL 同目录；任务栏据此显示本输入法，而不是退回语言名“简体”。
+const ICON: &str = "tigertype.ico";
 /// 键盘 TIP、沉浸式（UWP）与桌面托盘支持；未实现 UILess 与显示属性，不登记相应类别。
 const CATEGORIES: [GUID; 3] = [
     GUID_TFCAT_TIP_KEYBOARD,
@@ -46,9 +48,13 @@ fn class_values(dll: &Path) -> [(String, Option<&'static str>, OsString); 3] {
         (server, Some("ThreadingModel"), "Apartment".into()),
     ]
 }
-/// 宿主只连接与 DLL 同目录的后台；注册前确认路径为绝对路径且后台已在位，不在此复制文件或改权限。
+/// 宿主只连接与 DLL 同目录的后台；注册前确认路径为绝对路径且后台与配置图标已在位，不在此复制文件或改权限。
 fn validate(dll: &Path) -> Result<()> {
-    if dll.is_absolute() && dll.is_file() && dll.with_file_name(BACKEND).is_file() {
+    if dll.is_absolute()
+        && dll.is_file()
+        && dll.with_file_name(BACKEND).is_file()
+        && dll.with_file_name(ICON).is_file()
+    {
         Ok(())
     } else {
         Err(E_INVALIDARG.into())
@@ -134,14 +140,15 @@ fn register(dll: &Path) -> Result<()> {
     let result = write(HKEY_LOCAL_MACHINE, &class_values(dll)).and_then(|()| {
         tsf(|profiles, categories| -> Result<()> {
             let name: Vec<u16> = NAME.encode_utf16().collect();
-            // SAFETY: GUID 与名称在调用期间有效；无图标资源，传空图标文件。
+            let icon: Vec<u16> = dll.with_file_name(ICON).as_os_str().encode_wide().collect();
+            // SAFETY: GUID、名称与图标路径在调用期间有效；图标取 .ico 的第 0 个。
             unsafe {
                 profiles.RegisterProfile(
                     &CLSID_TEXT_SERVICE,
                     LANGUAGE,
                     &PROFILE,
                     &name,
-                    &[],
+                    &icon,
                     0,
                     HKL::default(),
                     0,
@@ -326,6 +333,9 @@ mod tests {
         fs::write(&dll, b"").unwrap();
         assert!(validate(&dll).is_err());
         fs::write(scratch.0.join(BACKEND), b"").unwrap();
+        // 缺配置图标同样拒绝注册，免得任务栏又显示语言名。
+        assert!(validate(&dll).is_err());
+        fs::write(scratch.0.join(ICON), b"").unwrap();
         assert!(validate(&dll).is_ok());
     }
 

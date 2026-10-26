@@ -88,7 +88,7 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
         }
         .palette();
         let c = themed(palette);
-        for color in [c.window, c.highlight, c.bar, c.text, c.chosen, c.border] {
+        for color in [c.window, c.highlight, c.text, c.chosen, c.border] {
             let [red, green, blue, _] = color.0.to_le_bytes();
             let value = u32::from_be_bytes([0, red, green, blue]);
             assert!(without_blue(value), "{theme:?} {color:?}");
@@ -112,9 +112,10 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
         let (normal, chosen) = (layout.rows[0], layout.rows[1]);
         assert_eq!(pixel(normal.right - 3, normal.top + 2), c.window);
         assert_eq!(pixel(chosen.left + 10, chosen.top + 2), c.highlight);
+        // 高亮行只有圆角底色，左缘不再画强调指示条。
         assert_eq!(
             pixel(chosen.left + 1, (chosen.top + chosen.bottom) / 2),
-            c.bar
+            c.highlight
         );
         // 玫红主题高亮行无底色、无指示条，只把字染成玫红。
         shown.options.theme = Theme::Rose;
@@ -139,10 +140,13 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
     shown.is_last_page = false;
     popup.show(&shown, CARET, HWND::default()).unwrap();
     assert!(popup.view.borrow().layout.footer.is_some());
+    assert!(paged(&shown));
+    // 拼音反查只有一页时页脚只留标签，不画翻页指示。
     shown.is_last_page = true;
     shown.mode = InputMode::Pinyin;
     popup.show(&shown, CARET, HWND::default()).unwrap();
     assert!(popup.view.borrow().layout.footer.is_some());
+    assert!(!paged(&shown));
 }
 
 #[test]

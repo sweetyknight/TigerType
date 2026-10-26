@@ -1,6 +1,6 @@
 //! 后台进程内查字/设置的固定工作线程控制器：与引擎线程共用只读词表，独占受管目录租约；
 //! 不创建输入会话，查询不产生上屏提交。
-use crate::{Result, data::Data};
+use crate::{Result, data::Data, settings};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tigertype_contracts::{
@@ -19,19 +19,21 @@ pub(crate) struct Controller<'a> {
 impl<'a> Controller<'a> {
     pub(crate) fn new(dictionary: &'a Dictionary, data: Data) -> Result<Self> {
         let bytes = data.settings()?;
-        let options: Options = bytes
-            .as_deref()
-            .map(serde_json::from_slice)
-            .transpose()?
-            .unwrap_or_default();
-        options.validate()?;
-        let digest = bytes.map(|bytes| format!("{:x}", Sha256::digest(bytes)));
-        Ok(Self {
+        let options = match &bytes {
+            Some(bytes) => settings::parse(bytes)?,
+            None => Options::default(),
+        };
+        let mut controller = Self {
             dictionary,
             data,
             options,
-            digest,
-        })
+            digest: bytes.map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+        };
+        // 首次运行即写出带注释的默认配置，“打开配置文件”与“重新载入”从此总有文件可用。
+        if controller.digest.is_none() {
+            controller.save(options)?;
+        }
+        Ok(controller)
     }
     pub(crate) fn options(&self) -> Options {
         self.options
@@ -50,12 +52,24 @@ impl<'a> Controller<'a> {
             Request::SaveSettings(options) => {
                 Reply::Saved(self.save(options).map_err(|e| e.to_string()))
             }
+            Request::ReloadSettings => Reply::Saved(self.reload().map_err(|e| e.to_string())),
         }
     }
     fn save(&mut self, options: Options) -> Result<Options> {
-        let bytes = serde_json::to_vec_pretty(&options)?;
+        let bytes = settings::render(&options)?.into_bytes();
         self.data.replace_settings(self.digest.as_deref(), &bytes)?;
         // 只有事务替换成功才更新内存和期望摘要；失败不伪装成已保存。
+        self.digest = Some(format!("{:x}", Sha256::digest(&bytes)));
+        self.options = options;
+        Ok(options)
+    }
+    /// 采纳用户手工修改：读回并校验通过才换上新设置与期望摘要，出错时保持当前设置。
+    fn reload(&mut self) -> Result<Options> {
+        let bytes = self
+            .data
+            .settings()?
+            .ok_or("settings.toml 不存在；改动任一设置即会重新生成")?;
+        let options = settings::parse(&bytes)?;
         self.digest = Some(format!("{:x}", Sha256::digest(&bytes)));
         self.options = options;
         Ok(options)
@@ -112,45 +126,71 @@ mod tests {
             }),
             Reply::Lookup(Err(_))
         ));
-        // 模拟外部改写：保存不得覆盖别人的内容，也不得改变已确认设置。
-        let changed = serde_json::to_vec(&Options::default())?;
-        std::fs::write(root.join("config/settings.json"), &changed)?;
+        // 模拟外部改写：保存不得覆盖别人的内容，也不得改变已确认设置；重新载入后才采纳。
+        let path = root.join("config/settings.toml");
+        let edited = Options {
+            page_size: 7,
+            ..Default::default()
+        };
+        let changed = settings::render(&edited)?;
+        std::fs::write(&path, &changed)?;
+        let Reply::Saved(Err(error)) =
+            controller.execute(Request::SaveSettings(Options::default()))
+        else {
+            panic!("外部修改后保存必须被拒绝");
+        };
+        assert!(error.contains("重新载入"), "{error}");
+        assert_eq!(controller.options(), options);
+        assert_eq!(std::fs::read_to_string(&path)?, changed);
+        assert!(
+            matches!(controller.execute(Request::ReloadSettings), Reply::Saved(Ok(loaded)) if loaded == edited)
+        );
+        assert_eq!(controller.options(), edited);
+        // 手工改坏：重新载入报出行号，当前设置与文件都不变；修好之前保存仍被拒绝。
+        let broken = changed.replace("page_size = 7", "page_size = seven");
+        std::fs::write(&path, &broken)?;
+        let Reply::Saved(Err(error)) = controller.execute(Request::ReloadSettings) else {
+            panic!("格式错误必须被拒绝");
+        };
+        assert!(error.contains("settings.toml 第"), "{error}");
+        assert_eq!(controller.options(), edited);
         assert!(matches!(
             controller.execute(Request::SaveSettings(Options::default())),
             Reply::Saved(Err(_))
         ));
-        assert_eq!(controller.options(), options);
-        assert_eq!(std::fs::read(root.join("config/settings.json"))?, changed);
+        assert_eq!(std::fs::read_to_string(&path)?, broken);
+        std::fs::write(&path, &changed)?;
+        assert!(matches!(
+            controller.execute(Request::ReloadSettings),
+            Reply::Saved(Ok(_))
+        ));
+        assert!(matches!(
+            controller.execute(Request::SaveSettings(Options::default())),
+            Reply::Saved(Ok(_))
+        ));
         drop(controller);
         let reopened = Controller::new(&dictionary, Data::open(&root)?)?;
         assert_eq!(reopened.options(), Options::default());
         Ok(())
     }
     #[test]
-    fn invalid_saved_settings_are_not_silently_replaced() -> Result<()> {
+    fn first_run_writes_the_commented_defaults_and_invalid_files_are_kept() -> Result<()> {
         let dictionary = dictionary()?;
+        let root =
+            resources::new_directory(&std::env::temp_dir(), "tiger-lookup-first")?.join("data");
+        let controller = Controller::new(&dictionary, Data::create(&root)?)?;
+        let written = std::fs::read(root.join("config/settings.toml"))?;
+        assert_eq!(settings::parse(&written)?, Options::default());
+        assert_eq!(controller.options(), Options::default());
+        drop(controller);
         let root =
             resources::new_directory(&std::env::temp_dir(), "tiger-lookup-invalid")?.join("data");
         let data = Data::create(&root)?;
-        std::fs::write(root.join("config/settings.json"), b"not json")?;
+        std::fs::write(root.join("config/settings.toml"), b"not toml")?;
         assert!(Controller::new(&dictionary, data).is_err());
         assert_eq!(
-            std::fs::read(root.join("config/settings.json"))?,
-            b"not json"
-        );
-        Ok(())
-    }
-    #[test]
-    fn missing_typing_mode_defaults_to_single_for_existing_settings() -> Result<()> {
-        let mut value = serde_json::to_value(Options::default())?;
-        value
-            .as_object_mut()
-            .ok_or("设置不是 JSON 对象")?
-            .remove("typing_mode");
-        let restored: Options = serde_json::from_value(value)?;
-        assert_eq!(
-            restored.typing_mode,
-            tigertype_contracts::TypingMode::Single
+            std::fs::read(root.join("config/settings.toml"))?,
+            b"not toml"
         );
         Ok(())
     }

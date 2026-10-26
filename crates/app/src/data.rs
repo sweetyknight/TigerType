@@ -130,16 +130,16 @@ impl Data {
         })
     }
 
-    /// 设置仅写本程序 JSON；先核对读取时摘要，拒绝覆盖并发修改或旧格式。
+    /// 设置仅写本程序模板生成的 TOML；先核对读取时摘要，拒绝覆盖外部修改或旧格式。
     pub fn replace_settings(&self, expected: Option<&str>, contents: &[u8]) -> Result<PathBuf> {
         if contents.len() as u64 > MAX_CONFIG || contents.contains(&0) {
             return Err("设置补丁长度或内容不符".into());
         }
-        // 外观颜色同样是写入边界：偏蓝或不可读的自定义配色不落盘。
-        serde_json::from_slice::<tigertype_contracts::Options>(contents)?.validate()?;
+        // 写入边界再读回校验：结构不符、范围外、偏蓝或不可读的配色都不落盘。
+        crate::settings::parse(contents)?;
         let _config = Directories::pin(&self.root.join("config"))?;
         let _backups = Directories::pin(&self.root.join("backups"))?;
-        let target = self.root.join("config/settings.json");
+        let target = self.settings_path();
         let old = if target.try_exists()? {
             Some(read_file(&target, MAX_CONFIG)?)
         } else {
@@ -149,14 +149,14 @@ impl Data {
             .as_ref()
             .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
         if hash.as_deref() != expected {
-            return Err("配置已被修改，拒绝覆盖".into());
+            return Err("settings.toml 已在外部修改，未覆盖；请到“高级”点“重新载入”后再改".into());
         }
         let transaction = resources::new_directory(&self.root.join("backups"), "settings")?;
         let _transaction = Directories::pin(&transaction)?;
         if let Some(old) = old {
-            write_new(&transaction.join("previous.json"), &old)?;
+            write_new(&transaction.join("previous.toml"), &old)?;
         }
-        let staged = transaction.join("next.json");
+        let staged = transaction.join("next.toml");
         write_new(&staged, contents)?;
         // 同卷替换，失败保留旧配置和事务证据；不先删除目标，也不清理失败目录。
         let wide = |path: &Path| {
@@ -194,7 +194,7 @@ impl Data {
 
     /// 返回已规范化且受目录租约保护的设置文件路径，供设置页交给系统编辑器。
     pub(crate) fn settings_path(&self) -> PathBuf {
-        self.root.join("config/settings.json")
+        self.root.join("config/settings.toml")
     }
 }
 
@@ -240,37 +240,39 @@ mod tests {
         let root = root()?;
         let data = Data::create(&root)?;
         fs::write(root.join("user/personal.yaml"), b"untouched")?;
-        let first = serde_json::to_vec(&tigertype_contracts::Options::default())?;
-        let second = serde_json::to_vec(&tigertype_contracts::Options {
+        let first = crate::settings::render(&tigertype_contracts::Options::default())?.into_bytes();
+        let second = crate::settings::render(&tigertype_contracts::Options {
             auto_commit_four: true,
             ..Default::default()
-        })?;
+        })?
+        .into_bytes();
         data.replace_settings(None, &first)?;
         let old = data.settings()?.unwrap();
         let digest = format!("{:x}", Sha256::digest(&old));
         assert!(data.replace_settings(None, b"bad").is_err());
         // 偏蓝的自定义配色在写入边界被拒绝，旧设置保持不变。
-        let blue = serde_json::to_vec(&tigertype_contracts::Options {
+        let blue = crate::settings::render(&tigertype_contracts::Options {
             theme: tigertype_contracts::Theme::Custom,
             custom: tigertype_contracts::CustomColors {
                 accent: 0x0078D4,
                 ..Default::default()
             },
             ..Default::default()
-        })?;
+        })?
+        .into_bytes();
         assert!(data.replace_settings(Some(&digest), &blue).is_err());
         assert_eq!(data.settings()?, Some(old.clone()));
         let lock = OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ)
-            .open(root.join("config/settings.json"))?;
+            .open(root.join("config/settings.toml"))?;
         assert!(data.replace_settings(Some(&digest), &second).is_err());
         assert_eq!(data.settings()?, Some(old.clone()));
         drop(lock);
         let backup = data.replace_settings(Some(&digest), &second)?;
-        assert_eq!(fs::read(backup.join("previous.json"))?, old);
+        assert_eq!(fs::read(backup.join("previous.toml"))?, old);
         assert_eq!(fs::read(root.join("user/personal.yaml"))?, b"untouched");
-        fs::hard_link(root.join("config/settings.json"), root.join("linked.yaml"))?;
+        fs::hard_link(root.join("config/settings.toml"), root.join("linked.yaml"))?;
         assert!(data.settings().is_err());
         assert!(data.replace_settings(None, b"bad").is_err());
         Ok(())

@@ -1,5 +1,5 @@
 //! 合成词表覆盖状态机与学习契约，不读取真实资源、文件或个人输入。
-use tigertype_contracts::{InputMode, Key, Options, OutputForm, PAGE_SIZE};
+use tigertype_contracts::{InputMode, Key, Options, OutputForm};
 use tigertype_engine::{Data, Detail, Dictionary, Entry, Mapping, Phrase, Pronunciation, Session};
 
 fn data() -> Data {
@@ -206,14 +206,15 @@ fn large_code_bucket_rebuild_stays_bounded_under_pressure() {
         Some(expected_first.as_str())
     );
     assert!(!first.is_last_page, "大桶首屏不能被错误标记为末页");
-    let last_page = (MATCHES - 1) / PAGE_SIZE;
+    let page = usize::from(Options::default().page_size);
+    let last_page = (MATCHES - 1) / page;
     for _ in 0..last_page {
         session.process(Key::PageDown).unwrap();
     }
     let last = session.snapshot();
     assert_eq!(last.page_index, last_page);
     assert!(last.is_last_page);
-    assert_eq!(last.candidates.len(), MATCHES % PAGE_SIZE);
+    assert_eq!(last.candidates.len(), (MATCHES - 1) % page + 1);
     let expected_last = char::from_u32(0x4E00).unwrap().to_string();
     assert_eq!(
         last.candidates.last().map(|item| item.text.as_str()),
@@ -526,7 +527,47 @@ fn pagination_selection_and_stale_snapshots_are_checked() {
         data.common.push(character);
     }
     let dictionary = Dictionary::new(data).unwrap();
+    let nth = |n: u32| char::from_u32(0x4e10 + n).unwrap().to_string();
+    // 默认每页 5 个：本页外的数字键静默忽略，不选到下一页；分号、引号按本页第二、三个。
     let mut session = Session::new(&dictionary, Options::default());
+    type_code(&mut session, "a");
+    let first = session.snapshot();
+    assert_eq!(first.page_size, 5);
+    assert_eq!(first.candidates.len(), 5);
+    let outcome = session.process(Key::Character('7')).unwrap();
+    assert!(outcome.handled && outcome.commit.is_none() && outcome.state.composing);
+    assert_eq!(
+        session.process(Key::Character('5')).unwrap().commit,
+        Some(nth(4))
+    );
+    type_code(&mut session, "a");
+    session.process(Key::PageDown).unwrap();
+    assert_eq!(
+        session.process(Key::Character(';')).unwrap().commit,
+        Some(nth(6))
+    );
+    type_code(&mut session, "a");
+    for _ in 0..4 {
+        session.process(Key::PageDown).unwrap();
+    }
+    let last = session.snapshot();
+    assert!(last.is_last_page && last.page_index == 4 && last.candidates.len() == 1);
+    assert!(
+        session
+            .process(Key::Character('\''))
+            .unwrap()
+            .commit
+            .is_none()
+    );
+    session.process(Key::Escape).unwrap();
+
+    let mut session = Session::new(
+        &dictionary,
+        Options {
+            page_size: 9,
+            ..Options::default()
+        },
+    );
     type_code(&mut session, "a");
     let old = session.snapshot();
     // 每页标号都从阿拉伯数字 1 起，与数字键选重对应。
@@ -542,7 +583,6 @@ fn pagination_selection_and_stale_snapshots_are_checked() {
     assert_eq!(selected, char::from_u32(0x4e10 + 10).unwrap().to_string());
     assert!(session.select(state.revision, 1).is_err());
     // 越界翻页忽略：首页向上、末页向下都不改高亮，随后空格提交的仍是原高亮项。
-    let nth = |n: u32| char::from_u32(0x4e10 + n).unwrap().to_string();
     use Key::{Character, Next, PageDown, PageUp};
     for (moves, page, expected) in [
         (vec![Next, Next, PageUp], 0, 2),

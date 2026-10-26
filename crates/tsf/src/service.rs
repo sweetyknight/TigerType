@@ -7,7 +7,7 @@ use crate::{
     candidate::{Popup, bounded, fallback_caret, window_area},
     edit::{EditReport, Editor, Verdict},
     host::{Channel, Host},
-    indicator::Indicator,
+    indicator::{Indicator, Status},
     key::{self, Modifiers},
 };
 use std::{
@@ -214,10 +214,10 @@ fn indicator(manager: &ITfThreadMgr, owner: &Weak<Active>) -> Option<ComObject<I
             // 先确认连接：刚重连时状态回到默认，配色与全角随之取默认值，直到下一键拿到后台状态。
             Some(active) => {
                 let ready = active.ready(Instant::now() + BUDGET);
-                let (palette, full) = active.look();
-                (ready, palette, full)
+                let (palette, status) = active.look();
+                (ready, palette, status)
             }
-            None => (false, Options::default().palette(), false),
+            None => (false, Options::default().palette(), Status::default()),
         },
         move |panel| {
             if let Some(active) = show.upgrade() {
@@ -291,11 +291,21 @@ impl Active {
         self.hide();
         false
     }
-    /// 菜单配色与全角状态：取上次回复里的后台状态，配色与候选窗一致。
-    fn look(&self) -> (Palette, bool) {
+    /// 菜单配色与状态（中英、标点、全角）：取上次回复里的后台状态，配色与候选窗一致。
+    fn look(&self) -> (Palette, Status) {
         self.host.try_borrow().map_or_else(
-            |_| (Options::default().palette(), false),
-            |host| (host.state().options.palette(), host.state().full_shape),
+            |_| (Options::default().palette(), Status::default()),
+            |host| {
+                let state = host.state();
+                (
+                    state.options.palette(),
+                    Status {
+                        ascii: state.ascii_mode,
+                        punctuation: state.ascii_punctuation,
+                        full: state.full_shape,
+                    },
+                )
+            },
         )
     }
     /// 映射本键并按上次状态判断是否吃键；不发输入请求，只读上下文或后台连不上则不吃。

@@ -6,7 +6,6 @@
 //! 登录早期资源管理器尚未就绪或其后重启时，都靠 TaskbarCreated 广播重新挂上（保持当前显隐）。
 use super::*;
 use crate::Latest;
-use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows_sys::Win32::UI::{
     Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
     Controls::ODT_MENU,
@@ -24,8 +23,11 @@ pub(super) const OPEN: u32 = WM_APP + 5;
 /// 版本 4 下键盘确认（Enter）的事件，windows-sys 未导出。
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
 const ICON_ID: u32 = 1;
-/// 菜单项：编号、文字、目标窗口。自绘菜单项不自动处理助记键，所以不写助记符，用方向键与 Enter 选择。
-const ITEMS: [(u32, &str, Panel); 2] = [(1, "设置", Panel::Settings), (2, "查字", Panel::Lookup)];
+/// 菜单项：编号、文字、目标窗口、图标字体码位。自绘菜单项不自动处理助记键，所以不写助记符，用方向键与 Enter 选择。
+const ITEMS: [(u32, &str, Panel, u16); 2] = [
+    (1, "查字", Panel::Lookup, 0xE721),
+    (2, "设置", Panel::Settings, 0xE713),
+];
 
 thread_local! {
     // 当前登记给通知区的图标；系统未承诺复制图标，登记期间保持有效，换新或删除后才释放。
@@ -223,7 +225,7 @@ fn add(hwnd: HWND) -> bool {
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP | NIF_STATE,
         uCallbackMessage: NOTIFY,
         hIcon: icon,
-        szTip: utf16("TigerType 虎码：单击打开设置，右键更多"),
+        szTip: utf16("虎码：单击打开设置，右键更多"),
         dwState: if HIDDEN.get() { NIS_HIDDEN } else { 0 },
         dwStateMask: NIS_HIDDEN,
         ..Default::default()
@@ -247,182 +249,11 @@ fn add(hwnd: HWND) -> bool {
     }
 }
 
-/// 深浅色切换后重画图标并原位替换（不删再加，图标不挪位置）；成功后才释放旧图标。
-fn recolor(hwnd: HWND) {
-    let Some(icon) = icon() else {
-        return;
-    };
-    let data = NOTIFYICONDATAW {
-        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-        hWnd: hwnd,
-        uID: ICON_ID,
-        uFlags: NIF_ICON,
-        hIcon: icon,
-        ..Default::default()
-    };
-    // SAFETY: 结构大小已填，图标在调用期间有效；未登记时系统只返回失败，新图标随即释放。
-    unsafe {
-        let old = if Shell_NotifyIconW(NIM_MODIFY, &data) != 0 {
-            ICON.with(|slot| slot.replace(icon))
-        } else {
-            icon
-        };
-        if !old.is_null() {
-            DestroyIcon(old);
-        }
-    }
-}
-
-/// 任务栏是否为浅色：系统“Windows 模式”设置，读不到按深色（Win10 默认）。
-fn light_taskbar() -> bool {
-    let mut value = 0u32;
-    let mut size = size_of::<u32>() as u32;
-    let key = utf16::<64>(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-    let name = utf16::<24>("SystemUsesLightTheme");
-    // SAFETY: 名称 NUL 结尾，输出缓冲为本地 DWORD 且大小已填；只读当前用户的一个值。
-    let read = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            key.as_ptr(),
-            name.as_ptr(),
-            RRF_RT_REG_DWORD,
-            null_mut(),
-            (&mut value as *mut u32).cast(),
-            &mut size,
-        )
-    };
-    read == 0 && value != 0
-}
-
-/// 现画小图标：与任务栏输入法图标同风格，只画一个“虎”字、底全透明，字色随任务栏深浅，无蓝色。
-/// TSF 输入法图标显示中英状态，品牌“虎”只在此处，两处不重复。
+/// 现画小图标：虎码印章（琥珀底、米白“虎”字），与输入法配置图标一致；不随任务栏深浅变色，也无蓝色。
 fn icon() -> Option<HICON> {
-    const MAX: i32 = 256;
-    let ink = if light_taskbar() { 0x1A1A1A } else { 0xFFFFFF };
     // SAFETY: 系统度量查询无副作用。
-    let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, MAX);
-    let info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: size,
-            // 负高度为自上而下的行序。
-            biHeight: -size,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    // 单色掩码全零：透明度完全由彩色位图的 alpha 决定；行按 16 位对齐，按最大尺寸留栈缓冲。
-    let mask_bits = [0u8; (MAX as usize / 16 * 2) * MAX as usize];
-    let face = utf16::<32>(UI_FACE);
-    let glyph = utf16::<2>("虎");
-    // SAFETY: 内存 DC、位图与字体都在本函数内创建，选入的对象在删除前还原；
-    // 像素缓冲属于 DIB，只在 DIB 删除前读写；CreateIconIndirect 复制位图，之后即可释放。
-    unsafe {
-        let dc = CreateCompatibleDC(null_mut());
-        let mut bits = null_mut();
-        let color = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
-        let mask = CreateBitmap(size, size, 1, 1, mask_bits.as_ptr().cast());
-        // 灰度抗锯齿：ClearType 的彩色边缘可能偏蓝。字身取图标的 3/4，与任务栏输入法图标一致。
-        let font = CreateFontW(
-            -(size * 3 / 4),
-            0,
-            0,
-            0,
-            FW_NORMAL as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET as u32,
-            0,
-            0,
-            ANTIALIASED_QUALITY as u32,
-            0,
-            face.as_ptr(),
-        );
-        let mut result = None;
-        if !dc.is_null()
-            && !color.is_null()
-            && !mask.is_null()
-            && !font.is_null()
-            && !bits.is_null()
-        {
-            // 新 DIB 全零（黑）；白字画上去后各通道即覆盖率。
-            let old_bitmap = SelectObject(dc, color);
-            let old_font = SelectObject(dc, font);
-            SetBkMode(dc, TRANSPARENT as _);
-            SetTextColor(dc, rgb(0xFFFFFF));
-            let (x, y) = centered(dc, glyph[0], size);
-            SetTextAlign(dc, TA_BASELINE | TA_LEFT);
-            TextOutW(dc, x, y, glyph.as_ptr(), 1);
-            GdiFlush();
-            SelectObject(dc, old_font);
-            SelectObject(dc, old_bitmap);
-            // 覆盖率当 alpha、像素换成字色（非预乘 ARGB），覆盖率为 0 处全透明。
-            for pixel in std::slice::from_raw_parts_mut(bits.cast::<u32>(), (size * size) as usize)
-            {
-                let alpha = (*pixel >> 16 & 0xFF)
-                    .max(*pixel >> 8 & 0xFF)
-                    .max(*pixel & 0xFF);
-                *pixel = if alpha == 0 { 0 } else { alpha << 24 | ink };
-            }
-            let icon = CreateIconIndirect(&ICONINFO {
-                fIcon: 1,
-                xHotspot: 0,
-                yHotspot: 0,
-                hbmMask: mask,
-                hbmColor: color,
-            });
-            result = (!icon.is_null()).then_some(icon);
-        }
-        for object in [color, mask, font] {
-            if !object.is_null() {
-                DeleteObject(object);
-            }
-        }
-        if !dc.is_null() {
-            DeleteDC(dc);
-        }
-        result
-    }
-}
-
-/// 按字形墨迹框居中，返回基线起点：GDI 的垂直居中按字符单元算，雅黑的单元比汉字高，
-/// 字会偏下甚至被裁掉底边。取不到字形度量时退回按字身估算。
-/// SAFETY: 调用方保证 dc 有效且已选入目标字体。
-unsafe fn centered(dc: HDC, glyph: u16, size: i32) -> (i32, i32) {
-    let one = FIXED { fract: 0, value: 1 };
-    let identity = MAT2 {
-        eM11: one,
-        eM12: FIXED { fract: 0, value: 0 },
-        eM21: FIXED { fract: 0, value: 0 },
-        eM22: one,
-    };
-    // SAFETY: GLYPHMETRICS 为纯数据，全零合法。
-    let mut metrics: GLYPHMETRICS = unsafe { std::mem::zeroed() };
-    // SAFETY: 只取度量（GGO_METRICS 不写缓冲），输出结构为本地值。
-    let read = unsafe {
-        GetGlyphOutlineW(
-            dc,
-            glyph.into(),
-            GGO_METRICS,
-            &mut metrics,
-            0,
-            null_mut(),
-            &identity,
-        )
-    };
-    if read == GDI_ERROR as u32 {
-        return (size / 8, size * 7 / 8);
-    }
-    let (width, height) = (metrics.gmBlackBoxX as i32, metrics.gmBlackBoxY as i32);
-    let origin = metrics.gmptGlyphOrigin;
-    (
-        (size - width) / 2 - origin.x,
-        (size - height) / 2 + origin.y,
-    )
+    let side = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 256);
+    super::seal::icon(side)
 }
 
 /// 右键菜单：自绘菜单项（保留文字供读屏器朗读），底色与高亮按主题，不用系统蓝色高亮。
@@ -433,7 +264,7 @@ fn menu(hwnd: HWND, x: i32, y: i32) {
         if menu.is_null() {
             return;
         }
-        for (id, text, _) in ITEMS {
+        for (id, text, ..) in ITEMS {
             let mut text = utf16::<8>(text);
             let item = MENUITEMINFOW {
                 cbSize: size_of::<MENUITEMINFOW>() as u32,
@@ -474,15 +305,15 @@ fn menu(hwnd: HWND, x: i32, y: i32) {
         PostMessageW(hwnd, WM_NULL, 0, 0);
         DestroyMenu(menu);
         DeleteObject(brush);
-        if let Some((_, _, panel)) = ITEMS.iter().find(|(id, ..)| *id == chosen) {
+        if let Some((_, _, panel, _)) = ITEMS.iter().find(|(id, ..)| *id == chosen) {
             post(hwnd, OPEN, encode(*panel));
         }
     }
 }
 
-/// 自绘菜单项：选中项为主题高亮底与左侧强调条，与查字列表一致；高对比度时沿用系统颜色。
+/// 自绘菜单项：图标加文字，悬停项为主题高亮圆角底，不用系统蓝色高亮；高对比度时沿用系统颜色。
 fn draw_menu_item(item: &DRAWITEMSTRUCT) {
-    let Some((_, text, _)) = ITEMS.iter().find(|(id, ..)| *id == item.itemID) else {
+    let Some((_, text, _, code)) = ITEMS.iter().find(|(id, ..)| *id == item.itemID) else {
         return;
     };
     let c = colors();
@@ -498,48 +329,20 @@ fn draw_menu_item(item: &DRAWITEMSTRUCT) {
             right: rect.right - s(4),
             ..rect
         };
-        round(dc, &inner, s(4), Some(c.highlight), c.highlight);
-        let top = (rect.top + rect.bottom - s(16)) / 2;
-        let bar = RECT {
-            left: inner.left,
-            top,
-            right: inner.left + s(3),
-            bottom: top + s(16),
-        };
-        fill(dc, &bar, c.accent);
+        round(dc, &inner, s(5), Some(c.nav), c.nav);
     }
-    let Ok(font) = create_font(dc, &[UI_FACE], 14, dpi as u32, 400) else {
-        return;
-    };
-    let text = utf16::<8>(text);
-    let length = text
-        .iter()
-        .position(|&unit| unit == 0)
-        .unwrap_or(text.len());
-    let area = RECT {
-        left: rect.left + s(20),
+    let icon = RECT {
+        left: rect.left + s(14),
+        right: rect.left + s(34),
         ..rect
     };
-    draw_text(dc, font, c.text, &text[..length], area, DT_NOPREFIX);
-    // SAFETY: 字体已在 draw_text 内还原，此处释放本次新建的字体。
-    unsafe {
-        DeleteObject(font);
-    }
-}
-
-/// 逐单元比对 NUL 结尾的宽字符串，不分配；遇到首个不同（含对方提前结束的 NUL）即停，不越过其结尾。
-/// SAFETY: 调用方保证 text 指向 NUL 结尾的宽字符串。
-unsafe fn named(text: *const u16, name: &str) -> bool {
-    let mut index = 0;
-    for unit in name.encode_utf16() {
-        // SAFETY: 之前各单元都相等且非 NUL，故尚未越过结尾。
-        if unsafe { *text.add(index) } != unit {
-            return false;
-        }
-        index += 1;
-    }
-    // SAFETY: 同上。
-    unsafe { *text.add(index) == 0 }
+    draw_icon(dc, *code, 14, c.text, icon);
+    let font = TempFont::new(dc, &[UI_FACE], 14, 400);
+    let area = RECT {
+        left: rect.left + s(42),
+        ..rect
+    };
+    draw_text(dc, font.0, c.text, &units(text), area, DT_NOPREFIX);
 }
 
 // SAFETY: 系统在后台 UI 线程调用；不解引用业务指针、不保存状态、不分配；自绘结构只在本次回调内读取。
@@ -566,7 +369,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                     return DefWindowProcW(hwnd, message, w, l);
                 }
                 let dpi = GetDpiForWindow(hwnd).max(96);
-                item.itemWidth = 128 * dpi / 96;
+                item.itemWidth = 140 * dpi / 96;
                 item.itemHeight = 32 * dpi / 96;
                 1
             }
@@ -589,11 +392,6 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
             }
             UNBLOCK => {
                 unblock(hwnd);
-                0
-            }
-            // 切换深浅色时系统广播设置名 ImmersiveColorSet，按新任务栏底色重画图标。
-            WM_SETTINGCHANGE if l != 0 && named(l as *const u16, "ImmersiveColorSet") => {
-                recolor(hwnd);
                 0
             }
             // 登记消息编号从 0xC000 起，只在这一段比对，避免每条消息都查询。
@@ -720,85 +518,22 @@ mod tests {
     }
 
     #[test]
-    fn icon_is_a_bare_glyph_in_the_taskbar_ink_on_a_transparent_background() {
+    fn icon_is_the_seal_at_the_small_icon_size() {
         let icon = icon().unwrap();
-        let mut info = ICONINFO::default();
-        // SAFETY: 读回本测试刚建的图标位图，读完删除位图与图标。
+        // SAFETY: ICONINFO 为输出参数；取出的位图用后释放，图标随即销毁。
         unsafe {
-            assert_ne!(GetIconInfo(icon, &mut info), 0);
-            let mut bitmap = BITMAP::default();
+            let mut info: ICONINFO = std::mem::zeroed();
+            assert!(GetIconInfo(icon, &mut info) != 0);
+            let mut bitmap: BITMAP = std::mem::zeroed();
             GetObjectW(
                 info.hbmColor,
                 size_of::<BITMAP>() as i32,
                 (&mut bitmap as *mut BITMAP).cast(),
             );
-            let size = bitmap.bmWidth;
-            let mut header = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: size,
-                    biHeight: -size,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let mut pixels = vec![0u32; (size * size) as usize];
-            let dc = CreateCompatibleDC(null_mut());
-            let rows = GetDIBits(
-                dc,
-                info.hbmColor,
-                0,
-                size as u32,
-                pixels.as_mut_ptr().cast(),
-                &mut header,
-                DIB_RGB_COLORS,
-            );
-            DeleteDC(dc);
+            assert_eq!(bitmap.bmWidth, GetSystemMetrics(SM_CXSMICON).clamp(16, 256));
             DeleteObject(info.hbmColor);
             DeleteObject(info.hbmMask);
             DestroyIcon(icon);
-            assert_eq!(rows, size);
-            // 没有底板：角上透明、可见像素只占少数且有完全不透明的笔画，可见像素一律是任务栏字色（无蓝）。
-            let ink = if light_taskbar() { 0x1A1A1A } else { 0xFFFFFF };
-            assert_eq!(pixels[0] >> 24, 0);
-            let visible: Vec<u32> = pixels.iter().copied().filter(|p| p >> 24 != 0).collect();
-            assert!(
-                visible.len() * 2 < pixels.len(),
-                "{}/{}",
-                visible.len(),
-                pixels.len()
-            );
-            assert!(visible.iter().any(|p| p >> 24 == 0xFF));
-            // 字形按墨迹居中：四边都不贴边，上下、左右留白相差不超过 1px。
-            let inked = |at: &dyn Fn(i32) -> bool| (0..size).filter(|&k| at(k)).collect::<Vec<_>>();
-            let rows = inked(&|y| (0..size).any(|x| pixels[(y * size + x) as usize] >> 24 != 0));
-            let cols = inked(&|x| (0..size).any(|y| pixels[(y * size + x) as usize] >> 24 != 0));
-            for span in [rows, cols] {
-                let (first, last) = (span[0], span[span.len() - 1]);
-                assert!(first >= 1 && last <= size - 2, "{first}..{last} / {size}");
-                assert!(
-                    (first - (size - 1 - last)).abs() <= 1,
-                    "{first}..{last} / {size}"
-                );
-            }
-            for pixel in visible {
-                assert_eq!(pixel & 0xFF_FFFF, ink, "{pixel:08X}");
-            }
-        }
-    }
-
-    #[test]
-    fn only_the_color_mode_setting_name_triggers_a_recolor() {
-        let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-        // SAFETY: 测试字符串均 NUL 结尾。
-        let named = |text: &str| unsafe { named(wide(text).as_ptr(), "ImmersiveColorSet") };
-        assert!(named("ImmersiveColorSet"));
-        // 前缀、加长与其他设置名都不算。
-        for other in ["Immersive", "ImmersiveColorSetX", "Policy", ""] {
-            assert!(!named(other), "{other}");
         }
     }
 }

@@ -52,6 +52,12 @@ fn check_script(script: &str, locked: &[fonts::Font]) -> Result<()> {
             return Err(format!("安装脚本缺少锁定码表 {name}（须装到 {dest}）").into());
         }
     }
+    // 注册 DLL 时要求同目录已有配置图标，图标须排在 DLL 之前安装。
+    let icon = script.find("DestName: \"tigertype.ico\"");
+    let dll = script.find("tigertype_tsf.dll\"; DestDir");
+    if !matches!((icon, dll), (Some(icon), Some(dll)) if icon < dll) {
+        return Err("安装脚本须在 DLL 之前安装 tigertype.ico".into());
+    }
     Ok(())
 }
 
@@ -112,16 +118,27 @@ fn run() -> Result<()> {
         ],
     )?;
 
+    // 虎码印章图标每次现画（需本机装有霞鹜文楷，缺失时退到楷体）到新建目录，编译后只删除这一个文件与空目录。
     let output = root.join("target").join("package");
+    let staging = resources::new_directory(&output, "icon")?;
+    let icon = staging.join("tigertype.ico");
+    fs::write(&icon, tigertype_ui::icon_file()?)?;
+
     let version = env!("CARGO_PKG_VERSION");
     println!("\n== ISCC ==");
-    let status = process::run(
-        // 不加静默参数：编译输出逐个列出打包文件，留作打包记录。
-        Command::new(&iscc)
-            .arg(format!("/DVersion={version}"))
-            .arg(plain(&script)?),
-        Duration::from_secs(1800),
-    )?;
+    let status = plain(&icon).and_then(|icon| {
+        process::run(
+            // 不加静默参数：编译输出逐个列出打包文件，留作打包记录。
+            Command::new(&iscc)
+                .arg(format!("/DVersion={version}"))
+                .arg(format!("/DIcon={icon}"))
+                .arg(plain(&script)?),
+            Duration::from_secs(1800),
+        )
+    });
+    fs::remove_file(&icon)?;
+    fs::remove_dir(&staging)?;
+    let status = status?;
     if !status.success() {
         return Err(format!("Inno Setup 编译失败 ({status})").into());
     }

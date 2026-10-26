@@ -16,6 +16,8 @@ tigertype-ui = { path = "crates/ui" }
 sha2 = "=0.10.9"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.154"
+# 设置文件 settings.toml 的解析；只开 parse+serde，写出用本程序带注释的模板。
+toml = { version = "=1.1.8", default-features = false, features = ["std", "parse", "serde"] }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
 windows = { version = "=0.62.2", default-features = false }
 windows-core = "=0.62.2"

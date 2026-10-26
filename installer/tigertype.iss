@@ -1,10 +1,13 @@
 ; TigerType 安装包定义（Inno Setup 6.7）。由打包驱动编译：
 ;   cargo run --locked --offline -p tigertype-app --example package
-; 驱动先构建 release 程序、校验锁定码表、字体与语言文件，再以 /DVersion 调用 ISCC。
+; 驱动先构建 release 程序、校验锁定码表、字体与语言文件并现画虎码图标，再以 /DVersion /DIcon 调用 ISCC。
 ; 固定装到 Program Files：自带 ALL APPLICATION PACKAGES 读/执行（UWP 宿主可加载 DLL），非管理员不可写
 ; （DLL 会进入管理员进程，可写目录即提权途径），因此不提供改目录页。
 #ifndef Version
   #error 请用打包驱动编译（缺少 /DVersion）
+#endif
+#ifndef Icon
+  #error 请用打包驱动编译（缺少 /DIcon）
 #endif
 #define Root AddBackslash(SourcePath) + ".."
 
@@ -31,7 +34,8 @@ ShowLanguageDialog=no
 ; TSF DLL 驻留在所有用过输入法的进程里，重启管理器会要求关掉它们；改由安装前改名旧文件处理。
 CloseApplications=no
 UninstallDisplayName=TigerType 虎码输入法
-UninstallDisplayIcon={app}\tigertype.exe
+SetupIconFile={#Icon}
+UninstallDisplayIcon={app}\tigertype.ico
 
 [Languages]
 Name: "chs"; MessagesFile: "{#Root}\installer\ChineseSimplified.isl"
@@ -40,8 +44,9 @@ Name: "chs"; MessagesFile: "{#Root}\installer\ChineseSimplified.isl"
 FinishedLabel=TigerType 已安装，输入后台已启动并会随登录自动启动。%n%n请在“设置 → 时间和语言 → 语言和区域 → 中文(简体) → 语言选项 → 键盘”中添加“TigerType 虎码”。查字与设置可从开始菜单打开。%n%n升级时，安装前已打开的程序须重新打开才会用上新版本。
 
 [Files]
-; 程序在前：注册 DLL 时要求同目录已有后台程序。
+; 程序与配置图标在前：注册 DLL 时要求同目录已有后台程序与 tigertype.ico（任务栏据此显示虎码图标）。
 Source: "{#Root}\target\release\tigertype.exe"; DestDir: "{app}"; Flags: ignoreversion uninsrestartdelete
+Source: "{#Icon}"; DestDir: "{app}"; DestName: "tigertype.ico"; Flags: ignoreversion
 Source: "{#Root}\target\release\tigertype_tsf.dll"; DestDir: "{app}"; Flags: ignoreversion regserver uninsrestartdelete 64bit
 Source: "{#Root}\target\i686-pc-windows-msvc\release\tigertype_tsf.dll"; DestDir: "{app}"; DestName: "tigertype_tsf_x86.dll"; Flags: ignoreversion regserver uninsrestartdelete 32bit
 ; 锁定码表原文，后台启动时逐个核对大小/SHA256 后解析；清单变动须同步此处（打包驱动会核对）。
@@ -68,7 +73,7 @@ Type: files; Name: "{app}\tiger-v1.json"
 Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "TigerType"; ValueData: """{app}\tigertype.exe"" serve"; Flags: uninsdeletevalue
 
 [Icons]
-Name: "{autoprograms}\TigerType 查字与设置"; Filename: "{app}\tigertype.exe"; Parameters: "lookup-window"; Comment: "查字、设置；后台未运行时一并启动"
+Name: "{autoprograms}\TigerType 查字与设置"; Filename: "{app}\tigertype.exe"; Parameters: "lookup-window"; IconFilename: "{app}\tigertype.ico"; Comment: "查字、设置；后台未运行时一并启动"
 
 [Run]
 ; 后台必须以非提升权限运行（提升后管道所有者为 Administrators，宿主会拒绝连接）。

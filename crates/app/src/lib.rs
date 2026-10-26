@@ -12,6 +12,7 @@ pub mod import;
 pub mod lookup;
 pub mod process;
 pub mod resources;
+pub mod settings;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 

@@ -2,8 +2,8 @@
 use crate::{Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use tigertype_contracts::{
-    Candidate, InputMode, LearningInfo, LookupItem, LookupPage, MAX_LEARNING_ITEMS,
-    MAX_PINYIN_BYTES, MAX_QUERY_CHARS, Options, OutputForm, PAGE_SIZE,
+    Candidate, InputMode, LOOKUP_PAGE_SIZE, LearningInfo, LookupItem, LookupPage,
+    MAX_LEARNING_ITEMS, MAX_PINYIN_BYTES, MAX_QUERY_CHARS, Options, OutputForm,
 };
 
 const MAX_ROWS: usize = 300_000;
@@ -361,7 +361,9 @@ impl Dictionary {
             return Err(Error("查字文本超过 64 个字符"));
         }
         let query = query.trim();
-        let offset = page.checked_mul(PAGE_SIZE).ok_or(Error("查询页码溢出"))?;
+        let offset = page
+            .checked_mul(LOOKUP_PAGE_SIZE)
+            .ok_or(Error("查询页码溢出"))?;
         if page > u32::MAX as usize {
             return Err(Error("查询页码超限"));
         }
@@ -405,11 +407,11 @@ impl Dictionary {
             words
         };
         Ok(LookupPage {
-            has_more: items.len().saturating_sub(offset) > PAGE_SIZE,
+            has_more: items.len().saturating_sub(offset) > LOOKUP_PAGE_SIZE,
             items: items
                 .into_iter()
                 .skip(offset)
-                .take(PAGE_SIZE)
+                .take(LOOKUP_PAGE_SIZE)
                 .map(|text| {
                     let mut learning = text
                         .chars()

@@ -34,6 +34,7 @@ const RULES: &[(&str, &[&str])] = &[
             "serde",
             "serde_json",
             "sha2",
+            "toml",
             "windows-sys",
         ],
     ),

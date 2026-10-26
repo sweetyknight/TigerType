@@ -1,8 +1,22 @@
 //! 视图状态独立于窗口句柄，单个在途动作避免查询换页或保存回复错配。
+//! 设置即时生效：设置窗控件即草稿；在途时的新改动不排队，回复后按最新草稿与已确认设置比较再保存。
 use tigertype_contracts::{
-    LookupPage, MAX_QUERY_CHARS, Options,
+    LookupItem, LookupPage, MAX_QUERY_CHARS, Options,
     ui::{Reply, Request},
 };
+
+/// 设置窗空闲时的提示。
+pub(crate) const SETTINGS_IDLE: &str = "✓ 修改后立即生效";
+
+/// 回复对界面的影响。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Effect {
+    /// 换上新的查字结果。
+    Page,
+    /// 设置控件须改回已确认设置（重新载入成功，或保存失败要撤回界面上的改动）。
+    Controls,
+    Nothing,
+}
 
 pub(crate) struct Model {
     pub options: Options,
@@ -12,7 +26,6 @@ pub(crate) struct Model {
     pub result: Option<LookupPage>,
     pub notice: String,
     pub settings_notice: String,
-    pub settings_open: bool,
     pending: Option<Request>,
 }
 
@@ -24,9 +37,8 @@ impl Model {
             query: String::new(),
             page: 0,
             result: None,
-            notice: "查字始终使用全字集和原字形；设置仅供后续输入使用。".into(),
-            settings_notice: "关闭本窗放弃未发送的修改；已发送的保存不会回滚。".into(),
-            settings_open: false,
+            notice: "查字使用全字集与原字形，不受输入设置影响".into(),
+            settings_notice: SETTINGS_IDLE.into(),
             pending: None,
         }
     }
@@ -51,7 +63,7 @@ impl Model {
             page,
         });
         self.busy = true;
-        self.notice = "正在查询，请稍候…".into();
+        self.notice = "正在查询…".into();
         Ok(Request::Lookup { query, page })
     }
     pub fn save(&mut self, options: Options) -> Result<Request, &'static str> {
@@ -60,55 +72,71 @@ impl Model {
         }
         self.pending = Some(Request::SaveSettings(options));
         self.busy = true;
-        self.settings_notice = "正在保存，请稍候…".into();
         Ok(Request::SaveSettings(options))
     }
+    pub fn reload(&mut self) -> Result<Request, &'static str> {
+        if self.busy {
+            return Err("操作尚未完成，请稍后再点");
+        }
+        self.pending = Some(Request::ReloadSettings);
+        self.busy = true;
+        self.settings_notice = "正在重新载入…".into();
+        Ok(Request::ReloadSettings)
+    }
     pub fn fail(&mut self, notice: String) {
-        if matches!(self.pending.take(), Some(Request::SaveSettings(_))) {
-            self.settings_notice = notice;
-        } else {
-            self.notice = notice;
+        match self.pending.take() {
+            Some(Request::Lookup { .. }) | None => self.notice = notice,
+            Some(_) => self.settings_notice = notice,
         }
         self.busy = false;
     }
-    /// 返回是否替换学习资料；设置回复不能重置资料框的选择和滚动位置。
-    pub fn receive(&mut self, reply: Reply) -> Result<bool, &'static str> {
+    pub fn receive(&mut self, reply: Reply) -> Result<Effect, &'static str> {
         let pending = self.pending.take();
         self.busy = false;
-        match (pending, reply) {
+        Ok(match (pending, reply) {
             (Some(Request::Lookup { query, page }), Reply::Lookup(Ok(result))) => {
                 self.query = query;
                 self.page = page;
                 self.notice = if result.items.is_empty() {
                     "没有匹配的字词".into()
                 } else {
-                    format!("第 {} 页；查字不产生上屏提交", page + 1)
+                    String::new()
                 };
                 self.result = Some(result);
-                return Ok(true);
+                Effect::Page
             }
             (Some(Request::SaveSettings(expected)), Reply::Saved(Ok(options)))
                 if expected == options =>
             {
                 self.options = options;
-                self.settings_notice = "设置已保存；查字仍显示全字集和原字形。".into();
+                self.settings_notice = "✓ 已保存，新输入立即生效".into();
+                Effect::Nothing
             }
-            (Some(Request::Lookup { .. }), Reply::Lookup(Err(error))) => self.notice = error,
+            (Some(Request::ReloadSettings), Reply::Saved(Ok(options))) => {
+                self.options = options;
+                self.settings_notice = "✓ 已重新载入 settings.toml".into();
+                Effect::Controls
+            }
+            (Some(Request::Lookup { .. }), Reply::Lookup(Err(error))) => {
+                self.notice = error;
+                Effect::Nothing
+            }
             (Some(Request::SaveSettings(_)), Reply::Saved(Err(error))) => {
-                self.settings_notice = error
+                self.settings_notice = error;
+                Effect::Controls
+            }
+            (Some(Request::ReloadSettings), Reply::Saved(Err(error))) => {
+                self.settings_notice = error;
+                Effect::Nothing
             }
             // 内部消息错配说明工作线程契约已经失效，不能继续接收不确定的后续回复。
             _ => return Err("回复与在途操作不符，请重新启动工具"),
-        }
-        Ok(false)
-    }
-    pub fn open_settings(&mut self) -> bool {
-        // 仅首次打开/取消后重开载入确认值，重复唤起现有窗口不丢弃用户草稿。
-        !std::mem::replace(&mut self.settings_open, true)
+        })
     }
 }
 
-pub(crate) fn details(page: &LookupPage) -> String {
+/// 复制用的单字资料；缺项照写“缺资料”，不猜测。
+pub(crate) fn details(item: &LookupItem) -> String {
     fn list(items: &[String]) -> String {
         if items.is_empty() {
             "缺资料".into()
@@ -116,26 +144,20 @@ pub(crate) fn details(page: &LookupPage) -> String {
             items.join("、")
         }
     }
-    page.items
-        .iter()
-        .map(|item| {
-            format!(
-                "{}\r\n可用编码：{}\r\n完整编码：{}\r\n读音：{}\r\n拆分：{}\r\n",
-                item.text,
-                list(&item.learning.codes),
-                list(&item.learning.full_codes),
-                list(&item.learning.readings),
-                item.learning.decomposition.as_deref().unwrap_or("缺资料")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\r\n")
+    format!(
+        "{}\r\n可用编码：{}\r\n完整编码：{}\r\n读音：{}\r\n拆分：{}\r\n",
+        item.text,
+        list(&item.learning.codes),
+        list(&item.learning.full_codes),
+        list(&item.learning.readings),
+        item.learning.decomposition.as_deref().unwrap_or("缺资料")
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tigertype_contracts::{LearningInfo, LookupItem};
+    use tigertype_contracts::LearningInfo;
     #[test]
     fn single_pending_action_and_page_binding() {
         let mut model = Model::new(Options::default());
@@ -143,17 +165,22 @@ mod tests {
         assert!(model.lookup("han".into(), 1).is_err());
         model.lookup("han".into(), 0).unwrap();
         assert!(model.save(Options::default()).is_err());
-        assert!(
+        assert!(model.reload().is_err());
+        assert_eq!(
             model
                 .receive(Reply::Lookup(Ok(LookupPage {
                     items: vec![],
                     has_more: true,
                 })))
-                .unwrap()
+                .unwrap(),
+            Effect::Page
         );
         assert!(model.lookup("new".into(), 1).is_err());
         model.lookup("han".into(), 1).unwrap();
-        assert!(!model.receive(Reply::Lookup(Err("失败".into()))).unwrap());
+        assert_eq!(
+            model.receive(Reply::Lookup(Err("失败".into()))).unwrap(),
+            Effect::Nothing
+        );
         assert_eq!(model.page, 0);
         assert_eq!(model.query, "han");
         assert!(!model.busy);
@@ -176,22 +203,47 @@ mod tests {
             ..model.options
         };
         model.save(changed).unwrap();
-        assert!(!model.receive(Reply::Saved(Err("冲突".into()))).unwrap());
+        // 保存失败要把设置控件撤回到已确认值。
+        assert_eq!(
+            model.receive(Reply::Saved(Err("冲突".into()))).unwrap(),
+            Effect::Controls
+        );
         assert!(!model.options.auto_commit_four);
+        assert_eq!(model.settings_notice, "冲突");
         model.save(changed).unwrap();
         assert!(model.receive(Reply::Saved(Ok(Options::default()))).is_err());
         assert!(!model.options.auto_commit_four);
         model.save(changed).unwrap();
-        assert!(!model.receive(Reply::Saved(Ok(changed))).unwrap());
+        assert_eq!(
+            model.receive(Reply::Saved(Ok(changed))).unwrap(),
+            Effect::Nothing
+        );
         assert!(model.options.auto_commit_four);
     }
     #[test]
-    fn settings_draft_and_notices_are_isolated_from_queries() {
+    fn reload_adopts_whatever_the_file_holds_or_keeps_the_current_options() {
         let mut model = Model::new(Options::default());
-        assert!(model.open_settings());
-        assert!(!model.open_settings());
-        model.settings_open = false;
-        assert!(model.open_settings());
+        let edited = Options {
+            page_size: 7,
+            ..Options::default()
+        };
+        model.reload().unwrap();
+        assert_eq!(
+            model.receive(Reply::Saved(Ok(edited))).unwrap(),
+            Effect::Controls
+        );
+        assert_eq!(model.options, edited);
+        assert!(model.settings_notice.contains("重新载入"));
+        model.reload().unwrap();
+        model
+            .receive(Reply::Saved(Err("settings.toml 第 3 行：bad".into())))
+            .unwrap();
+        assert_eq!(model.options, edited);
+        assert!(model.settings_notice.contains("第 3 行"));
+    }
+    #[test]
+    fn settings_and_lookup_notices_stay_apart() {
+        let mut model = Model::new(Options::default());
         model.save(model.options).unwrap();
         model.fail("保存通道满".into());
         assert_eq!(model.settings_notice, "保存通道满");
@@ -215,15 +267,12 @@ mod tests {
     }
     #[test]
     fn non_bmp_and_missing_data_are_displayed_without_guessing() {
-        let text = details(&LookupPage {
-            items: vec![LookupItem {
-                text: "𠀀".into(),
-                learning: LearningInfo {
-                    codes: vec!["ab".into()],
-                    ..Default::default()
-                },
-            }],
-            has_more: false,
+        let text = details(&LookupItem {
+            text: "𠀀".into(),
+            learning: LearningInfo {
+                codes: vec!["ab".into()],
+                ..Default::default()
+            },
         });
         assert!(text.contains("𠀀\r\n可用编码：ab"));
         assert!(text.contains("完整编码：缺资料"));

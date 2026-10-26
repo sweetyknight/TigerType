@@ -8,7 +8,8 @@ pub mod ui;
 
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_CANDIDATES: usize = 9;
-pub const PAGE_SIZE: usize = 9;
+/// 查字窗每页字数；输入候选的每页数量由 [`Options::page_size`] 决定。
+pub const LOOKUP_PAGE_SIZE: usize = 9;
 pub const MAX_QUERY_CHARS: usize = 64;
 pub const MAX_PINYIN_BYTES: usize = 6;
 pub const MAX_LEARNING_ITEMS: usize = 64;
@@ -51,10 +52,10 @@ pub struct Options {
     /// 仅在主题为自定义时生效；切到预设也保留，便于切回。
     pub custom: CustomColors,
     pub candidate_font: CandidateFont,
-    /// 普通输入使用单字码表或词码表；默认单字，避免升级后改变输入习惯。
-    /// 新增字段缺失时沿用单字默认值，避免旧设置阻断登录启动；未知字段仍拒绝。
-    #[serde(default)]
+    /// 普通输入使用单字码表或词码表；默认单字。
     pub typing_mode: TypingMode,
+    /// 每页候选数，见 [`Options::PAGE_SIZES`]；数字键 1–N 对应本页候选。
+    pub page_size: u8,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -67,6 +68,7 @@ impl Default for Options {
             custom: CustomColors::default(),
             candidate_font: CandidateFont::WenKai,
             typing_mode: TypingMode::Single,
+            page_size: 5,
         }
     }
 }
@@ -89,11 +91,21 @@ impl TypingMode {
     }
 }
 impl Options {
+    /// 下限 3 让 `;` `'` 选第二、三候选始终有效；上限对应数字键 1–9。
+    pub const PAGE_SIZES: std::ops::RangeInclusive<u8> = 3..=9;
     pub fn palette(&self) -> Palette {
         self.theme.preset().unwrap_or_else(|| self.custom.palette())
     }
-    /// 保存与载入设置时校验：自定义基色不得偏蓝，推导出的文字必须可读。
+    /// 保存与载入设置时校验：每页候选数在范围内，自定义基色不得偏蓝，推导出的文字必须可读。
     pub fn validate(&self) -> Result<(), String> {
+        if !Self::PAGE_SIZES.contains(&self.page_size) {
+            return Err(format!(
+                "每页候选数 {} 超出范围，只能是 {}–{}",
+                self.page_size,
+                Self::PAGE_SIZES.start(),
+                Self::PAGE_SIZES.end()
+            ));
+        }
         let custom = self.custom;
         for color in [custom.window, custom.text, custom.highlight, custom.accent] {
             if color > 0xFF_FFFF {
@@ -119,7 +131,7 @@ impl Options {
 
 /// 候选字与查字字形的字体；未安装时由界面回退到微软雅黑。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum CandidateFont {
     #[default]
     WenKai,
@@ -206,7 +218,8 @@ impl CustomColors {
     }
 }
 /// 逐通道按百分比混合；向下取整对两个参数都单调，保持“蓝不超过红、绿”。
-const fn mix(from: u32, to: u32, percent: u32) -> u32 {
+/// 界面派生色（侧栏、分段轨道等）同样用它，两端无蓝则结果无蓝。
+pub const fn mix(from: u32, to: u32, percent: u32) -> u32 {
     let mut rgb = 0;
     let mut shift = 0;
     while shift < 24 {
@@ -365,6 +378,19 @@ impl Palette {
     }
     /// 第一对对比度低于 4.5:1 的前景/背景；None 表示全部可读。
     pub fn unreadable(&self) -> Option<(u32, u32)> {
+        self.pairs()
+            .into_iter()
+            .find(|&(fore, back)| contrast(fore, back) < 4.5)
+    }
+    /// 各对前景/背景中最低的对比度，供自定义配色提示。
+    pub fn min_contrast(&self) -> f64 {
+        self.pairs()
+            .into_iter()
+            .map(|(fore, back)| contrast(fore, back))
+            .fold(f64::INFINITY, f64::min)
+    }
+    /// 须保持可读的前景/背景组合。
+    fn pairs(&self) -> [(u32, u32); 10] {
         [
             (self.text, self.window),
             (self.text, self.surface),
@@ -377,8 +403,6 @@ impl Palette {
             (self.on_accent, self.accent),
             (self.text, self.selection),
         ]
-        .into_iter()
-        .find(|&(fore, back)| contrast(fore, back) < 4.5)
     }
     pub const fn colors(&self) -> [u32; 15] {
         [
@@ -573,6 +597,7 @@ mod tests {
                 assert!(without_blue(color), "{theme:?} {color:06X}");
             }
             assert_eq!(p.unreadable(), None, "{theme:?}");
+            assert!(p.min_contrast() >= 4.5, "{theme:?}");
         }
         assert!(!Theme::Amber.preset().unwrap().dark());
     }
@@ -602,5 +627,25 @@ mod tests {
             ..CustomColors::default()
         };
         assert!(options.validate().unwrap_err().contains("对比度"));
+    }
+    #[test]
+    fn page_size_is_limited_to_three_through_nine() {
+        for page_size in Options::PAGE_SIZES {
+            assert!(
+                Options {
+                    page_size,
+                    ..Options::default()
+                }
+                .validate()
+                .is_ok()
+            );
+        }
+        for page_size in [0, 2, 10] {
+            let options = Options {
+                page_size,
+                ..Options::default()
+            };
+            assert!(options.validate().unwrap_err().contains("每页候选数"));
+        }
     }
 }

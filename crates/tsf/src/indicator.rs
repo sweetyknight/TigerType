@@ -1,6 +1,6 @@
 //! 任务栏输入法图标（输入模式语言栏按钮）：显示中英状态“中/英”，单击切换中英（同小狼毫、微软拼音），
-//! 右键弹出“设置/查字/全角半角”菜单；后台未运行时菜单项置灰并说明原因。
-//! 品牌“虎”只由后台通知区图标显示，两处不重复。
+//! 右键弹出菜单：中文/英文、半角/全角、中文/英文标点三项显示当前状态，点击即切换；其下为查字与设置。
+//! 后台未运行时菜单项置灰。品牌印章由输入法配置图标与通知区图标显示，本按钮只画“中/英”。
 //! 按钮只声明普通按钮样式：系统右键时只调用 OnClick(右键)、从不调用 InitMenu，
 //! 所以菜单由本输入法在 OnClick 内自行弹出（小狼毫、Mozc 同样做法）。
 //! 只在 TIP 线程使用；动作经激活状态给的回调转成对后台的切换/唤起请求，按钮本身不持有连接、不读盘。
@@ -42,30 +42,40 @@ use windows::{
 pub(crate) const SETTINGS: u32 = 1;
 pub(crate) const LOOKUP: u32 = 2;
 pub(crate) const SHAPE: u32 = 3;
+pub(crate) const MODE: u32 = 4;
+pub(crate) const PUNCTUATION: u32 = 5;
+/// 状态项与动作项之间的分隔线（自绘、置灰不可选）。
+const SEPARATOR: u32 = 6;
 /// 菜单项编号；自绘项不处理助记键，用方向键与 Enter 选择。
-const ITEMS: [u32; 3] = [SETTINGS, LOOKUP, SHAPE];
-/// 后台不可用时附在末尾的原因说明；编号 0 与“取消”同值，且置灰不可选。
-const OFFLINE: &str = "后台未运行：从开始菜单打开 TigerType 查字与设置";
+const ITEMS: [u32; 6] = [MODE, SHAPE, PUNCTUATION, SEPARATOR, LOOKUP, SETTINGS];
 const MENU_CLASS: PCWSTR = w!("TigerType.Menu");
 /// 菜单文字字号（磅）与行高（96 DPI 像素）。
 const MENU_POINT: i32 = 11;
-const ITEM_HEIGHT: i32 = 32;
+const ITEM_HEIGHT: i32 = 34;
+const ICON_FACES: [&str; 2] = ["Segoe Fluent Icons", "Segoe MDL2 Assets"];
 /// 只接受一个语言栏 sink，cookie 固定。
 const COOKIE: u32 = 1;
 
+/// 菜单里显示的会话状态，取自上次回复；新连接的会话为默认（中文、半角、中文标点）。
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) struct Status {
+    pub ascii: bool,
+    pub punctuation: bool,
+    pub full: bool,
+}
+
 thread_local! {
-    // 菜单弹出期间的绘制配色：只在弹出前写入，自绘回调只读，不是业务状态。
+    // 菜单弹出期间的绘制配色与状态：只在弹出前写入，自绘回调只读，不是业务状态。
     static PALETTE: Cell<Palette> = Cell::new(Options::default().palette());
-    // 建菜单时的全角状态，决定全角项写成要切换到的哪一边；同样只在建菜单时写入。
-    static FULL: Cell<bool> = const { Cell::new(false) };
+    static STATUS: Cell<Status> = Cell::new(Status::default());
 }
 
 #[implement(ITfLangBarItemButton, ITfSource)]
 pub(crate) struct Indicator {
-    /// 弹出菜单前确认后台可连接（受单次回调预算约束），并给出当前配色与全角状态；连不上时菜单项置灰并说明原因。
-    probe: Box<dyn Fn() -> (bool, Palette, bool)>,
+    /// 弹出菜单前确认后台可连接（受单次回调预算约束），并给出当前配色与状态；连不上时菜单项置灰。
+    probe: Box<dyn Fn() -> (bool, Palette, Status)>,
     show: Box<dyn Fn(Panel)>,
-    /// 请后台翻转开关：单击为中英（图标随回复经 [`Indicator::update`] 刷新），菜单为全角。
+    /// 请后台翻转开关：单击与菜单都可切中英（图标随回复经 [`Indicator::update`] 刷新），菜单另可切全角与标点。
     toggle: Box<dyn Fn(Key)>,
     sink: RefCell<Option<ITfLangBarItemSink>>,
     /// 上次回复的英文模式；新连接的会话默认中文。
@@ -75,7 +85,7 @@ pub(crate) struct Indicator {
 }
 impl Indicator {
     pub(crate) fn new(
-        probe: impl Fn() -> (bool, Palette, bool) + 'static,
+        probe: impl Fn() -> (bool, Palette, Status) + 'static,
         show: impl Fn(Panel) + 'static,
         toggle: impl Fn(Key) + 'static,
     ) -> Self {
@@ -155,11 +165,13 @@ impl ITfLangBarItemButton_Impl for Indicator_Impl {
             match click {
                 TF_LBI_CLK_LEFT => (self.toggle)(Key::ToggleAscii),
                 TF_LBI_CLK_RIGHT => {
-                    let (available, palette, full) = (self.probe)();
-                    match menu(*point, available, palette, full)? {
+                    let (available, palette, status) = (self.probe)();
+                    match menu(*point, available, palette, status)? {
                         Some(SETTINGS) => (self.show)(Panel::Settings),
                         Some(LOOKUP) => (self.show)(Panel::Lookup),
+                        Some(MODE) => (self.toggle)(Key::ToggleAscii),
                         Some(SHAPE) => (self.toggle)(Key::ToggleFullShape),
+                        Some(PUNCTUATION) => (self.toggle)(Key::TogglePunctuation),
                         _ => {}
                     }
                 }
@@ -205,20 +217,29 @@ impl ITfSource_Impl for Indicator_Impl {
     }
 }
 
-/// 建菜单：全角项固定显示“全角/半角”，后台不可用时各项置灰，并在末尾附原因说明（同样置灰）。
-/// 项为自绘，文字仍随项保存供读屏器朗读。菜单归调用方 DestroyMenu。
-pub(crate) fn build(available: bool, full: bool) -> Result<HMENU> {
-    FULL.set(full);
+/// 建菜单：三个状态项写当前状态（如“半角”，全角时写“全角”），分隔线下为查字、设置；
+/// 后台不可用时各项置灰。项为自绘，文字仍随项保存供读屏器朗读。
+/// 菜单归调用方 DestroyMenu。
+pub(crate) fn build(available: bool, status: Status) -> Result<HMENU> {
+    STATUS.set(status);
     // SAFETY: 新建空菜单，失败路径在返回前销毁。
     let menu = unsafe { CreatePopupMenu()? };
-    let offline = (!available).then_some(0);
-    for (position, id) in ITEMS.into_iter().chain(offline).enumerate() {
+    for (position, id) in ITEMS.into_iter().enumerate() {
         let mut text: Vec<u16> = label(id).encode_utf16().chain(Some(0)).collect();
         let item = MENUITEMINFOW {
             cbSize: size_of::<MENUITEMINFOW>() as u32,
             fMask: MIIM_ID | MIIM_STRING | MIIM_FTYPE | MIIM_STATE,
-            fType: MFT_OWNERDRAW,
-            fState: if available { MFS_ENABLED } else { MFS_DISABLED },
+            // 分隔线也自绘，但标成分隔项，方向键会跳过它。
+            fType: if id == SEPARATOR {
+                MFT_OWNERDRAW | MFT_SEPARATOR
+            } else {
+                MFT_OWNERDRAW
+            },
+            fState: if available && id != SEPARATOR {
+                MFS_ENABLED
+            } else {
+                MFS_DISABLED
+            },
             wID: id,
             dwTypeData: PWSTR(text.as_mut_ptr()),
             ..Default::default()
@@ -235,7 +256,7 @@ pub(crate) fn build(available: bool, full: bool) -> Result<HMENU> {
 
 /// 在右键位置弹出菜单并等待选择，返回所选编号；取消（或后台不可用时）为 None。
 /// 所有者是本线程临时建的隐藏窗口：自绘消息须交给本模块，而不是宿主窗口；不激活、不改宿主焦点，用完即毁。
-fn menu(at: POINT, available: bool, palette: Palette, full: bool) -> Result<Option<u32>> {
+fn menu(at: POINT, available: bool, palette: Palette, status: Status) -> Result<Option<u32>> {
     let instance = crate::module()?;
     let class = WNDCLASSW {
         lpfnWndProc: Some(procedure),
@@ -268,7 +289,7 @@ fn menu(at: POINT, available: bool, palette: Palette, full: bool) -> Result<Opti
             None,
         )?
     };
-    let chosen = build(available, full).map(|menu| {
+    let chosen = build(available, status).map(|menu| {
         PALETTE.set(palette);
         // SAFETY: 系统度量查询无副作用。
         let align = if unsafe { GetSystemMetrics(SM_MENUDROPALIGNMENT) } != 0 {
@@ -286,15 +307,30 @@ fn menu(at: POINT, available: bool, palette: Palette, full: bool) -> Result<Opti
     // SAFETY: 销毁本函数建的所有者窗口。
     let _ = unsafe { DestroyWindow(owner) };
     let chosen = chosen?;
-    Ok(ITEMS.contains(&chosen).then_some(chosen))
+    Ok((ITEMS.contains(&chosen) && chosen != SEPARATOR).then_some(chosen))
 }
 
+/// 菜单项文字：状态项为当前状态，不写“切换到”，也不并列两种状态。
 fn label(id: u32) -> &'static str {
+    let status = STATUS.get();
     match id {
         SETTINGS => "设置",
         LOOKUP => "查字",
-        SHAPE => "全角/半角",
-        _ => OFFLINE,
+        MODE if status.ascii => "英文",
+        MODE => "中文",
+        SHAPE if status.full => "全角",
+        SHAPE => "半角",
+        PUNCTUATION if status.punctuation => "英文标点",
+        PUNCTUATION => "中文标点",
+        _ => "",
+    }
+}
+/// 状态项右侧的快捷键提示。
+fn shortcut(id: u32) -> &'static str {
+    match id {
+        MODE => "Shift",
+        PUNCTUATION => "Ctrl+.",
+        _ => "",
     }
 }
 
@@ -328,10 +364,15 @@ fn dpi(hwnd: HWND) -> i32 {
     unsafe { GetDpiForWindow(hwnd) }.max(96) as i32
 }
 
-/// 行高按设计稿，宽度取文字实宽加左右留白。
+/// 行高按设计稿；宽度留出徽标、文字与快捷键提示。分隔线只占一条细缝。
 fn measure(hwnd: HWND, item: &mut MEASUREITEMSTRUCT) {
     let dpi = dpi(hwnd);
     let s = |value: i32| value * dpi / 96;
+    if item.itemID == SEPARATOR {
+        item.itemWidth = s(200) as u32;
+        item.itemHeight = s(9) as u32;
+        return;
+    }
     let mut size = SIZE::default();
     let text: Vec<u16> = label(item.itemID).encode_utf16().collect();
     // SAFETY: 取本窗口 DC 测量文字，选入的字体在归还 DC 前还原并删除。
@@ -345,62 +386,124 @@ fn measure(hwnd: HWND, item: &mut MEASUREITEMSTRUCT) {
         }
         ReleaseDC(Some(hwnd), dc);
     }
-    item.itemWidth = s(128).max(size.cx + s(40)) as u32;
+    item.itemWidth = s(200).max(size.cx + s(110)) as u32;
     item.itemHeight = s(ITEM_HEIGHT) as u32;
 }
 
-/// 选中项为主题高亮底加左侧强调条（与候选窗、通知区菜单一致）；置灰项用次要文字色、不高亮；
-/// 高对比度时沿用系统颜色。绘制后把 DC 还原为原状态。
+/// 悬停项为主题高亮圆角底（玫红用选区色），不用系统蓝色；置灰项用次要文字色、不高亮。
+/// 状态项左侧画当前状态徽标（中/英、新月/满月、中英文标点），动作项画图标；高对比度时沿用系统颜色。
+/// 绘制后把 DC 还原为原状态。
 pub(crate) fn draw(hwnd: HWND, item: &DRAWITEMSTRUCT) {
     let c = colors(PALETTE.get());
     let (dc, rect, dpi) = (item.hDC, item.rcItem, dpi(hwnd));
     let s = |value: i32| value * dpi / 96;
+    fill(dc, &rect, c.window);
+    if item.itemID == SEPARATOR {
+        let middle = (rect.top + rect.bottom) / 2;
+        let line = RECT {
+            left: rect.left + s(10),
+            top: middle,
+            right: rect.right - s(10),
+            bottom: middle + s(1).max(1),
+        };
+        fill(dc, &line, c.line);
+        return;
+    }
     let grayed = (item.itemState.0 & (ODS_GRAYED.0 | ODS_DISABLED.0)) != 0;
     let selected = (item.itemState.0 & ODS_SELECTED.0) != 0 && !grayed;
-    fill(dc, &rect, c.window);
     if selected {
         let inner = RECT {
             left: rect.left + s(4),
             right: rect.right - s(4),
             ..rect
         };
-        round(dc, &inner, s(4), Some(c.highlight), c.highlight);
-        let top = (rect.top + rect.bottom - s(16)) / 2;
-        let bar = RECT {
-            left: inner.left,
-            top,
-            right: inner.left + s(3),
-            bottom: top + s(16),
-        };
-        fill(dc, &bar, c.bar);
+        round(dc, &inner, s(5), Some(c.hover), c.hover);
     }
-    let color = match (grayed, selected) {
-        (true, _) => c.muted,
-        (_, true) => c.chosen,
-        _ => c.text,
+    let ink = if grayed { c.muted } else { c.text };
+    let status = STATUS.get();
+    let badge = RECT {
+        left: rect.left + s(12),
+        top: (rect.top + rect.bottom - s(22)) / 2,
+        right: rect.left + s(34),
+        bottom: (rect.top + rect.bottom + s(22)) / 2,
     };
-    let Ok(font) = create_font(dc, &[UI_FACE], MENU_POINT, dpi as u32, FW_NORMAL.0 as i32) else {
-        return;
+    let font = |faces: &[&str], point: i32, weight: i32| {
+        create_font(dc, faces, point, dpi as u32, weight).ok()
     };
-    let area = RECT {
-        left: rect.left + s(20),
-        ..rect
-    };
-    // SAFETY: 记下原字体与背景模式，绘制后还原；新建字体随即删除。
+    // SAFETY: 记下原背景模式，绘制后还原；新建字体随即删除。
     unsafe {
-        let old = SelectObject(dc, font.into());
         let mode = SetBkMode(dc, TRANSPARENT);
-        draw_text(
-            dc,
-            font,
-            color,
-            label(item.itemID),
-            area,
-            DRAW_TEXT_FORMAT(0),
-        );
+        match item.itemID {
+            MODE | PUNCTUATION => {
+                round(dc, &badge, s(5), Some(c.track), c.track);
+                let (text, point) = match item.itemID {
+                    MODE if status.ascii => ("英", 9),
+                    MODE => ("中", 9),
+                    _ if status.punctuation => (", .", 8),
+                    _ => ("，。", 8),
+                };
+                if let Some(face) = font(&[UI_FACE], point, FW_SEMIBOLD.0 as i32) {
+                    draw_text(dc, face, ink, text, badge, DT_CENTER);
+                    let _ = DeleteObject(face.into());
+                }
+            }
+            SHAPE => {
+                round(dc, &badge, s(5), Some(c.track), c.track);
+                // 满月为全角、新月为半角（同微软拼音），新月用两圆相减画出。
+                let (x, y, r) = (
+                    (badge.left + badge.right) / 2,
+                    (badge.top + badge.bottom) / 2,
+                    s(6),
+                );
+                let disc = |left: i32, top: i32, color| {
+                    let shape = RECT {
+                        left,
+                        top,
+                        right: left + 2 * r,
+                        bottom: top + 2 * r,
+                    };
+                    round(dc, &shape, r, Some(color), color);
+                };
+                disc(x - r, y - r, ink);
+                if !status.full {
+                    disc(x - r + s(5), y - r - s(3), c.track);
+                }
+            }
+            LOOKUP | SETTINGS => {
+                let code = if item.itemID == LOOKUP {
+                    "\u{E721}"
+                } else {
+                    "\u{E713}"
+                };
+                if let Some(face) = font(&ICON_FACES, 10, FW_NORMAL.0 as i32) {
+                    draw_text(dc, face, ink, code, badge, DT_CENTER);
+                    let _ = DeleteObject(face.into());
+                }
+            }
+            _ => {}
+        }
+        if let Some(face) = font(&[UI_FACE], MENU_POINT, FW_NORMAL.0 as i32) {
+            let indent = if item.itemID == 0 { s(12) } else { s(44) };
+            let area = RECT {
+                left: rect.left + indent,
+                right: rect.right - s(12),
+                ..rect
+            };
+            draw_text(dc, face, ink, label(item.itemID), area, DRAW_TEXT_FORMAT(0));
+            let _ = DeleteObject(face.into());
+        }
+        let hint = shortcut(item.itemID);
+        if !hint.is_empty()
+            && let Some(face) = font(&["Cascadia Mono", "Consolas"], 9, FW_NORMAL.0 as i32)
+        {
+            let area = RECT {
+                right: rect.right - s(12),
+                ..rect
+            };
+            draw_text(dc, face, c.muted, hint, area, DT_RIGHT);
+            let _ = DeleteObject(face.into());
+        }
         SetBkMode(dc, BACKGROUND_MODE(mode as u32));
-        SelectObject(dc, old);
-        let _ = DeleteObject(font.into());
     }
 }
 
@@ -566,6 +669,7 @@ pub(crate) mod tests {
     use super::*;
     use std::{rc::Rc, sync::Mutex};
     use tigertype_contracts::{Theme, without_blue};
+    use windows::Win32::Foundation::COLORREF;
     use windows::Win32::{
         System::Threading::GetCurrentThreadId,
         UI::{
@@ -615,7 +719,7 @@ pub(crate) mod tests {
         let online = Rc::new(Cell::new(true));
         let (log, probe, keys) = (shown.clone(), online.clone(), toggled.clone());
         let button: ITfLangBarItemButton = Indicator::new(
-            move || (probe.get(), Options::default().palette(), false),
+            move || (probe.get(), Options::default().palette(), Status::default()),
             move |panel| log.borrow_mut().push(panel),
             move |key| keys.borrow_mut().push(key),
         )
@@ -625,17 +729,27 @@ pub(crate) mod tests {
         unsafe { button.OnClick(TF_LBI_CLK_LEFT, POINT::default(), &RECT::default()) }.unwrap();
         assert_eq!(*toggled.borrow(), [Key::ToggleAscii]);
         assert!(shown.borrow().is_empty());
-        // 右键弹出真实菜单：全角/半角项固定显示，点击后按当前状态翻转。
-        right_click(&button, &[VK_DOWN, VK_RETURN]);
-        right_click(&button, &[VK_DOWN, VK_DOWN, VK_RETURN]);
-        right_click(&button, &[VK_DOWN, VK_DOWN, VK_DOWN, VK_RETURN]);
+        // 右键弹出真实菜单：三个状态项点击即翻转，分隔线被方向键跳过，其后是查字与设置。
+        for downs in 1..=5 {
+            let mut keys = vec![VK_DOWN; downs];
+            keys.push(VK_RETURN);
+            right_click(&button, &keys);
+        }
         right_click(&button, &[VK_ESCAPE]);
-        assert_eq!(*shown.borrow(), [Panel::Settings, Panel::Lookup]);
-        assert_eq!(*toggled.borrow(), [Key::ToggleAscii, Key::ToggleFullShape]);
+        assert_eq!(*shown.borrow(), [Panel::Lookup, Panel::Settings]);
+        assert_eq!(
+            *toggled.borrow(),
+            [
+                Key::ToggleAscii,
+                Key::ToggleAscii,
+                Key::ToggleFullShape,
+                Key::TogglePunctuation
+            ]
+        );
         // 后台不可用：项全部置灰，Enter 收起菜单但不选中任何项，什么都不发。
         online.set(false);
         right_click(&button, &[VK_DOWN, VK_RETURN]);
-        assert_eq!((shown.borrow().len(), toggled.borrow().len()), (2, 2));
+        assert_eq!((shown.borrow().len(), toggled.borrow().len()), (2, 4));
         // 系统不对普通按钮调用菜单接口；即使被调用也不唤起任何窗口。
         // SAFETY: 同上。
         unsafe { button.OnMenuSelect(SETTINGS) }.unwrap();
@@ -643,9 +757,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn menu_lists_settings_lookup_and_the_shape_switch_and_explains_when_offline() {
-        for (available, full) in [(true, false), (true, true), (false, false)] {
-            let menu = build(available, full).unwrap();
+    fn menu_shows_the_current_states_then_lookup_and_settings_and_grays_out_when_offline() {
+        let switched = Status {
+            ascii: true,
+            punctuation: true,
+            full: true,
+        };
+        for (available, status) in [
+            (true, Status::default()),
+            (true, switched),
+            (false, Status::default()),
+        ] {
+            let menu = build(available, status).unwrap();
             let mut items = Vec::new();
             // SAFETY: 读回本测试刚建的菜单项，读完销毁菜单。
             unsafe {
@@ -660,28 +783,66 @@ pub(crate) mod tests {
                     };
                     GetMenuItemInfoW(menu, position, true, &mut item).unwrap();
                     assert!(item.fType.contains(MFT_OWNERDRAW));
+                    assert_eq!(item.fType.contains(MFT_SEPARATOR), item.wID == SEPARATOR);
                     let text = String::from_utf16_lossy(&text[..item.cch as usize]);
                     items.push((item.wID, item.fState.contains(MFS_DISABLED), text));
                 }
                 DestroyMenu(menu).unwrap();
             }
-            // 全角/半角项不暴露“切换到”措辞，避免把当前状态误读成目标状态。
-            let shape = "全角/半角";
-            let mut expected = vec![
-                (SETTINGS, !available, "设置".to_string()),
-                (LOOKUP, !available, "查字".to_string()),
+            // 状态项只写当前状态，不并列两种，也不写“切换到”。
+            let (mode, shape, punctuation) = if status.ascii {
+                ("英文", "全角", "英文标点")
+            } else {
+                ("中文", "半角", "中文标点")
+            };
+            let expected = vec![
+                (MODE, !available, mode.to_string()),
                 (SHAPE, !available, shape.to_string()),
+                (PUNCTUATION, !available, punctuation.to_string()),
+                (SEPARATOR, true, String::new()),
+                (LOOKUP, !available, "查字".to_string()),
+                (SETTINGS, !available, "设置".to_string()),
             ];
-            if !available {
-                expected.push((0, true, OFFLINE.to_string()));
-            }
             assert_eq!(items, expected);
         }
     }
 
+    /// 在内存位图上画一个菜单项并读回指定像素。
+    fn render(id: u32, state: ODS_FLAGS, at: &[(i32, i32)]) -> Vec<COLORREF> {
+        let (width, height) = (200, 32);
+        // SAFETY: 内存 DC 与位图只在本函数内使用，读完像素即还原并删除。
+        unsafe {
+            let screen = GetDC(None);
+            let dc = CreateCompatibleDC(Some(screen));
+            let bitmap = CreateCompatibleBitmap(screen, width, height);
+            ReleaseDC(None, screen);
+            let old = SelectObject(dc, bitmap.into());
+            draw(
+                HWND::default(),
+                &DRAWITEMSTRUCT {
+                    CtlType: ODT_MENU,
+                    itemID: id,
+                    itemAction: ODA_DRAWENTIRE,
+                    itemState: state,
+                    hDC: dc,
+                    rcItem: RECT {
+                        right: width,
+                        bottom: height,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+            let pixels = at.iter().map(|&(x, y)| GetPixel(dc, x, y)).collect();
+            SelectObject(dc, old);
+            let _ = DeleteObject(bitmap.into());
+            let _ = DeleteDC(dc);
+            pixels
+        }
+    }
+
     #[test]
-    fn menu_items_draw_the_theme_highlight_and_accent_bar_and_grayed_items_never_highlight() {
-        let (width, height) = (128, 32);
+    fn menu_items_hover_in_theme_colors_and_the_shape_badge_shows_the_current_width() {
         for theme in Theme::ALL {
             let palette = Options {
                 theme,
@@ -690,53 +851,33 @@ pub(crate) mod tests {
             .palette();
             PALETTE.set(palette);
             let c = colors(palette);
-            for (state, fill, bar) in [
-                (ODS_SELECTED, c.highlight, c.bar),
+            // 悬停为主题高亮底（玫红为选区色），置灰与普通项不高亮；右侧远离文字处取色。
+            for (state, expected) in [
+                (ODS_SELECTED, c.hover),
                 (
                     ODS_FLAGS(ODS_SELECTED.0 | ODS_GRAYED.0 | ODS_DISABLED.0),
                     c.window,
-                    c.window,
                 ),
-                (ODS_FLAGS(0), c.window, c.window),
+                (ODS_FLAGS(0), c.window),
             ] {
-                // SAFETY: 内存 DC 与位图只在本次循环内使用，读完像素即还原并删除。
-                let (at_fill, at_bar) = unsafe {
-                    let screen = GetDC(None);
-                    let dc = CreateCompatibleDC(Some(screen));
-                    let bitmap = CreateCompatibleBitmap(screen, width, height);
-                    ReleaseDC(None, screen);
-                    let old = SelectObject(dc, bitmap.into());
-                    draw(
-                        HWND::default(),
-                        &DRAWITEMSTRUCT {
-                            CtlType: ODT_MENU,
-                            itemID: SETTINGS,
-                            itemAction: ODA_DRAWENTIRE,
-                            itemState: state,
-                            hDC: dc,
-                            rcItem: RECT {
-                                right: width,
-                                bottom: height,
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        },
-                    );
-                    // 右侧远离文字处为底色，左侧 5px 处为强调条。
-                    let pixels = (GetPixel(dc, 110, 16), GetPixel(dc, 5, 16));
-                    SelectObject(dc, old);
-                    let _ = DeleteObject(bitmap.into());
-                    let _ = DeleteDC(dc);
-                    pixels
-                };
-                assert_eq!((at_fill, at_bar), (fill, bar), "{theme:?} {state:?}");
-                for color in [at_fill, at_bar] {
-                    let [red, green, blue, _] = color.0.to_le_bytes();
-                    let value = u32::from_be_bytes([0, red, green, blue]);
-                    assert!(without_blue(value), "{theme:?} {color:?}");
-                }
+                let pixel = render(LOOKUP, state, &[(180, 16)])[0];
+                assert_eq!(pixel, expected, "{theme:?} {state:?}");
+                let [red, green, blue, _] = pixel.0.to_le_bytes();
+                assert!(without_blue(u32::from_be_bytes([0, red, green, blue])));
             }
         }
+        PALETTE.set(Options::default().palette());
+        let c = colors(Options::default().palette());
+        // 徽标圆心在 (23, 16)、半径 6：半角时右上被挖成新月露出徽标底，全角为满月。
+        for (full, top_right) in [(false, c.track), (true, c.text)] {
+            STATUS.set(Status {
+                full,
+                ..Status::default()
+            });
+            let pixels = render(SHAPE, ODS_FLAGS(0), &[(19, 18), (27, 13)]);
+            assert_eq!(pixels, [c.text, top_right], "全角 {full}");
+        }
+        STATUS.set(Status::default());
     }
 
     #[implement(ITfLangBarItemSink)]
@@ -751,7 +892,7 @@ pub(crate) mod tests {
     #[test]
     fn mode_changes_redraw_the_icon_and_tooltip_only_when_the_mode_actually_flips() {
         let object = ComObject::new(Indicator::new(
-            || (true, Options::default().palette(), false),
+            || (true, Options::default().palette(), Status::default()),
             |_| {},
             |_| {},
         ));

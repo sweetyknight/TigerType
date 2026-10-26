@@ -8,7 +8,9 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     rc::{Rc, Weak},
 };
-use tigertype_contracts::{CandidateFont, InputMode, InputState, MAX_CANDIDATES, Options, Palette};
+use tigertype_contracts::{
+    CandidateFont, InputMode, InputState, MAX_CANDIDATES, Options, Palette, mix,
+};
 use windows::{
     Win32::{
         Foundation::{
@@ -161,7 +163,7 @@ pub(crate) fn fallback_caret() -> Option<RECT> {
 pub(crate) struct Colors {
     pub(crate) window: COLORREF,
     border: COLORREF,
-    line: COLORREF,
+    pub(crate) line: COLORREF,
     field: COLORREF,
     pub(crate) text: COLORREF,
     label: COLORREF,
@@ -170,7 +172,10 @@ pub(crate) struct Colors {
     pub(crate) highlight: COLORREF,
     pub(crate) chosen: COLORREF,
     chosen_hint: COLORREF,
-    pub(crate) bar: COLORREF,
+    /// 菜单悬停底：有高亮底用高亮底，玫红这类无高亮底的主题用选区色。
+    pub(crate) hover: COLORREF,
+    /// 菜单状态徽标底：窗口色向文字色靠 6%。
+    pub(crate) track: COLORREF,
 }
 /// 主题颜色为 0xRRGGBB，GDI 的 COLORREF 为 0x00BBGGRR。
 pub(crate) const fn rgb(value: u32) -> COLORREF {
@@ -189,7 +194,12 @@ const fn themed(p: Palette) -> Colors {
         highlight: rgb(p.highlight),
         chosen: rgb(p.chosen),
         chosen_hint: rgb(p.highlight_text),
-        bar: rgb(p.accent),
+        hover: rgb(if p.highlight != p.window {
+            p.highlight
+        } else {
+            p.selection
+        }),
+        track: rgb(mix(p.window, p.text, 6)),
     }
 }
 pub(crate) fn colors(palette: Palette) -> Colors {
@@ -230,7 +240,8 @@ pub(crate) fn colors(palette: Palette) -> Colors {
         highlight: system(COLOR_HIGHLIGHT),
         chosen: system(COLOR_HIGHLIGHTTEXT),
         chosen_hint: system(COLOR_HIGHLIGHTTEXT),
-        bar: system(COLOR_HIGHLIGHTTEXT),
+        hover: system(COLOR_HIGHLIGHT),
+        track: window,
     }
 }
 fn wide(text: &str) -> Vec<u16> {
@@ -355,10 +366,13 @@ pub(crate) fn draw_text(
         );
     }
 }
-/// 页脚只在可翻页或拼音反查时出现。
+/// 候选多于一页时才显示翻页指示。
+pub(crate) fn paged(state: &InputState) -> bool {
+    !state.candidates.is_empty() && (state.page_index > 0 || !state.is_last_page)
+}
+/// 页脚只为翻页指示或拼音反查标签存在。
 fn has_footer(state: &InputState) -> bool {
-    state.mode == InputMode::Pinyin
-        || (!state.candidates.is_empty() && (state.page_index > 0 || !state.is_last_page))
+    state.mode == InputMode::Pinyin || paged(state)
 }
 fn point(lparam: LPARAM) -> POINT {
     POINT {
@@ -659,17 +673,9 @@ impl Popup {
         };
         for (index, (candidate, rect)) in state.candidates.iter().zip(&layout.rows).enumerate() {
             let chosen = state.highlighted == Some(index);
-            // 高亮底与窗口同色的主题（玫红）只靠字色区分，不画底色与指示条。
+            // 高亮只画圆角底色；底与窗口同色的主题（玫红）只靠字色区分。
             if chosen && c.highlight != c.window {
                 round(dc, rect, s(4), Some(c.highlight), c.highlight);
-                let top = (rect.top + rect.bottom - s(16)) / 2;
-                let bar = RECT {
-                    left: rect.left,
-                    top,
-                    right: rect.left + s(3),
-                    bottom: top + s(16),
-                };
-                fill(dc, &bar, c.bar);
             }
             let (text, hint) = if chosen {
                 (c.chosen, c.chosen_hint)
@@ -734,7 +740,7 @@ impl Popup {
                 round(dc, &tag, s(4), None, c.field);
                 draw_text(dc, fonts.ui, c.muted, "拼音", tag, DT_CENTER);
             }
-            if !state.candidates.is_empty() {
+            if paged(state) {
                 let mut right = body.right - s(6);
                 let page = (state.page_index + 1).to_string();
                 for (text, enabled) in [
