@@ -4,7 +4,7 @@
 //! 激活时登记任务栏输入法图标，按每次回复显示中英状态，其菜单经同一连接请后台显示设置/查字窗。
 //! 线程取得/失去输入焦点时告诉后台任务栏是否正显示本输入法图标，后台据此隐藏/恢复通知区图标。
 use crate::{
-    candidate::{Popup, bounded, fallback_caret},
+    candidate::{Popup, bounded, fallback_caret, window_area},
     edit::{EditReport, Editor, Verdict},
     host::{Channel, Host},
     indicator::Indicator,
@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tigertype_contracts::{
-    Key, Options, Palette,
+    InputState, Key, Options, Palette,
     protocol::{Command, Panel, Reply},
 };
 use tigertype_ipc::{Error as IpcError, pipe::Runtime, service::Link};
@@ -340,6 +340,13 @@ impl Active {
             }
         };
         let editor = Rc::new(Editor::new(context.clone(), self.client, epoch, ended)?);
+        let owner = Rc::downgrade(self);
+        // 宿主组合矩形晚到（Chromium 等由渲染进程异步回报）时，布局通知再摆放候选窗。
+        editor.watch_layout(move || {
+            if let Some(active) = owner.upgrade() {
+                active.relayout();
+            }
+        });
         self.host.try_borrow_mut().map_err(busy)?.blur();
         self.epoch.set(epoch);
         let old = self
@@ -398,17 +405,59 @@ impl Active {
         if let Some(indicator) = &self.indicator {
             indicator.update(state.ascii_mode);
         }
-        // 空码等无候选时不显示候选窗，编码只留在宿主内的组合下划线里。
-        let visible = report.error.is_none() && state.composing && !state.candidates.is_empty();
-        let place = report.caret.filter(bounded).or_else(fallback_caret);
-        match (visible, place, visible.then(|| self.popup()).flatten()) {
-            (true, Some(caret), Some(popup)) => {
-                if popup.show(&state, caret, report.owner).is_err() {
+        self.present(&state, report);
+    }
+    /// 摆放候选窗，位置逐级退：组合矩形（整段或起点）→ 本线程系统光标 → 正在显示时的原位置 →
+    /// 本输入框上次组合位置 → 输入区域（视图范围，取不到则视图/焦点窗口），候选窗贴着区域外沿放。
+    /// 宿主随后补来布局时再移到真实位置。空码等无候选时不显示，编码只留在宿主内的组合下划线里。
+    fn present(self: &Rc<Self>, state: &InputState, report: &EditReport) {
+        if report.error.is_some() || !state.composing || state.candidates.is_empty() {
+            return self.hide();
+        }
+        let anchor = || self.current_popup().and_then(|popup| popup.anchor());
+        let place = report
+            .caret
+            .filter(bounded)
+            .or_else(fallback_caret)
+            .or_else(anchor)
+            .or(report.recent.filter(bounded))
+            .or(report.area.filter(bounded))
+            .or_else(|| window_area(report.owner));
+        match (place, self.popup()) {
+            (Some(caret), Some(popup)) => {
+                if popup.show(state, caret, report.owner).is_err() {
                     popup.hide();
                 }
             }
             _ => self.hide(),
         }
+    }
+    /// 宿主布局变化：组合中且有候选时只读重取组合矩形，取得后显示或移动候选窗；
+    /// 取不到或组合已变就保持现状，下一键或下一次通知再定。
+    fn relayout(self: &Rc<Self>) {
+        let Some(editor) = self.current_editor().filter(|editor| editor.composing()) else {
+            return;
+        };
+        if !self.host.try_borrow().is_ok_and(|host| {
+            let state = host.state();
+            state.composing && !state.candidates.is_empty()
+        }) {
+            return;
+        }
+        let owner = Rc::downgrade(self);
+        editor.locate(move |report| {
+            let Some(active) = owner.upgrade() else {
+                return;
+            };
+            // 布局通知只按真实组合矩形移动，不走退路位置。
+            if report.error.is_some() || !report.caret.is_some_and(|caret| bounded(&caret)) {
+                return;
+            }
+            let Ok(state) = active.host.try_borrow().map(|host| host.state().clone()) else {
+                return;
+            };
+            active.present(&state, &report);
+        });
     }
     /// 候选点击：展示编号与页内序号绑定当前快照，排队一个异步编辑会话；会话开始时编号未变才发选字。
     fn click(self: &Rc<Self>, serial: u32, index: u8) {

@@ -47,10 +47,14 @@ pub struct EditReport {
     /// SetText 已确认写入提交后不能再重放请求，即使后续 EndComposition/光标更新失败。
     pub committed: bool,
     pub error: Option<HRESULT>,
-    /// 写入后组合的屏幕矩形；布局不可用时为 None，由候选窗另行回退。
+    /// 写入后组合的屏幕矩形（整段取不到时为组合起点）；都取不到为 None，由候选窗另行回退。
     pub caret: Option<RECT>,
     /// 上下文视图窗口，作候选窗 owner；取不到时为空。
     pub owner: HWND,
+    /// 本编辑器最近一次取得的组合矩形（含本次）；宿主暂时给不出位置时作退路。
+    pub recent: Option<RECT>,
+    /// 上下文视图的屏幕矩形（输入区域）；其余位置都取不到时作最后退路。
+    pub area: Option<RECT>,
 }
 struct State {
     composition: Option<ITfComposition>,
@@ -69,12 +73,18 @@ pub struct Editor {
     /// 宿主终止当前组合时的通知（收起候选窗）；不在回调内访问编辑状态。
     ended: Rc<dyn Fn()>,
     busy: Cell<bool>,
+    /// 已登记的宿主布局 sink cookie；随编辑器释放注销。
+    layout: Cell<Option<u32>>,
+    /// 最近一次取得的组合矩形，只在本上下文内作摆放退路。
+    recent: Rc<Cell<Option<RECT>>>,
 }
 enum Action {
     Key(RefCell<Option<Exchange>>),
     /// 点击只针对仍完整存在的自有组合，不结束旧组合、不请求清空。
     Select(RefCell<Option<Exchange>>),
     Cancel,
+    /// 只读：宿主布局变化后重取自有组合的屏幕位置。
+    Locate,
 }
 struct Completion {
     report: EditReport,
@@ -103,6 +113,24 @@ impl ITfCompositionSink_Impl for CompositionSink_Impl {
         Ok(())
     }
 }
+/// 宿主报告布局创建或变化（如 Chromium 渲染进程补来组合矩形）时转交调用方；不在回调内访问编辑状态。
+#[implement(ITfTextLayoutSink)]
+struct LayoutSink {
+    changed: Box<dyn Fn()>,
+}
+impl ITfTextLayoutSink_Impl for LayoutSink_Impl {
+    fn OnLayoutChange(
+        &self,
+        _: Ref<ITfContext>,
+        code: TfLayoutCode,
+        _: Ref<ITfContextView>,
+    ) -> Result<()> {
+        if code != TF_LC_DESTROY {
+            let _ = catch_unwind(AssertUnwindSafe(|| (self.changed)()));
+        }
+        Ok(())
+    }
+}
 #[implement(ITfEditSession)]
 struct EditSession {
     context: ITfContext,
@@ -112,6 +140,7 @@ struct EditSession {
     terminated: Rc<Cell<bool>>,
     composition_generation: Rc<Cell<u64>>,
     ended: Rc<dyn Fn()>,
+    recent: Rc<Cell<Option<RECT>>>,
     valid: Rc<Cell<bool>>,
     deadline: Cell<Instant>,
     /// 排队会话在开始时才计算后台预算。
@@ -292,17 +321,52 @@ impl EditSession_Impl {
         let Ok(view) = (unsafe { self.context.GetActiveView() }) else {
             return;
         };
+        let extent = |target: &ITfRange| {
+            let (mut rect, mut clipped) = (RECT::default(), false.into());
+            // SAFETY: target 属于本会话的自有组合，cookie 有效；输出为本地值。
+            let found = unsafe { view.GetTextExt(cookie, target, &mut rect, &mut clipped) };
+            // 全零矩形是宿主“不知道”的回答，不当作位置。
+            found.ok().filter(|_| rect != RECT::default()).map(|_| rect)
+        };
+        // 整段组合取不到时退到组合起点：有的宿主只给得出插入点位置。
+        let caret = extent(range).or_else(|| {
+            // SAFETY: 复制自有组合范围，cookie 有效。
+            let start = unsafe { range.Clone() }.ok()?;
+            // SAFETY: 折叠只改副本，不动组合本身。
+            unsafe { start.Collapse(cookie, TF_ANCHOR_START) }.ok()?;
+            extent(&start)
+        });
+        if caret.is_some() {
+            self.recent.set(caret);
+        }
         let mut report = self.completion.borrow_mut();
         // SAFETY: 只读视图属性。
         report.report.owner = unsafe { view.GetWnd() }.unwrap_or_default();
-        let mut rect = RECT::default();
-        let mut clipped = false.into();
-        // SAFETY: range 是本会话刚写入的自有组合，cookie 有效。
-        if unsafe { view.GetTextExt(cookie, range, &mut rect, &mut clipped) }.is_ok() {
-            report.report.caret = Some(rect);
-        }
+        report.report.caret = caret;
+        report.report.recent = self.recent.get();
+        // SAFETY: 只读视图在屏幕上的范围。
+        report.report.area = unsafe { view.GetScreenExt() }
+            .ok()
+            .filter(|rect| *rect != RECT::default());
     }
     fn execute(&self, cookie: u32) -> Result<()> {
+        if matches!(self.action, Action::Locate) {
+            // 只读会话：组合已被宿主终止或改写就不定位，留给下一键处理。
+            let (composition, text) = {
+                let state = self.state.try_borrow().map_err(|_| Error::from(E_FAIL))?;
+                (state.composition.clone(), state.text.clone())
+            };
+            let composition = composition
+                .filter(|_| !self.terminated.get())
+                .ok_or(E_FAIL)?;
+            // SAFETY: composition 引用由该上下文的 StartComposition 返回并持有。
+            let range = unsafe { composition.GetRange()? };
+            if !matches_text(&range, cookie, &text)? {
+                return Err(E_FAIL.into());
+            }
+            self.locate(&range, cookie);
+            return Ok(());
+        }
         let cleanup = self
             .state
             .try_borrow()
@@ -364,6 +428,7 @@ impl EditSession_Impl {
                 };
             }
             Action::Key(exchange) | Action::Select(exchange) => exchange,
+            Action::Locate => return Err(E_FAIL.into()),
         };
         let range = match owned {
             Some(range) => range,
@@ -523,7 +588,37 @@ impl Editor {
             composition_generation: Rc::new(Cell::new(0)),
             ended: Rc::new(ended),
             busy: Cell::new(false),
+            layout: Cell::new(None),
+            recent: Rc::new(Cell::new(None)),
         })
+    }
+    /// 登记宿主布局通知：组合矩形变为可用或移动时调用 changed。宿主不支持则没有通知，候选窗仍随按键摆放。
+    pub fn watch_layout(&self, changed: impl Fn() + 'static) {
+        let Ok(source) = self.context.cast::<ITfSource>() else {
+            return;
+        };
+        let sink: ITfTextLayoutSink = LayoutSink {
+            changed: Box::new(changed),
+        }
+        .into();
+        // SAFETY: 登记到本编辑器的上下文，编辑器释放时以同一 cookie 注销。
+        if let Ok(cookie) = unsafe { source.AdviseSink(&ITfTextLayoutSink::IID, &sink) }
+            && let Some(old) = self.layout.replace(Some(cookie))
+        {
+            // SAFETY: 重复登记时注销本编辑器先前的 cookie。
+            let _ = unsafe { source.UnadviseSink(old) };
+        }
+    }
+    /// 布局变化后重取组合位置：只读会话，宿主空闲时同步执行，否则排队（`TF_ES_ASYNCDONTCARE`）。
+    /// 组合仍属本服务且未被改写才定位；finish 在会话被调起时收到报告，被拒绝时不调用。
+    pub fn locate(&self, finish: impl FnOnce(EditReport) + 'static) {
+        let _ = self.run(
+            Action::Locate,
+            Instant::now() + QUEUED,
+            false,
+            None,
+            Some(Box::new(finish)),
+        );
     }
     /// 以 IUnknown 比较 COM 身份，不依赖宿主每次返回同一个接口指针。
     pub fn is(&self, context: &ITfContext) -> bool {
@@ -617,8 +712,13 @@ impl Editor {
             ran: false,
         }));
         let valid = Rc::new(Cell::new(true));
-        // 按键必须同步完成；只有取消与点击可以排队，后者开始时重新核对全部条件。
+        // 按键必须同步完成；只有取消、点击与定位可以排队，开始时重新核对全部条件。
         let sync = sync || matches!(action, Action::Key(_));
+        let access = if matches!(action, Action::Locate) {
+            TF_ES_READ
+        } else {
+            TF_ES_READWRITE
+        };
         let session: ITfEditSession = EditSession {
             context: self.context.clone(),
             state: self.state.clone(),
@@ -627,6 +727,7 @@ impl Editor {
             terminated: self.terminated.clone(),
             composition_generation: self.composition_generation.clone(),
             ended: self.ended.clone(),
+            recent: self.recent.clone(),
             valid: valid.clone(),
             deadline: Cell::new(deadline),
             budget,
@@ -635,7 +736,7 @@ impl Editor {
             finish: RefCell::new(finish),
         }
         .into();
-        let flags = TF_ES_READWRITE
+        let flags = access
             | if sync {
                 TF_ES_SYNC
             } else {
@@ -665,6 +766,14 @@ impl Editor {
             queued: matches!(result, Ok(hr) if hr.is_ok()),
             ran: completed.ran,
             report: std::mem::take(&mut completed.report),
+        }
+    }
+}
+impl Drop for Editor {
+    fn drop(&mut self) {
+        if let (Some(cookie), Ok(source)) = (self.layout.get(), self.context.cast::<ITfSource>()) {
+            // SAFETY: 以登记时的 cookie 注销本编辑器的布局 sink，配对释放宿主持有的引用。
+            let _ = unsafe { source.UnadviseSink(cookie) };
         }
     }
 }

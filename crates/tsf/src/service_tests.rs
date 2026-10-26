@@ -1,6 +1,6 @@
 //! 合成线程管理器与进程内假后台：不激活系统 TSF、不注册 COM，也不连接用户正在运行的后台。
 use super::*;
-use crate::edit::tests::{document, text};
+use crate::edit::tests::{document, layout_changed, text};
 use crate::indicator::tests::right_click;
 use std::{
     sync::{
@@ -22,12 +22,13 @@ use windows::{
                 VK_DOWN, VK_ESCAPE, VK_OEM_COMMA, VK_RETURN, VK_SPACE, VK_U,
             },
             WindowsAndMessaging::{
-                DispatchMessageW, GetWindowRect, MSG, PM_REMOVE, PeekMessageW, SendMessageW,
-                WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                CreateWindowExW, DestroyWindow, DispatchMessageW, GetWindowRect, MSG, PM_REMOVE,
+                PeekMessageW, SendMessageW, WINDOW_EX_STYLE, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WS_POPUP,
             },
         },
     },
-    core::{BSTR, ComObject, OutRef, PCWSTR},
+    core::{BSTR, ComObject, OutRef, PCWSTR, w},
 };
 
 #[derive(Default)]
@@ -999,4 +1000,155 @@ fn activated_service_shows_candidates_selects_by_click_and_refocuses_after_focus
             key(Key::Character('b'), 3),
         ]
     );
+}
+
+#[test]
+fn late_host_layout_shows_candidates_and_a_missing_layout_keeps_them_in_place() {
+    let object = service();
+    let (server, bound) = backend(&object.namespace);
+    bound.recv().unwrap();
+    let (_manager, thread_mgr) = manager();
+    let tip: ITfTextInputProcessorEx = object.to_interface();
+    // SAFETY: 合成线程管理器在本线程同步回调。
+    unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
+    let active = object.active().unwrap();
+    let (doc, context) = document();
+    let window = || {
+        let mut window = RECT::default();
+        // SAFETY: 只读本测试候选窗的位置。
+        unsafe { GetWindowRect(active.current_popup().unwrap().hwnd, &mut window).unwrap() };
+        window
+    };
+    // 首键时宿主还给不出组合矩形（Chromium 等异步回报），也没有系统光标、上次位置与输入区域：先不显示。
+    doc.no_layout.set(true);
+    assert!(
+        active
+            .input(&context, Key::Character('u'), later())
+            .unwrap()
+    );
+    assert!(shown(&active).is_none());
+    // 宿主补来布局：同一快照立即显示在组合矩形处。
+    doc.no_layout.set(false);
+    layout_changed(&doc);
+    let (first, _) = shown(&active).unwrap();
+    let placed = window();
+    assert!(placed.top == 120 || placed.bottom == 100);
+    // 组合中途又拿不到布局：不收起，按新快照原位刷新。
+    doc.no_layout.set(true);
+    assert!(
+        active
+            .input(&context, Key::Character('a'), later())
+            .unwrap()
+    );
+    let (second, rows) = shown(&active).unwrap();
+    assert_ne!(second, first);
+    assert_eq!(window().left, placed.left);
+    // 布局通知只移动窗口：展示编号不变，此前看到的候选仍可点选。
+    doc.no_layout.set(false);
+    layout_changed(&doc);
+    assert_eq!(shown(&active).unwrap().0, second);
+    click(&active, &rows[1]);
+    assert_eq!(text(&doc), "地");
+    assert!(shown(&active).is_none());
+    // 未组合时的布局变化不显示候选窗。
+    layout_changed(&doc);
+    assert!(shown(&active).is_none());
+    // SAFETY: 停用取消剩余组合、销毁候选窗、注销 sink 并关闭管道。
+    unsafe { tip.Deactivate() }.unwrap();
+    let (log, _, _) = server.join().unwrap();
+    assert!(matches!(log.last(), Some(Command::Select { index: 1, .. })));
+}
+
+#[test]
+fn without_any_host_position_candidates_use_the_last_composition_then_the_input_area() {
+    let object = service();
+    let (server, bound) = backend(&object.namespace);
+    bound.recv().unwrap();
+    let (_manager, thread_mgr) = manager();
+    let tip: ITfTextInputProcessorEx = object.to_interface();
+    // SAFETY: 合成线程管理器在本线程同步回调。
+    unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
+    let active = object.active().unwrap();
+    let window = || {
+        let mut window = RECT::default();
+        // SAFETY: 只读本测试候选窗的位置。
+        unsafe { GetWindowRect(active.current_popup().unwrap().hwnd, &mut window).unwrap() };
+        window
+    };
+    // 候选窗贴着给定矩形的外沿：下方放得下就在下方，否则翻到上方，左边对齐。
+    let beside = |placed: RECT, by: RECT| {
+        placed.left == by.left && (placed.top == by.bottom || placed.bottom == by.top)
+    };
+    let area = RECT {
+        left: 300,
+        top: 400,
+        right: 700,
+        bottom: 440,
+    };
+    let (doc, context) = document();
+    doc.screen.set(Some(area));
+    let first = RECT {
+        left: 100,
+        top: 100,
+        right: 110,
+        bottom: 120,
+    };
+    assert!(
+        active
+            .input(&context, Key::Character('u'), later())
+            .unwrap()
+    );
+    assert!(beside(window(), first));
+    assert!(active.input(&context, Key::Space, later()).unwrap());
+    assert!(shown(&active).is_none());
+    // 新组合宿主给不出任何位置：先用本输入框上次组合位置，而非输入区域。
+    doc.no_layout.set(true);
+    assert!(
+        active
+            .input(&context, Key::Character('a'), later())
+            .unwrap()
+    );
+    assert!(shown(&active).is_some() && beside(window(), first));
+    assert!(active.input(&context, Key::Space, later()).unwrap());
+    // 换到从未取得位置的输入框：贴着输入区域外沿放。
+    let (other, second) = document();
+    other.no_layout.set(true);
+    other.screen.set(Some(area));
+    assert!(active.input(&second, Key::Character('b'), later()).unwrap());
+    assert!(shown(&active).is_some() && beside(window(), area));
+    assert!(active.input(&second, Key::Space, later()).unwrap());
+    // 连输入区域也没有：用视图窗口的屏幕矩形。
+    // SAFETY: 本线程创建的隐藏系统类窗口，只作视图窗口，测试结束前销毁。
+    let view = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("STATIC"),
+            None,
+            WS_POPUP,
+            500,
+            600,
+            200,
+            50,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    .unwrap();
+    let (third, last) = document();
+    third.no_layout.set(true);
+    third.window.set(view);
+    assert!(active.input(&last, Key::Character('c'), later()).unwrap());
+    let mut frame = RECT::default();
+    // SAFETY: 只读本测试窗口的位置。
+    unsafe { GetWindowRect(view, &mut frame).unwrap() };
+    assert!(shown(&active).is_some() && beside(window(), frame));
+    // SAFETY: 停用取消剩余组合、销毁候选窗、注销 sink 并关闭管道；随后销毁测试窗口。
+    unsafe {
+        tip.Deactivate().unwrap();
+        DestroyWindow(view).unwrap();
+    }
+    assert_eq!(text(&third), "");
+    server.join().unwrap();
 }

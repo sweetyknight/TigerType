@@ -24,9 +24,29 @@ pub(crate) struct Document {
     pub(crate) defer: Cell<bool>,
     pub(crate) deferred: RefCell<Option<ITfEditSession>>,
     /// 模拟宿主尚未完成布局：GetTextExt 失败。
-    no_layout: Cell<bool>,
+    pub(crate) no_layout: Cell<bool>,
+    /// 宿主只给得出插入点（空范围）位置，整段组合取不到。
+    caret_only: Cell<bool>,
+    /// 宿主以全零矩形回答“不知道”。
+    blank: Cell<bool>,
+    /// 视图的屏幕范围（输入区域）；None 时 GetScreenExt 失败。
+    pub(crate) screen: Cell<Option<RECT>>,
+    /// 视图窗口；默认为空。
+    pub(crate) window: Cell<HWND>,
+    /// 已登记的布局 sink；宿主补来布局时由测试调用。
+    layout: RefCell<Option<ITfTextLayoutSink>>,
+    /// 最近一次编辑会话请求的标志。
+    flags: Cell<TF_CONTEXT_EDIT_CONTEXT_FLAGS>,
 }
-#[implement(ITfContext, ITfContextComposition)]
+/// 模拟宿主补来布局（如渲染进程回报组合矩形）：通知已登记的布局 sink。
+pub(crate) fn layout_changed(doc: &Document) {
+    let sink = doc.layout.borrow().clone();
+    if let Some(sink) = sink {
+        // SAFETY: 回调本测试登记的布局 sink，参数为空与宿主无视图时一致。
+        unsafe { sink.OnLayoutChange(None, TF_LC_CHANGE, None) }.unwrap();
+    }
+}
+#[implement(ITfContext, ITfContextComposition, ITfSource)]
 struct Context {
     doc: Rc<Document>,
 }
@@ -51,25 +71,38 @@ impl ITfContextView_Impl for View_Impl {
         }
         let target = target.as_ref().ok_or(E_INVALIDARG)?;
         let origin = range(&self.doc, 0, 0);
-        // SAFETY: 范围属于本合成文档，偏移从同一 cookie 读取；输出指针由调用方提供。
-        unsafe {
-            let start = target.CompareStart(cookie, &origin, TF_ANCHOR_START)?;
-            let end = target.CompareEnd(cookie, &origin, TF_ANCHOR_START)?;
-            rect.write(RECT {
+        // SAFETY: 范围属于本合成文档，偏移从同一 cookie 读取。
+        let (start, end) = unsafe {
+            (
+                target.CompareStart(cookie, &origin, TF_ANCHOR_START)?,
+                target.CompareEnd(cookie, &origin, TF_ANCHOR_START)?,
+            )
+        };
+        if self.doc.caret_only.get() && start != end {
+            return Err(TS_E_NOLAYOUT.into());
+        }
+        let extent = if self.doc.blank.get() {
+            RECT::default()
+        } else {
+            RECT {
                 left: 100 + start * 10,
                 top: 100,
                 right: 100 + end * 10,
                 bottom: 120,
-            });
+            }
+        };
+        // SAFETY: 输出指针由调用方提供。
+        unsafe {
+            rect.write(extent);
             clipped.write(false.into());
         }
         Ok(())
     }
     fn GetScreenExt(&self) -> Result<RECT> {
-        Err(E_NOTIMPL.into())
+        self.doc.screen.get().ok_or_else(|| E_NOTIMPL.into())
     }
     fn GetWnd(&self) -> Result<HWND> {
-        Ok(HWND::default())
+        Ok(self.doc.window.get())
     }
 }
 #[implement(ITfRange)]
@@ -131,8 +164,9 @@ impl ITfContext_Impl for Context_Impl {
         &self,
         _: u32,
         edit: Ref<ITfEditSession>,
-        _: TF_CONTEXT_EDIT_CONTEXT_FLAGS,
+        flags: TF_CONTEXT_EDIT_CONTEXT_FLAGS,
     ) -> Result<HRESULT> {
+        self.doc.flags.set(flags);
         if self.doc.defer.get() {
             *self.doc.deferred.borrow_mut() = edit.as_ref().cloned();
             return Ok(HRESULT(0));
@@ -266,6 +300,23 @@ impl ITfContextComposition_Impl for Context_Impl {
         _: Ref<ITfCompositionSink>,
     ) -> Result<ITfComposition> {
         Err(E_NOTIMPL.into())
+    }
+}
+/// 只接受布局 sink，cookie 固定为 1。
+impl ITfSource_Impl for Context_Impl {
+    fn AdviseSink(&self, iid: *const GUID, sink: Ref<IUnknown>) -> Result<u32> {
+        // SAFETY: 调用方传入有效 IID 指针，只比较值。
+        if unsafe { *iid } != ITfTextLayoutSink::IID {
+            return Err(E_NOTIMPL.into());
+        }
+        *self.doc.layout.borrow_mut() = Some(sink.ok()?.cast()?);
+        Ok(1)
+    }
+    fn UnadviseSink(&self, cookie: u32) -> Result<()> {
+        if cookie != 1 || self.doc.layout.borrow_mut().take().is_none() {
+            return Err(E_INVALIDARG.into());
+        }
+        Ok(())
     }
 }
 impl ITfComposition_Impl for Composition_Impl {
@@ -681,6 +732,97 @@ fn key_sessions_report_the_composition_rectangle_only_while_composing() {
     doc.no_layout.set(false);
     let report = apply(&editor, outcome(3, "", Some("的")), deadline());
     assert!(report.committed && report.caret.is_none());
+}
+
+#[test]
+fn layout_notices_reread_the_own_composition_read_only_and_stop_when_dropped() {
+    let (doc, editor) = setup();
+    let notices = Rc::new(Cell::new(0));
+    let seen = notices.clone();
+    editor.watch_layout(move || seen.set(seen.get() + 1));
+    let located = Rc::new(RefCell::new(None));
+    let locate = |editor: &Editor| {
+        let sink = located.clone();
+        editor.locate(move |report| *sink.borrow_mut() = Some(report));
+        located.borrow_mut().take()
+    };
+    // 无组合时不定位：会话被调起但报告失败、没有位置。
+    let report = locate(&editor).unwrap();
+    assert!(report.error.is_some() && report.caret.is_none());
+    // 首键时宿主尚无布局；补来布局后通知调用方，只读会话按自有组合给出矩形，正文不动。
+    doc.no_layout.set(true);
+    let report = apply(&editor, outcome(1, "un", None), deadline());
+    assert!(report.handled && report.caret.is_none());
+    doc.no_layout.set(false);
+    layout_changed(&doc);
+    assert_eq!(notices.get(), 1);
+    let report = locate(&editor).unwrap();
+    assert_eq!(doc.flags.get(), TF_ES_READ | TF_ES_ASYNCDONTCARE);
+    assert_eq!(
+        (report.error, report.caret),
+        (
+            None,
+            Some(RECT {
+                left: 100,
+                top: 100,
+                right: 120,
+                bottom: 120,
+            })
+        )
+    );
+    assert_eq!(text(&doc), "un");
+    // 组合被外部改写：不再定位。
+    doc.text.borrow_mut()[0] = u16::from(b'x');
+    let report = locate(&editor).unwrap();
+    assert!(report.error.is_some() && report.caret.is_none());
+    // 编辑器释放即注销 sink，之后的布局变化不再通知。
+    drop(editor);
+    assert!(doc.layout.borrow().is_none());
+    layout_changed(&doc);
+    assert_eq!(notices.get(), 1);
+}
+
+#[test]
+fn missing_composition_layout_falls_back_to_the_insertion_point_and_reports_recent_and_area() {
+    let (doc, editor) = setup();
+    let area = RECT {
+        left: 300,
+        top: 400,
+        right: 700,
+        bottom: 440,
+    };
+    doc.screen.set(Some(area));
+    // 整段组合取不到、插入点取得到：报组合起点，并记为本输入框最近位置。
+    doc.caret_only.set(true);
+    let report = apply(&editor, outcome(1, "un", None), deadline());
+    let start = RECT {
+        left: 100,
+        top: 100,
+        right: 100,
+        bottom: 120,
+    };
+    assert_eq!(
+        (report.caret, report.recent, report.area),
+        (Some(start), Some(start), Some(area))
+    );
+    // 全零矩形是“不知道”：没有位置，但仍带上次位置与输入区域。
+    doc.caret_only.set(false);
+    doc.blank.set(true);
+    let report = apply(&editor, outcome(2, "uni", None), deadline());
+    assert!(report.handled);
+    assert_eq!(
+        (report.caret, report.recent, report.area),
+        (None, Some(start), Some(area))
+    );
+    // 宿主完全没有布局：同样只剩退路。
+    doc.blank.set(false);
+    doc.no_layout.set(true);
+    doc.screen.set(None);
+    let report = apply(&editor, outcome(3, "unic", None), deadline());
+    assert_eq!(
+        (report.caret, report.recent, report.area),
+        (None, Some(start), None)
+    );
 }
 
 type Shared<T> = Rc<RefCell<T>>;

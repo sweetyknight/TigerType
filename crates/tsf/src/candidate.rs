@@ -103,7 +103,23 @@ pub(crate) fn position(caret: RECT, work: RECT, width: i32, height: i32) -> RECT
         bottom: top + height,
     }
 }
-/// 组合布局不可用时退回本线程系统光标；同样取不到则不显示候选窗，不猜位置。
+/// 视图区域也取不到时的输入区域：视图窗口（为空则焦点窗口）的屏幕矩形。
+pub(crate) fn window_area(owner: HWND) -> Option<RECT> {
+    let hwnd = if owner.is_invalid() {
+        // SAFETY: 只读本线程焦点窗口。
+        unsafe { GetFocus() }
+    } else {
+        owner
+    };
+    if hwnd.is_invalid() {
+        return None;
+    }
+    let mut rect = RECT::default();
+    // SAFETY: 只读该窗口的屏幕矩形，输出为本地值。
+    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+    bounded(&rect).then_some(rect)
+}
+/// 组合布局不可用时退回本线程系统光标。
 pub(crate) fn fallback_caret() -> Option<RECT> {
     let mut info = GUITHREADINFO {
         cbSize: size_of::<GUITHREADINFO>() as u32,
@@ -385,6 +401,8 @@ pub(crate) struct View {
     /// 32 位回绕后才可能重复，届时后台快照编号仍会拒绝旧选择。
     pub serial: u32,
     pub layout: Layout,
+    /// 当前摆放所依据的组合矩形；宿主暂时给不出位置时原位刷新。
+    caret: Option<RECT>,
     pressed: Option<u8>,
     /// 已排队一个点击会话；展示变化或会话结束即解除。
     pending: bool,
@@ -881,7 +899,19 @@ impl Popup {
         if !bounded(&caret) || state.candidates.len() > MAX_CANDIDATES {
             return Err(E_INVALIDARG.into());
         }
-        self.release();
+        // 同一快照再次显示只是换位置（宿主布局通知）：保留展示编号、按下状态与待执行点击；位置也没变就不动。
+        let (same, moved) = self.view.try_borrow().map_or((false, true), |view| {
+            (
+                view.state.as_ref() == Some(state),
+                view.caret != Some(caret),
+            )
+        });
+        if same && !moved {
+            return Ok(());
+        }
+        if !same {
+            self.release();
+        }
         let owner = if owner.is_invalid() {
             // SAFETY: 只读本线程焦点窗口。
             unsafe { GetFocus() }
@@ -958,9 +988,12 @@ impl Popup {
             let shown = view.state.is_some();
             view.state = Some(state.clone());
             view.layout = layout;
-            view.serial = view.serial.wrapping_add(1);
-            view.pressed = None;
-            view.pending = false;
+            view.caret = Some(caret);
+            if !same {
+                view.serial = view.serial.wrapping_add(1);
+                view.pressed = None;
+                view.pending = false;
+            }
             shown
         };
         // SAFETY: 先显示再立即处理 WM_PAINT；否则 DWM 会先呈现空白边框，宿主回调结束后才补画文字。
@@ -984,13 +1017,18 @@ impl Popup {
         unsafe {
             let _ = UpdateWindow(self.hwnd);
         }
-        if let Some(index) = state.highlighted {
+        if let Some(index) = state.highlighted.filter(|_| !same) {
             self.raise(
                 || uia::item(self, index),
                 UIA_SelectionItem_ElementSelectedEventId,
             );
         }
         Ok(())
+    }
+    /// 正在显示时的组合矩形。
+    pub fn anchor(&self) -> Option<RECT> {
+        let view = self.view.try_borrow().ok()?;
+        view.state.as_ref().and(view.caret)
     }
     pub fn hide(self: &Rc<Self>) {
         self.release();
@@ -1000,6 +1038,7 @@ impl Popup {
                 view.pressed = None;
                 view.pending = false;
                 view.layout = Layout::default();
+                view.caret = None;
                 view.state.take().is_some()
             }
             Err(_) => false,
