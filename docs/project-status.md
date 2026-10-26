@@ -15,6 +15,16 @@
 | 查字/设置 | 主题自绘（琥珀/墨/竹/玫红/自定义，全部无蓝）。设置窗 720×520 分输入/外观/快捷键/高级四区，修改即时保存、超出时滚动，自定义四色可点色板或输入色值并即时校验；配置为带注释的 `config/settings.toml`，可打开并重新载入。查字窗 520×400：查询框、横排字块、详情卡（编码键帽、拆分字块、复制当前字） |
 | 安装包 | Inno Setup 6.7.3；全机安装、两种位数注册（含配置图标 `tigertype.ico`，打包时现画）、随包字体、HKLM Run 自启；升级先停后台并等其退出，准备页经重启管理器列出仍载现版或历次 `*.old` 旧版的程序供关闭/重启，不关的改名后照常安装，装完清掉无人使用的 `*.old`；静默安装/升级在本机实测过，交互准备页、自动关闭真实程序、卸载与其他电脑（含 Win10）未实测 |
 | 长期使用 | 未开始 |
+| macOS 端 | 方案已定（实施方案“多平台架构”“macOS 端”），未开始实现；其前置的 P0 Windows 侧重构（frontend/backend）也未开始 |
+| Linux 端 | 只预留接入位置，未定框架（IBus 或 Fcitx5） |
+
+## 本批：多平台架构与 macOS 方案（2026-10-27，仅文档）
+
+- 来源：用户要求虎码适配 Mac，各功能解耦、无循环依赖、便于维护；开发期不向后兼容，可做完整干净的架构。随后补充：Mac 端管理员安装以免冲突，只自己用、不做代码签名，资源占用要低、能用 Rust 就用 Rust（必要时汇编），之后还要做 Linux，须预留位置；先把方案写进文档并提交，开发由用户之后分步推进。
+- 调研结论：macOS 输入法本身就是独立进程（IMK 服务端，系统按需拉起），引擎、候选面板与查字/设置窗可同进程，Windows 的命名管道、16 槽、DACL/AppContainer、DLL 驻留与注册在 Mac 上都没有对应物；objc2 有 InputMethodKit 绑定，但未找到用它子类化 `IMKInputController` 的 Rust 先例；应用自带强调色只在用户选“多色”时生效，无蓝色须像 Windows 一样自绘控件；系统绘制的输入法菜单悬停高亮无法避开强调色。
+- 决定（写入实施方案）：平台无关层另立 frontend（宿主侧会话、按键规则、单击 Shift、候选视图模型与摆放）与 backend（码表、设置、受管目录、类型化调度与回收、查字控制器、进程内引擎线程），`Message` 与协议版本移入 ipc，删除 contracts 中的平台字体名；macOS 新增 imk 前端与 ui 的 appkit 视图，app 为唯一组装点；依赖分层与禁止边由架构测试强制。Mac 为三固定线程的单进程，管理员安装到 `/Library/Input Methods`，打包与安装器全用 Rust，不签名、不做通用二进制。Linux 只记两种可选形态与届时新增的位置。
+- 改动：实施方案新增“多平台架构”“macOS 端”两节并在产品范围、架构说明、工程治理、迁移步骤中引用；AGENTS 补平台范围、Mac 打包工具、资源占用与汇编、前端依赖、FFI 回调、按键预算与数据位置；README 首段说明 Mac 尚不可用、Linux 预留。未改代码。
+- 未做：P0 重构与任何 Mac 代码；Mac 上的探针（只有链接器签名的输入法能否加载、objc2 子类化、主线程跟踪循环是否延迟按键）；Mac 芯片与系统版本待用户告知。
 
 ## 本批：新安装不生效（2026-10-27，已安装本机）
 
@@ -130,6 +140,7 @@
 
 ## 最近验证
 
+- 多平台架构与 macOS 方案批次（2026-10-27，仅文档）：提交内容在独立临时工作树与独立 target 下运行统一入口，架构/文档 5 passed，fmt、Clippy 无告警，x64、x86 各 158 passed、8 ignored（与上批相同，未改代码）；`artifacts/macos-plan-check-20261027.log`。之后补写方案中进程内超时须移除旧宿主的一句与本条，只重跑架构/文档检查。无 Mac 上的任何验证。
 - 新安装不生效批次（2026-10-27）：统一入口通过架构/文档 5 项、fmt、Clippy，x64、x86 各 158 passed、8 ignored（新断言并入既有测试）；`artifacts/install-fix-check-20261027.log`（覆盖了此前两次失败：一次 Clippy 报测试未用返回值，一次同进程停止测试超时，均已修复）。离线打包安装包 SHA256 `260713931460a7d174c9031cd167cf95175a2d5b09a4d90343b9951125628299`（`artifacts/install-fix-package-20261027.log`），以 `/SILENT /NOCLOSEAPPLICATIONS` 在后台运行时升级安装成功（`artifacts/install-fix-setup-2-20261027.log`）；此前同批第一次正式安装的日志 `artifacts/install-fix-setup-20261026.log`（`[InstallDelete]` 方案退出码 8 的那次被其覆盖）。崩溃转储在 `%LOCALAPPDATA%\CrashDumps\tigertype.exe.30684.dmp`（不入库）。
 
 - 码表入库批次（2026-10-26）：统一入口首次运行时托盘真实菜单测试“模态未展开：110ms”失败（菜单被提前关闭，该 crate 未改动），复跑通过：架构/文档 5 passed，fmt、Clippy 无告警，x64、x86 各 158 passed、8 ignored；`artifacts/tables-in-git-check-20261026.log`（失败）、`artifacts/tables-in-git-check-2-20261026.log`。单列完整码表与字体验收各 1 passed（`artifacts/tables-in-git-resources-20261026.log`，debug 加载 2.29s）。离线打包成功，ISCC 列出 9 项码表，安装包 SHA256 `0b9032e1f3f81297e289820608e8bec4cfe6d7d95e4acedb6507332c7ff1cfd5`（`artifacts/tables-in-git-package-20261026.log`）；未单独安装；随后 UI 重设计批次的安装包已包含此提交并安装到本机。提交内容（不含工作区其他未提交改动）另在独立工作树复跑：统一入口通过，x64、x86 各 154 passed、8 ignored，完整码表验收 1 passed（`artifacts/tables-in-git-commit-check-20261026.log`、`artifacts/tables-in-git-commit-resources-20261026.log`）。

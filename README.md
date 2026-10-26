@@ -1,6 +1,6 @@
 # TigerType
 
-Windows Rust 专用虎码输入法项目：默认单字输入，可在设置切换词输入；支持拼音查字/查词、简繁候选与原生自绘外观，不兼容 Rime 生态。
+Windows Rust 专用虎码输入法项目：默认单字输入，可在设置切换词输入；支持拼音查字/查词、简繁候选与原生自绘外观，不兼容 Rime 生态。macOS 端按实施方案“macOS 端”一节分阶段开发，尚不可用；Linux 只预留接入位置。
 
 - [实施方案](docs/implementation-plan.md)：批准范围、架构、验收。
 - [项目状态](docs/project-status.md)：实际已实现、缺陷和验证；不要把规划当成可用功能。
