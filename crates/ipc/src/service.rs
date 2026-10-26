@@ -20,8 +20,15 @@ pub struct Client {
 }
 impl Client {
     /// 仅管理工具可请求停机；服务端会打开调用进程核对映像，不把登录 SID 当作停机授权。
+    /// 确认后在同一期限内等后台进程真正退出：后台确认后还要关管道、收线程，
+    /// 安装程序随即检测文件占用并启动新后台，不能把确认当作已退出（后台在本进程时确认即返回）。
     pub fn stop_backend(&mut self, deadline: Instant) -> Result<()> {
-        self.manage(Message::Stop, Message::Stopped, deadline)
+        let process = self.pipe.server_process().inspect_err(|_| self.cancel())?;
+        self.manage(Message::Stop, Message::Stopped, deadline)?;
+        match process {
+            Some(process) => crate::pipe::wait_exit(&process, deadline),
+            None => Ok(()),
+        }
     }
     /// 请求后台显示查字或设置窗：一问一答，不占用会话序号；成功后连接照常用于输入，失败即作废。
     /// 调用方应先放行前台切换，否则窗口可能停在后面。

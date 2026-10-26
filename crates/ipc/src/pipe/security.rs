@@ -35,7 +35,7 @@ use windows_sys::Win32::{
         SystemServices::SE_GROUP_LOGON_ID,
         Threading::{
             GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-            QueryFullProcessImageNameW,
+            PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
         },
     },
 };
@@ -280,6 +280,26 @@ impl Identity {
         }
         verify_peer_image(pipe, true, image)
     }
+}
+
+/// 停止命令等后台退出用：只要等待权限，调用方随后须确认管道仍连通（对端存活则 PID 未被复用）。
+/// 后台就在本进程时返回 None：无从等待自身退出。
+pub(super) fn open_server_process(pipe: HANDLE) -> Result<Option<OwnedHandle>> {
+    let mut pid = 0;
+    // SAFETY: PID 只来自内核的管道对端查询，不来自消息或环境变量。
+    if unsafe { GetNamedPipeServerProcessId(pipe, &mut pid) } == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    if pid == std::process::id() {
+        return Ok(None);
+    }
+    // SAFETY: 只请求 SYNCHRONIZE，不能读写或终止对端。
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if process.is_null() {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: OpenProcess 的新句柄由唯一 RAII 所有者接管。
+    Ok(Some(unsafe { OwnedHandle::from_raw_handle(process) }))
 }
 
 /// 以受限查询打开对端核对映像，不读取其令牌；宿主发现后台与后台核对停止命令共用。

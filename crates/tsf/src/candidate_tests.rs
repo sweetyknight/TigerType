@@ -147,6 +147,12 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
     popup.show(&shown, CARET, HWND::default()).unwrap();
     assert!(popup.view.borrow().layout.footer.is_some());
     assert!(!paged(&shown));
+    // 候选文字来自后台进程：为空时不得把空 Vec 的悬空指针交给 DrawTextW 而让宿主崩溃。
+    shown.candidates[0].text.clear();
+    shown.candidates[0].label.clear();
+    popup.show(&shown, CARET, HWND::default()).unwrap();
+    let size = popup.view.borrow().layout.size;
+    let _ = render(&popup, size);
 }
 
 #[test]

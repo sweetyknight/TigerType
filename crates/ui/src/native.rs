@@ -479,6 +479,10 @@ fn inset(rect: &RECT, by: i32) -> RECT {
     }
 }
 fn draw_text(dc: HDC, font: HFONT, color: COLORREF, text: &[u16], rect: RECT, format: u32) {
+    // 长度为 0 时 DrawTextW 仍会读首字符，空 Vec 的悬空指针（0x2）会使后台崩溃。
+    if text.is_empty() {
+        return;
+    }
     let mut rect = rect;
     // SAFETY: 文本缓冲区在同步调用内有效；字体选入后还原。
     unsafe {
@@ -3606,6 +3610,20 @@ mod tests {
         let canvas = Canvas::new(rect.right, rect.bottom);
         draw_button(settings.control(NAV), canvas.0);
         assert_eq!(canvas.pixel(rect.right - 6, rect.bottom / 2), c.nav);
+        // 关闭〔拆分 · 编码〕时预览的提示列为空串：曾把空 Vec 的悬空指针交给 DrawTextW，打开外观区即令后台崩溃。
+        for learning in [false, true] {
+            check(settings, LEARNING, learning);
+            let rect = client(settings, PREVIEW);
+            let canvas = Canvas::new(rect.right.max(1), rect.bottom.max(1));
+            let item = DRAWITEMSTRUCT {
+                hwndItem: settings.control(PREVIEW),
+                hDC: canvas.0,
+                rcItem: rect,
+                ..Default::default()
+            };
+            draw_preview(&item, &c);
+        }
+        check(settings, LEARNING, false);
         check(settings, AUTO, false);
         check(settings, COMMON, true);
         check(settings, FORM + 1, false);

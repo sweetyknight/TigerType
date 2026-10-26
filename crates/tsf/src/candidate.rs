@@ -353,6 +353,10 @@ pub(crate) fn draw_text(
     rect: RECT,
     format: DRAW_TEXT_FORMAT,
 ) {
+    // 长度为 0 时 DrawTextW 仍会读首字符，空 Vec 的悬空指针会使宿主程序崩溃。
+    if text.is_empty() {
+        return;
+    }
     let mut rect = rect;
     // SAFETY: 字符串借用在同步调用内有效；字体由调用方在绘制结束前还原。
     unsafe {

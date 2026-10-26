@@ -187,6 +187,8 @@ fn real_backend_singleton_image_check_reclaims_idle_hosts_and_reconnects_without
             .is_err()
     );
     Client::connect(&runtime, &image, &namespace, deadline())?.stop_backend(deadline())?;
+    // stop 返回即后台已退出：安装程序紧接着检测文件占用并启动新后台（旧实现一收到确认就返回）。
+    assert!(worker.0.try_wait()?.is_some(), "stop 返回时后台须已退出");
     drop((a, b, others, extra));
     runtime.shutdown(deadline())?;
     assert_eq!(

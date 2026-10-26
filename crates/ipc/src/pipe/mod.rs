@@ -14,7 +14,7 @@ pub use security::grant_app_container_query;
 
 use self::{
     io::{Io, Kind},
-    security::{CLIENT_ACCESS, Identity, verify_peer_image},
+    security::{CLIENT_ACCESS, Identity, open_server_process, verify_peer_image},
 };
 use crate::{ClientState, Error, FrameAssembler, Result, decode};
 use std::{
@@ -280,6 +280,13 @@ impl Pipe {
     pub fn verify_client_image(&self, image: &Path) -> Result<()> {
         verify_peer_image(self.io.handle.as_raw_handle(), false, image)
     }
+    /// 仅供停止命令：停机前取得服务端进程的等待句柄；打开后管道仍连通才说明句柄属于对端。
+    /// 后台在本进程时为 None。
+    pub fn server_process(&self) -> Result<Option<OwnedHandle>> {
+        let process = open_server_process(self.io.handle.as_raw_handle())?;
+        self.available()?;
+        Ok(process)
+    }
     /// 非阻塞查询可读字节数；失败表示已断开，宿主据此决定是否在同一期限内重连。
     pub fn available(&self) -> Result<u32> {
         let mut available = 0;
@@ -426,6 +433,19 @@ impl Pipe {
             return Err(std_io::Error::from(std_io::ErrorKind::UnexpectedEof).into());
         }
         Ok(result)
+    }
+}
+
+/// 等进程退出至绝对期限；内核等待，不忙轮询。
+pub(crate) fn wait_exit(process: &OwnedHandle, deadline: Instant) -> Result<()> {
+    let millis = remaining(deadline)?
+        .as_millis()
+        .min(u128::from(u32::MAX - 1)) as u32;
+    // SAFETY: 句柄由调用方持有且带 SYNCHRONIZE；有限等待。
+    match unsafe { WaitForSingleObject(process.as_raw_handle(), millis) } {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err(Error::TimedOut),
+        _ => Err(std_io::Error::last_os_error().into()),
     }
 }
 

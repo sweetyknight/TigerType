@@ -4,7 +4,7 @@
 
 ## 产品与架构
 - Windows 10/11 x64、x86 宿主；专用 Rust 虎码单字引擎，不依赖 librime、Lua、OpenCC 运行库或 Rime 配置生态。
-- 正式代码、开发工具和测试使用 Rust；不引入 Python、Electron、WebView、云服务、遥测、自动更新或常驻看门狗。安装包经用户批准由 Inno Setup 编译，`.iss` 只含声明与安装前停后台/改名占用文件的少量 Pascal，打包驱动仍为 Rust。
+- 正式代码、开发工具和测试使用 Rust；不引入 Python、Electron、WebView、云服务、遥测、自动更新或常驻看门狗。安装包经用户批准由 Inno Setup 编译，`.iss` 只含声明与停后台、登记/改名/清理占用旧文件的少量 Pascal，打包驱动仍为 Rust。
 - 只建立有实现的 crate。依赖边界由 Rust 架构测试检查；新增成员/依赖须同步方案、调用方与测试，不增加通配豁免。
 - contracts/engine 禁止 unsafe；engine 不做文件、进程或窗口操作。UI 不直接调用 engine，TSF 不依赖 engine/ui、不加载词表。
 - 每登录会话一个后台，引擎与 UI 各有固定线程。不得全局业务可变状态、裸指针/窗口句柄暗中耦合或逐键/逐连接建线程。

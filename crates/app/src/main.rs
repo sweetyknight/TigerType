@@ -56,7 +56,8 @@ fn run(args: &[std::ffi::OsString]) -> Result<()> {
     }
     match (args[0].to_str(), args.len()) {
         (Some("stop"), 1) => {
-            let deadline = Instant::now() + Duration::from_millis(50);
+            // 含等后台退出（其关闭管道最多等 2s）；安装程序在此之后才检测占用、替换文件。
+            let deadline = Instant::now() + Duration::from_secs(5);
             backend(deadline)?.stop_backend(deadline)?;
         }
         (Some("serve"), 1) => {
