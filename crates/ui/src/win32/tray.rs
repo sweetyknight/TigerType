@@ -454,7 +454,7 @@ pub(super) fn first(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::tests::bounded;
+    use crate::win32::tests::bounded;
 
     /// 只建隐藏窗口、不登记通知区图标，验证图标事件与唤起信号都能把首次唤起交给事件循环。
     #[test]

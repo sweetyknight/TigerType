@@ -27,7 +27,8 @@
 - 仅内部故障路径的差异：引擎内部失败原先让后台断开该宿主，现在回复 `Rejected(Unavailable)` 并使整条调度失效；两种情况下宿主都取消未上屏组合、放行原键并作废连接，之后请求一律“不可用”，须用户重启后台。回复编码失败仍断开该宿主并使调度失效。
 - 架构测试改为方案“多平台架构”的规则：成员表加 frontend、backend；contracts/engine/frontend 不得到达任何平台包（`windows*`、`objc2*`、`block2`、`dispatch2`、`core-foundation*`、`libc`）；backend 只许 windows-sys/libc 文件原语，不得到达 ipc、frontend、ui；只有 app 依赖 backend 与平台前端（清单 tsf、imk）；平台前端不得到达 engine、ui；ui 不得到达 engine、frontend、ipc；frontend 也须 `forbid(unsafe_code)`。统一入口命令未变，Apple 目标的 Clippy 待 M1 引入目标后加入。
 - 测试：新增按键规则、单击 Shift、视图模型、摆放与位置退路（摆放测试由 tsf 移入）、tsf 虚拟键映射、“会话以后台设置打开”、回收策略（最久未用、仍有空闲接入位不回收、会话满即回收、平台否决、焦点与组合保护）与 16 组分层正反例；路由测试改为类型化收发，完整码表验收移入 backend。反例：回收策略去掉“仍有空闲接入位且会话未满不回收”、位置退路去掉有界过滤，对应测试均失败，已恢复。
-- 未做：Windows 真机回归（记事本、Typora 首键候选窗、点击选字、热重载、安装升级）——本会话没有电脑操控工具，未安装新包；ui 的 `native` 视图未改名为 `win32`（方案未把它列入 P0）。
+- 收尾（同日）：按用户要求把 ui 的 Windows 视图模块 `native` 改名为 `win32`（含 `seal`、`tray` 子模块目录），与方案“`model` 共用，`win32` 与 `appkit` 两套视图”一致；ui 模块说明改为词表与磁盘操作由 backend 控制器负责。
+- 未做：Windows 真机回归（记事本、Typora 首键候选窗、点击选字、热重载、安装升级）——本会话没有电脑操控工具，未安装新包。
 
 ## 本批：新安装不生效（2026-10-27，已安装本机）
 
@@ -144,7 +145,7 @@
 
 ## 最近验证
 
-- P0 Windows 侧重构（2026-10-27）：统一入口通过架构/文档 6 passed、fmt、Clippy 无告警，x64、x86 各 163 passed、8 ignored（不计辅助子进程；同口径下上批为 156，新增 7 项）；`artifacts/p0-check-20261027.log`。完整码表验收 1 passed（`artifacts/p0-locked-resources-20261027.log`）；`demo-input`、`lookup` 用 `resources/tiger` 冒烟正常（`artifacts/p0-cli-20261027.log`）；两个反例见 `artifacts/p0-mutations-20261027.log`。打包驱动离线构建两种位数 release 并编译安装包成功，SHA256 `d29c4fc02ceb94fcccbbf66362d7a40d5359eac18256967846e88a8bbc6c66c5`（`artifacts/p0-package-20261027.log`）；未安装、未做真机回归。
+- P0 Windows 侧重构（2026-10-27）：统一入口通过架构/文档 6 passed、fmt、Clippy 无告警，x64、x86 各 163 passed、8 ignored（不计辅助子进程；同口径下上批为 156，新增 7 项）；`artifacts/p0-check-20261027.log`。完整码表验收 1 passed（`artifacts/p0-locked-resources-20261027.log`）；`demo-input`、`lookup` 用 `resources/tiger` 冒烟正常（`artifacts/p0-cli-20261027.log`）；两个反例见 `artifacts/p0-mutations-20261027.log`。打包驱动离线构建两种位数 release 并编译安装包成功，SHA256 `d29c4fc02ceb94fcccbbf66362d7a40d5359eac18256967846e88a8bbc6c66c5`（`artifacts/p0-package-20261027.log`）；未安装、未做真机回归。随后 ui 的 `native` 改名 `win32`，统一入口复跑通过、计数相同（`artifacts/p0-win32-check-20261027.log`），未重新打包。
 - 多平台架构与 macOS 方案批次（2026-10-27，仅文档）：提交内容在独立临时工作树与独立 target 下运行统一入口，架构/文档 5 passed，fmt、Clippy 无告警，x64、x86 各 158 passed、8 ignored（与上批相同，未改代码）；`artifacts/macos-plan-check-20261027.log`。之后补写方案中进程内超时须移除旧宿主的一句与本条，只重跑架构/文档检查。无 Mac 上的任何验证。
 - 新安装不生效批次（2026-10-27）：统一入口通过架构/文档 5 项、fmt、Clippy，x64、x86 各 158 passed、8 ignored（新断言并入既有测试）；`artifacts/install-fix-check-20261027.log`（覆盖了此前两次失败：一次 Clippy 报测试未用返回值，一次同进程停止测试超时，均已修复）。离线打包安装包 SHA256 `260713931460a7d174c9031cd167cf95175a2d5b09a4d90343b9951125628299`（`artifacts/install-fix-package-20261027.log`），以 `/SILENT /NOCLOSEAPPLICATIONS` 在后台运行时升级安装成功（`artifacts/install-fix-setup-2-20261027.log`）；此前同批第一次正式安装的日志 `artifacts/install-fix-setup-20261026.log`（`[InstallDelete]` 方案退出码 8 的那次被其覆盖）。崩溃转储在 `%LOCALAPPDATA%\CrashDumps\tigertype.exe.30684.dmp`（不入库）。
 
