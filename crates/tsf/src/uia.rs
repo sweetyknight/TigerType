@@ -77,6 +77,9 @@ pub(crate) fn root(popup: &Rc<Popup>) -> IRawElementProviderSimple {
 }
 /// 当前展示中的第 index 项；元素绑定展示编号，更新后即失效。
 pub(crate) fn item(popup: &Rc<Popup>, index: usize) -> Option<IRawElementProviderSimple> {
+    if !popup.alive() {
+        return None;
+    }
     let view = popup.view.try_borrow().ok()?;
     (index < view.state.as_ref()?.candidates.len()).then(|| {
         Item {
@@ -116,7 +119,11 @@ impl IRawElementProviderSimple_Impl for Root_Impl {
     }
     fn HostRawElementProvider(&self) -> Result<IRawElementProviderSimple> {
         guarded(|| {
-            let popup = self.0.upgrade().ok_or_else(gone)?;
+            let popup = self
+                .0
+                .upgrade()
+                .filter(|popup| popup.alive())
+                .ok_or_else(gone)?;
             // SAFETY: 窗口属本线程且仍存活，宿主提供者补充窗口级属性与运行时编号。
             unsafe { UiaHostProviderFromHwnd(popup.hwnd) }
         })
@@ -125,7 +132,11 @@ impl IRawElementProviderSimple_Impl for Root_Impl {
 impl IRawElementProviderFragment_Impl for Root_Impl {
     fn Navigate(&self, direction: NavigateDirection) -> Result<IRawElementProviderFragment> {
         guarded(|| {
-            let popup = self.0.upgrade().ok_or_else(gone)?;
+            let popup = self
+                .0
+                .upgrade()
+                .filter(|popup| popup.alive())
+                .ok_or_else(gone)?;
             let count = count(&popup);
             if count == 0 {
                 return none();
@@ -158,7 +169,11 @@ impl IRawElementProviderFragment_Impl for Root_Impl {
 impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
     fn ElementProviderFromPoint(&self, x: f64, y: f64) -> Result<IRawElementProviderFragment> {
         guarded(|| {
-            let popup = self.0.upgrade().ok_or_else(gone)?;
+            let popup = self
+                .0
+                .upgrade()
+                .filter(|popup| popup.alive())
+                .ok_or_else(gone)?;
             match popup.hit_screen(x as i32, y as i32) {
                 Some(index) => fragment(&popup, index),
                 None => Ok(self.to_interface()),
@@ -173,7 +188,12 @@ impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
 impl Item_Impl {
     /// 候选窗仍在且展示未更新时才可访问；否则报告元素已不可用。
     fn live(&self) -> Result<Rc<Popup>> {
-        let popup = self.popup.upgrade().ok_or_else(gone)?;
+        // Rc 可能晚于系统窗口释放；必须同时验证 HWND 的登记身份。
+        let popup = self
+            .popup
+            .upgrade()
+            .filter(|popup| popup.alive())
+            .ok_or_else(gone)?;
         let current = popup.view.try_borrow().is_ok_and(|view| {
             view.serial == self.serial
                 && view

@@ -18,3 +18,7 @@ windows = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Dw
 
 [lints]
 workspace = true
+
+# 显隐与层级回归在不切换的私有桌面运行，不干扰用户当前应用。
+[dev-dependencies]
+windows = { workspace = true, features = ["Win32_System_StationsAndDesktops"] }

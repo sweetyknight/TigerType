@@ -211,6 +211,9 @@ struct Active {
     /// 本地编辑代次：每换一个上下文递增，旧上下文的迟到回调随之失效。
     epoch: Cell<u64>,
     popup: RefCell<Option<Rc<Popup>>>,
+    /// 两类焦点分别记录，任一个失焦就禁止迟到布局显示，不能由另一类通知覆盖。
+    thread_focused: Cell<bool>,
+    key_focused: Cell<bool>,
     quiet: bool,
     /// 键盘开闭状态容器与其 sink cookie。
     keyboard: Option<(ITfCompartment, u32)>,
@@ -256,7 +259,11 @@ impl Active {
         }
     }
     fn current_popup(&self) -> Option<Rc<Popup>> {
-        self.popup.try_borrow().ok()?.clone()
+        self.popup
+            .try_borrow()
+            .ok()?
+            .clone()
+            .filter(|popup| popup.alive())
     }
     fn current_editor(&self) -> Option<Rc<Editor>> {
         self.editor.try_borrow().ok()?.clone()
@@ -400,6 +407,9 @@ impl Active {
     }
     /// 同一同步编辑会话内：核对文档 → 后台交换 → 写入并取组合位置。返回值即是否吃掉原键。
     fn input(self: &Rc<Self>, context: &ITfContext, key: Key, deadline: Instant) -> Result<bool> {
+        // 实际收到前台输入也能确认焦点，兼容未登记线程焦点 sink 的宿主。
+        self.thread_focused.set(true);
+        self.key_focused.set(true);
         let editor = self.focus(context)?;
         let active = self.clone();
         let report = editor.key(deadline, move |reset, deadline| {
@@ -440,7 +450,12 @@ impl Active {
     /// 本输入框上次组合位置 → 输入区域（视图范围，取不到则视图/焦点窗口），候选窗贴着区域外沿放。
     /// 宿主随后补来布局时再移到真实位置。空码等无候选时不显示，编码只留在宿主内的组合下划线里。
     fn present(self: &Rc<Self>, state: &InputState, report: &EditReport) {
-        if report.error.is_some() || !state.composing || state.candidates.is_empty() {
+        if !self.thread_focused.get()
+            || !self.key_focused.get()
+            || report.error.is_some()
+            || !state.composing
+            || state.candidates.is_empty()
+        {
             return self.hide();
         }
         let anchor = || self.current_popup().and_then(|popup| popup.anchor());
@@ -464,6 +479,9 @@ impl Active {
     /// 宿主布局变化：组合中且有候选时只读重取组合矩形，取得后显示或移动候选窗；
     /// 取不到或组合已变就保持现状，下一键或下一次通知再定。
     fn relayout(self: &Rc<Self>) {
+        if !self.thread_focused.get() || !self.key_focused.get() {
+            return;
+        }
         let Some(editor) = self.current_editor().filter(|editor| editor.composing()) else {
             return;
         };
@@ -737,6 +755,8 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
                 editor: RefCell::new(None),
                 epoch: Cell::new(0),
                 popup: RefCell::new(None),
+                thread_focused: Cell::new(focused),
+                key_focused: Cell::new(true),
                 quiet: self.quiet,
                 keyboard,
             });
@@ -753,7 +773,9 @@ impl ITfThreadFocusSink_Impl for TextService_Impl {
     fn OnSetThreadFocus(&self) -> Result<()> {
         guarded(|| {
             if let Some(active) = self.active() {
+                active.thread_focused.set(true);
                 active.indicate(true);
+                active.relayout();
             }
             Ok(())
         })
@@ -761,6 +783,8 @@ impl ITfThreadFocusSink_Impl for TextService_Impl {
     fn OnKillThreadFocus(&self) -> Result<()> {
         guarded(|| {
             if let Some(active) = self.active() {
+                active.thread_focused.set(false);
+                active.hide();
                 active.indicate(false);
             }
             Ok(())
@@ -771,12 +795,17 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnSetFocus(&self, foreground: BOOL) -> Result<()> {
         self.shift.set(ShiftTap::default());
         // 本 TIP 不再是前台按键处理者时收起候选窗，组合留给下一键或失焦处理。
-        if !foreground.as_bool()
-            && let Some(active) = self.active()
-        {
-            active.hide();
-        }
-        Ok(())
+        guarded(|| {
+            if let Some(active) = self.active() {
+                active.key_focused.set(foreground.as_bool());
+                if foreground.as_bool() {
+                    active.relayout();
+                } else {
+                    active.hide();
+                }
+            }
+            Ok(())
+        })
     }
     fn OnTestKeyDown(&self, pic: Ref<ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         Ok(shielded(|| {

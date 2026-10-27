@@ -467,6 +467,16 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
 }
 
 impl Popup {
+    /// 系统可随 owner 销毁 HWND；用登记身份而非 IsWindow 判断，避免旧句柄复用后误操作别人的窗口。
+    pub(crate) fn alive(&self) -> bool {
+        POPUPS.with(|popups| {
+            popups.try_borrow().is_ok_and(|popups| {
+                popups.iter().any(|(hwnd, popup)| {
+                    *hwnd == self.hwnd.0 as usize && std::ptr::eq(popup.as_ptr(), self)
+                })
+            })
+        })
+    }
     /// 在当前 TSF 线程创建隐藏候选窗；click 收到（展示编号，页内序号）。
     pub fn new(click: impl Fn(u32, u8) + 'static, quiet: bool) -> Result<Rc<Self>> {
         let instance = crate::module()?;
@@ -596,6 +606,9 @@ impl Popup {
         u8::try_from(index).ok()
     }
     fn release(&self) {
+        if !self.alive() {
+            return;
+        }
         // SAFETY: 只释放本窗口持有的鼠标捕获；会同步收到 WM_CAPTURECHANGED。
         unsafe {
             if GetCapture() == self.hwnd {
@@ -895,22 +908,19 @@ impl Popup {
     }
     /// 显示或刷新：owner 取视图窗口（空则取焦点窗口），按组合位置放在工作区内，不激活。
     pub fn show(self: &Rc<Self>, state: &InputState, caret: Rect, owner: HWND) -> Result<()> {
+        if !self.alive() {
+            return Err(E_FAIL.into());
+        }
         if !bounded(&caret) || state.candidates.len() > MAX_CANDIDATES {
             return Err(E_INVALIDARG.into());
         }
-        // 同一快照再次显示只是换位置（宿主布局通知）：保留展示编号、按下状态与待执行点击；位置也没变就不动。
+        // 同一快照保留展示编号与在途点击；几何不变也须检查 owner、系统显隐与遮挡层级。
         let (same, moved) = self.view.try_borrow().map_or((false, true), |view| {
             (
                 view.state.as_ref() == Some(state),
                 view.caret != Some(caret),
             )
         });
-        if same && !moved {
-            return Ok(());
-        }
-        if !same {
-            self.release();
-        }
         let owner = if owner.is_invalid() {
             // SAFETY: 只读本线程焦点窗口。
             unsafe { GetFocus() }
@@ -918,7 +928,28 @@ impl Popup {
             owner
         };
         // SAFETY: 只读本窗口当前 owner。
-        if unsafe { GetWindow(self.hwnd, GW_OWNER) }.unwrap_or_default() != owner {
+        let owner_changed = unsafe { GetWindow(self.hwnd, GW_OWNER) }.unwrap_or_default() != owner;
+        // 系统可能在最小化或关闭 owned window 时自行隐藏候选；缓存有快照不代表窗口可见。
+        // SAFETY: 登记已核对为本对象的存活窗口，仅查询可见性。
+        let visible = self.quiet || unsafe { IsWindowVisible(self.hwnd) }.as_bool();
+        if same && !moved && !owner_changed && visible {
+            // SAFETY: 只在原 z-order 层内提到前面，不变为全局 topmost、不激活；不重新布局或重画。
+            return unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    Some(HWND_TOP),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            };
+        }
+        if !same {
+            self.release();
+        }
+        if owner_changed {
             set_owner(self.hwnd, owner);
         }
         // SAFETY: 先移到组合所在显示器再读 DPI，使逐显示器感知的宿主得到正确字号；不激活、不改 z 序。
@@ -999,23 +1030,23 @@ impl Popup {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
-        if shown {
+        if !self.quiet {
+            // SAFETY: 每次显式显示并提到原层前面，不激活、不全局置顶；不用 ShowWindow，避免启动标志覆盖。
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    Some(HWND_TOP),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )?;
+            }
+        }
+        if shown && visible {
             self.notify(EVENT_OBJECT_IME_CHANGE);
         } else {
-            if !self.quiet {
-                // SAFETY: 显式显示但不激活；不用 ShowWindow，避免宿主首次调用受 STARTUPINFO 覆盖。
-                unsafe {
-                    SetWindowPos(
-                        self.hwnd,
-                        None,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    )?;
-                }
-            }
             self.notify(EVENT_OBJECT_IME_SHOW);
             self.raise(|| Some(self.root()), UIA_MenuOpenedEventId);
         }
@@ -1034,6 +1065,9 @@ impl Popup {
     }
     /// 正在显示时的组合矩形。
     pub fn anchor(&self) -> Option<Rect> {
+        if !self.alive() {
+            return None;
+        }
         let view = self.view.try_borrow().ok()?;
         view.state.as_ref().and(view.caret)
     }
@@ -1050,7 +1084,7 @@ impl Popup {
             }
             Err(_) => false,
         };
-        if shown {
+        if shown && self.alive() {
             // SAFETY: 原子隐藏并收为零面积，避免 DWM 留下旧圆角边框；不激活、不改位置或 z 序。
             // 窗口与字体缓存保留，下一次 show 会按新快照重新布局；隐藏测试也核对真实窗口尺寸。
             unsafe {
@@ -1070,6 +1104,9 @@ impl Popup {
     }
     /// 点击可受理时取当前快照编号并标记待执行；同一展示只受理一个点击。
     pub fn selectable(&self, serial: u32, index: u8) -> Option<u64> {
+        if !self.alive() {
+            return None;
+        }
         let mut view = self.view.try_borrow_mut().ok()?;
         let state = view.state.as_ref()?;
         if view.serial != serial || view.pending || index as usize >= state.candidates.len() {
@@ -1081,9 +1118,11 @@ impl Popup {
     }
     /// 该展示仍在屏幕上且未被更新。
     pub fn showing(&self, serial: u32) -> bool {
-        self.view
-            .try_borrow()
-            .is_ok_and(|view| view.serial == serial && view.state.is_some())
+        self.alive()
+            && self
+                .view
+                .try_borrow()
+                .is_ok_and(|view| view.serial == serial && view.state.is_some())
     }
     /// 点击会话未受理或已结束而展示未变：允许下一次点击。
     pub fn unblock(&self, serial: u32) {
@@ -1126,6 +1165,9 @@ impl Popup {
     }
     /// 屏幕坐标命中的候选行。
     pub(crate) fn hit_screen(&self, x: i32, y: i32) -> Option<usize> {
+        if !self.alive() {
+            return None;
+        }
         let mut at = POINT { x, y };
         // SAFETY: 本窗口句柄有效，点为本地值。
         if !unsafe { ScreenToClient(self.hwnd, &mut at) }.as_bool() {
@@ -1155,16 +1197,19 @@ impl Popup {
 }
 impl Drop for Popup {
     fn drop(&mut self) {
-        forget(self.hwnd);
-        // SAFETY: 先让 UIA 释放本窗口的提供者引用，再在所属线程销毁窗口并回收字体。
-        unsafe {
-            UiaReturnRawElementProvider(
-                self.hwnd,
-                WPARAM(0),
-                LPARAM(0),
-                None::<&IRawElementProviderSimple>,
-            );
-            let _ = DestroyWindow(self.hwnd);
+        // WM_NCDESTROY 已注销的句柄可能被宿主复用，不能再发 UIA 消息或 DestroyWindow。
+        if self.alive() {
+            forget(self.hwnd);
+            // SAFETY: 先让 UIA 释放本窗口的提供者引用，再在所属线程销毁窗口并回收字体。
+            unsafe {
+                UiaReturnRawElementProvider(
+                    self.hwnd,
+                    WPARAM(0),
+                    LPARAM(0),
+                    None::<&IRawElementProviderSimple>,
+                );
+                let _ = DestroyWindow(self.hwnd);
+            }
         }
         self.fonts.get().release();
     }

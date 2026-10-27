@@ -1063,6 +1063,96 @@ fn late_host_layout_shows_candidates_and_a_missing_layout_keeps_them_in_place() 
 }
 
 #[test]
+fn destroyed_candidate_window_is_recreated_for_the_next_input() {
+    // 宿主换窗口时 Win32 自动销毁 owned popup；服务仍活着，下一键必须重建而非永久复用死句柄。
+    let object = service();
+    let (server, bound) = backend(&object.namespace);
+    bound.recv().unwrap();
+    let (_, thread_mgr) = manager();
+    let tip: ITfTextInputProcessorEx = object.to_interface();
+    // SAFETY: 合成线程管理器，不注册系统输入法。
+    unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
+    let active = object.active().unwrap();
+    let (doc, context) = document();
+    assert!(
+        active
+            .input(&context, Key::Character('u'), later())
+            .unwrap()
+    );
+    let old = active.current_popup().unwrap();
+    // SAFETY: 模拟宿主销毁其拥有的候选窗口；只触碰本测试窗口。
+    unsafe { DestroyWindow(old.hwnd) }.unwrap();
+    assert!(
+        active
+            .input(&context, Key::Character('a'), later())
+            .unwrap()
+    );
+    let replacement = active.current_popup().unwrap();
+    assert!(!Rc::ptr_eq(&old, &replacement), "不得复用已销毁的候选窗");
+    assert!(shown(&active).is_some());
+    assert!(active.input(&context, Key::Space, later()).unwrap());
+    assert_eq!(text(&doc), "的");
+    // SAFETY: 停用合成服务并关闭假后台连接。
+    unsafe { tip.Deactivate() }.unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn thread_focus_loss_hides_candidates_and_late_layout_cannot_reshow_them() {
+    // 跨应用失焦不保证同时收到文档焦点通知；迟到布局不得把候选重新画到其他应用上。
+    let object = service();
+    let (server, bound) = backend(&object.namespace);
+    bound.recv().unwrap();
+    let (manager, thread_mgr) = manager();
+    manager.thread_focus.set(true);
+    let tip: ITfTextInputProcessorEx = object.to_interface();
+    // SAFETY: 只激活合成服务。
+    unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
+    let active = object.active().unwrap();
+    let (doc, context) = document();
+    assert!(
+        active
+            .input(&context, Key::Character('u'), later())
+            .unwrap()
+    );
+    let focus = manager.focus.borrow().clone().unwrap();
+    // SAFETY: 模拟只发线程失焦，不发文档失焦的宿主。
+    unsafe { focus.OnKillThreadFocus() }.unwrap();
+    assert!(shown(&active).is_none(), "线程失焦必须立即收起候选");
+    layout_changed(&doc);
+    assert!(shown(&active).is_none(), "迟到布局不得复活失焦窗口");
+    assert_eq!(text(&doc), "u", "仅失焦不得提交或删除组合");
+    // SAFETY: 回到原输入线程后可重新定位仍有效的组合。
+    unsafe { focus.OnSetThreadFocus() }.unwrap();
+    assert!(shown(&active).is_some());
+    // 已排队的布局在失焦后才执行，也不能显示；下一次获得线程焦点不能覆盖 TIP 自己的失焦。
+    doc.defer.set(true);
+    layout_changed(&doc);
+    let queued = doc.deferred.take().unwrap();
+    // SAFETY: 合成服务的焦点与排队编辑回调，正文仍是本测试的组合。
+    unsafe {
+        focus.OnKillThreadFocus().unwrap();
+        queued.DoEditSession(1).unwrap();
+    }
+    assert!(shown(&active).is_none());
+    doc.defer.set(false);
+    let keys: ITfKeyEventSink = object.to_interface();
+    // SAFETY: 模拟 TIP 被另一个输入法取代，但宿主线程随后重新获得焦点。
+    unsafe {
+        keys.OnSetFocus(false).unwrap();
+        focus.OnSetThreadFocus().unwrap();
+    }
+    layout_changed(&doc);
+    assert!(shown(&active).is_none(), "线程焦点不能覆盖 TIP 失焦");
+    // SAFETY: 两种焦点都恢复后才显示原组合的候选。
+    unsafe { keys.OnSetFocus(true) }.unwrap();
+    assert!(shown(&active).is_some());
+    // SAFETY: 停用合成服务并关闭假后台连接。
+    unsafe { tip.Deactivate() }.unwrap();
+    server.join().unwrap();
+}
+
+#[test]
 fn without_any_host_position_candidates_use_the_last_composition_then_the_input_area() {
     let object = service();
     let (server, bound) = backend(&object.namespace);

@@ -39,6 +39,250 @@ const CARET: Rect = Rect {
 fn center(rect: &RECT) -> LPARAM {
     LPARAM(((((rect.top + rect.bottom) / 2) << 16) | ((rect.left + rect.right) / 2)) as isize)
 }
+
+#[test]
+fn destroyed_owner_invalidates_candidates_even_while_rust_references_survive() {
+    // Win32 会随 owner 销毁候选窗，Rc 存活不代表 HWND 仍归本对象所有。
+    let popup = Popup::new(|_, _| {}, true).unwrap();
+    // SAFETY: 只创建隐藏的合成宿主，下面显式销毁，不操作用户窗口。
+    let owner = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("STATIC"),
+            None,
+            WS_POPUP,
+            100,
+            100,
+            200,
+            100,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    .unwrap();
+    let sample = state(2, 0);
+    popup.show(&sample, CARET, owner).unwrap();
+    let serial = popup.view.borrow().serial;
+    let item = uia::item(&popup, 0).unwrap();
+    let root = popup.root();
+    // SAFETY: 只销毁本测试 owner；系统应一并销毁它拥有的候选窗。
+    unsafe {
+        DestroyWindow(owner).unwrap();
+        assert!(!IsWindow(Some(popup.hwnd)).as_bool());
+    }
+    assert!(!popup.showing(serial), "销毁后旧展示不能仍可点击");
+    assert!(popup.anchor().is_none());
+    assert!(popup.selectable(serial, 0).is_none());
+    assert!(name(&item).is_err(), "旧 UIA 元素不得继续报告候选");
+    // SAFETY: 旧根提供者不得把已销毁或复用的句柄交给 UIA。
+    assert!(unsafe { root.HostRawElementProvider() }.is_err());
+    assert!(popup.show(&sample, CARET, HWND::default()).is_err());
+    popup.hide();
+}
+
+#[test]
+fn unchanged_snapshot_still_rebinds_a_different_owner() {
+    // 对话框/二级输入窗口变化时，候选与坐标不变也不能沿用旧 owner。
+    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let make = || {
+        // SAFETY: 仅创建隐藏测试窗口，测试末尾统一销毁。
+        unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                None,
+                WS_POPUP,
+                100,
+                100,
+                200,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap()
+    };
+    let (first, second) = (make(), make());
+    let sample = state(2, 0);
+    popup.show(&sample, CARET, first).unwrap();
+    let serial = popup.view.borrow().serial;
+    popup.show(&sample, CARET, second).unwrap();
+    // SAFETY: 只读取/销毁本测试窗口，owner 更换不作废同一快照。
+    unsafe {
+        assert_eq!(GetWindow(popup.hwnd, GW_OWNER).unwrap(), second);
+        assert_eq!(popup.view.borrow().serial, serial);
+        DestroyWindow(first).unwrap();
+        assert!(IsWindow(Some(popup.hwnd)).as_bool());
+        popup.hide();
+        DestroyWindow(second).unwrap();
+    }
+}
+
+#[test]
+fn system_hidden_or_covered_popup_recovers_without_stealing_focus() {
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, CreateDesktopW, DESKTOP_CONTROL_FLAGS, HDESK, SetThreadDesktop,
+    };
+    // 真正显示与遮挡只在私有桌面的新线程上测试，不切换桌面、不注入用户输入。
+    struct Desktop(HDESK);
+    impl Drop for Desktop {
+        fn drop(&mut self) {
+            // SAFETY: 测试线程已经退出，只释放本测试创建的桌面。
+            unsafe { CloseDesktop(self.0) }.unwrap();
+        }
+    }
+    let name: Vec<u16> = format!("TigerType-CandidateTest-{}", std::process::id())
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: 只创建未切换的私有测试桌面，名称包含独立测试进程号。
+    let desktop = Desktop(
+        unsafe {
+            CreateDesktopW(
+                PCWSTR(name.as_ptr()),
+                None,
+                None,
+                DESKTOP_CONTROL_FLAGS(0),
+                0x1000_0000,
+                None,
+            )
+        }
+        .unwrap(),
+    );
+    let handle = desktop.0.0 as usize;
+    let result = std::thread::spawn(move || {
+        // SAFETY: 新线程尚未创建任何窗口；桌面句柄由父线程持有到 join 后。
+        unsafe { SetThreadDesktop(HDESK(handle as *mut _)) }.unwrap();
+        let make = |owner| {
+            // SAFETY: 只创建私有桌面内的测试窗口，下面配对销毁。
+            unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("STATIC"),
+                    None,
+                    WS_POPUP,
+                    100,
+                    100,
+                    300,
+                    200,
+                    owner,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .unwrap()
+        };
+        let owner = make(None);
+        // SAFETY: 只显示私有桌面的窗口，并在本线程建立焦点，用户桌面不受影响。
+        unsafe {
+            SetWindowPos(
+                owner,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+            .unwrap();
+            // 返回的是原窗口，首次为 NULL 不表示失败；用实际焦点核对。
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetActiveWindow(owner);
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(owner));
+            assert_eq!(GetFocus(), owner);
+        }
+        let popup = Popup::new(|_, _| {}, false).unwrap();
+        let mut sample = state(2, 0);
+        popup.show(&sample, CARET, owner).unwrap();
+        let serial = popup.view.borrow().serial;
+        assert_eq!(popup.selectable(serial, 0), Some(sample.revision));
+        for updated in [false, true] {
+            // SAFETY: 模拟系统/宿主绕过 Popup::hide 隐藏窗口，不改本地快照。
+            unsafe {
+                SetWindowPos(
+                    popup.hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+                .unwrap();
+                assert!(!IsWindowVisible(popup.hwnd).as_bool());
+            }
+            if updated {
+                sample.revision += 1;
+            }
+            popup.show(&sample, CARET, owner).unwrap();
+            // SAFETY: 仅查询私有桌面中的测试窗口，重新显示不得抢走宿主焦点。
+            unsafe {
+                assert!(
+                    IsWindowVisible(popup.hwnd).as_bool(),
+                    "系统隐藏后必须恢复：updated={updated}"
+                );
+                assert_eq!(GetFocus(), owner);
+            }
+            if !updated {
+                assert_eq!(popup.view.borrow().serial, serial);
+                assert!(popup.view.borrow().pending, "仅恢复可见性不作废在途点击");
+            }
+        }
+        // 同一宿主的后开浮层可能覆盖候选；同快照刷新也要恢复层级，不提升为全局 topmost。
+        let covering = make(Some(owner));
+        // SAFETY: 同上，只在私有桌面内模拟后开窗口。
+        unsafe {
+            SetWindowPos(
+                covering,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+            .unwrap();
+        }
+        let above = |higher, lower| {
+            let mut window = higher;
+            for _ in 0..32 {
+                // SAFETY: 有界只读枚举本私有桌面的 z-order。
+                window = unsafe { GetWindow(window, GW_HWNDNEXT) }.unwrap_or_default();
+                if window == lower {
+                    return true;
+                }
+                if window.is_invalid() {
+                    break;
+                }
+            }
+            false
+        };
+        assert!(above(covering, popup.hwnd));
+        popup.show(&sample, CARET, owner).unwrap();
+        assert!(
+            above(popup.hwnd, covering),
+            "刷新候选必须高于同宿主的遮挡浮层"
+        );
+        // SAFETY: 检查非全局置顶、不抢焦点；最后只销毁测试窗口。
+        unsafe {
+            assert_eq!(
+                GetWindowLongW(popup.hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0,
+                0
+            );
+            assert_eq!(GetFocus(), owner);
+            popup.hide();
+            DestroyWindow(covering).unwrap();
+            DestroyWindow(owner).unwrap();
+        }
+    })
+    .join();
+    drop(desktop);
+    result.unwrap();
+}
 /// 只取出本窗口的点击通知并按系统流程派发，不处理其他消息。
 fn pump(popup: &Popup) {
     let mut message = MSG::default();
