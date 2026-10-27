@@ -1003,9 +1003,17 @@ impl Popup {
             self.notify(EVENT_OBJECT_IME_CHANGE);
         } else {
             if !self.quiet {
-                // SAFETY: SW_SHOWNA 不改变宿主的激活与键盘焦点。
+                // SAFETY: 显式显示但不激活；不用 ShowWindow，避免宿主首次调用受 STARTUPINFO 覆盖。
                 unsafe {
-                    let _ = ShowWindow(self.hwnd, SW_SHOWNA);
+                    SetWindowPos(
+                        self.hwnd,
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    )?;
                 }
             }
             self.notify(EVENT_OBJECT_IME_SHOW);
@@ -1043,11 +1051,18 @@ impl Popup {
             Err(_) => false,
         };
         if shown {
-            if !self.quiet {
-                // SAFETY: 只隐藏本候选窗，不影响宿主焦点。
-                unsafe {
-                    let _ = ShowWindow(self.hwnd, SW_HIDE);
-                }
+            // SAFETY: 原子隐藏并收为零面积，避免 DWM 留下旧圆角边框；不激活、不改位置或 z 序。
+            // 窗口与字体缓存保留，下一次 show 会按新快照重新布局；隐藏测试也核对真实窗口尺寸。
+            unsafe {
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
             }
             self.notify(EVENT_OBJECT_IME_HIDE);
             self.raise(|| Some(self.root()), UIA_MenuClosedEventId);

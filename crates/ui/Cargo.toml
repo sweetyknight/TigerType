@@ -11,5 +11,9 @@ tigertype-contracts.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_UI_Accessibility", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+# 首次显示测试在未切换的私有桌面运行，避免显式唤起抢走用户焦点。
+windows-sys = { workspace = true, features = ["Win32_System_StationsAndDesktops"] }
+
 [lints]
 workspace = true

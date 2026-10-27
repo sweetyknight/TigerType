@@ -3328,6 +3328,18 @@ fn present(main: &Window, settings: &Window, model: &mut Model, panel: Panel) {
             SW_SHOW
         };
         ShowWindow(window.handle, mode);
+        // 首次 ShowWindow 可能被启动时的 SW_HIDE 覆盖；用户显式唤起不应继承后台的隐藏启动策略。
+        if IsWindowVisible(window.handle) == 0 {
+            SetWindowPos(
+                window.handle,
+                null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
         SetForegroundWindow(window.handle);
         SetFocus(focus);
     }
@@ -3526,6 +3538,135 @@ fn event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_present_overrides_hidden_process_startup() {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::StationsAndDesktops::{
+            CloseDesktop, CreateDesktopW, HDESK,
+        };
+        use windows_sys::Win32::System::Threading::{
+            CREATE_NO_WINDOW, CreateProcessW, GetExitCodeProcess, PROCESS_INFORMATION,
+            STARTF_USESHOWWINDOW, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+        };
+        // 启动显示标志只作用于进程首次显示；必须在独立限时子进程中测，不能被其他窗口测试提前消耗。
+        let image = std::env::current_exe().unwrap();
+        let mut command = wide(&format!(
+            "\"{}\" --ignored --exact win32::tests::hidden_startup_present_worker --nocapture",
+            image.display()
+        ));
+        struct Desktop(HDESK);
+        impl Drop for Desktop {
+            fn drop(&mut self) {
+                // SAFETY: 只关闭本测试创建的桌面；子进程已回收，未向用户切换此桌面。
+                unsafe { CloseDesktop(self.0) };
+            }
+        }
+        let mut desktop_name = wide(&format!("TigerType-StartupTest-{}", std::process::id()));
+        // SAFETY: 名称包含测试进程号；GENERIC_ALL 仅申请新桌面的访问权，不切换或修改用户桌面。
+        let desktop = Desktop(unsafe {
+            CreateDesktopW(
+                desktop_name.as_ptr(),
+                null(),
+                null(),
+                0,
+                0x1000_0000,
+                null(),
+            )
+        });
+        assert!(!desktop.0.is_null(), "私有测试桌面创建失败：{}", error());
+        let startup = STARTUPINFOW {
+            cb: size_of::<STARTUPINFOW>() as u32,
+            dwFlags: STARTF_USESHOWWINDOW,
+            wShowWindow: SW_HIDE as u16,
+            lpDesktop: desktop_name.as_mut_ptr(),
+            ..Default::default()
+        };
+        let mut process = PROCESS_INFORMATION::default();
+        // SAFETY: 命令行可写且以 NUL 结尾；只启动自身测试映像，句柄在下面配对关闭。
+        let created = unsafe {
+            CreateProcessW(
+                null(),
+                command.as_mut_ptr(),
+                null(),
+                null(),
+                0,
+                CREATE_NO_WINDOW,
+                null(),
+                null(),
+                &startup,
+                &mut process,
+            )
+        };
+        assert_ne!(created, 0, "隐藏启动子进程创建失败：{}", error());
+        // SAFETY: 只等待和回收本测试创建的子进程；超时或等待失败不能遗留后台测试程序。
+        let (wait, code) = unsafe {
+            let wait = WaitForSingleObject(process.hProcess, 15_000);
+            if wait != WAIT_OBJECT_0 {
+                TerminateProcess(process.hProcess, 1);
+                WaitForSingleObject(process.hProcess, 5_000);
+            }
+            let mut code = 1;
+            GetExitCodeProcess(process.hProcess, &mut code);
+            windows_sys::Win32::Foundation::CloseHandle(process.hThread);
+            windows_sys::Win32::Foundation::CloseHandle(process.hProcess);
+            (wait, code)
+        };
+        assert_eq!(wait, WAIT_OBJECT_0, "隐藏启动子进程超时或等待失败");
+        assert_eq!(code, 0, "隐藏启动后的首次显式唤起失败");
+    }
+
+    #[test]
+    #[ignore = "由 explicit_present_overrides_hidden_process_startup 带隐藏启动标志执行"]
+    fn hidden_startup_present_worker() {
+        use windows_sys::Win32::System::Threading::{
+            GetStartupInfoW, STARTF_USESHOWWINDOW, STARTUPINFOW,
+        };
+        let mut startup = STARTUPINFOW::default();
+        // SAFETY: 只读本子进程启动信息，防止不带隐藏标志的运行被误当作验证通过。
+        unsafe { GetStartupInfoW(&mut startup) };
+        assert_ne!(startup.dwFlags & STARTF_USESHOWWINDOW, 0);
+        assert_eq!(startup.wShowWindow, SW_HIDE as u16);
+        let class = Class::register().unwrap();
+        let options = Options::default();
+        let main = lookup_window(&class, &options).unwrap();
+        let settings = settings_window(
+            &class,
+            main.handle,
+            &options,
+            Path::new("synthetic-settings.toml"),
+        )
+        .unwrap();
+        let mut model = Model::new(options);
+        // 私有桌面内仍移到屏幕外；不覆盖用户桌面、不加载配置或激活输入法。
+        for window in [&main, &settings] {
+            // SAFETY: 两个窗口由本线程持有，移动时不激活且不改变尺寸或 z 序。
+            unsafe {
+                SetWindowPos(
+                    window.handle,
+                    null_mut(),
+                    -32_000,
+                    -32_000,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                );
+            }
+        }
+        present(&main, &settings, &mut model, Panel::Settings);
+        assert!(visible(&settings), "隐藏启动时首次设置唤起必须可见");
+        assert!(!visible(&main), "单独开设置不连带显示查字窗");
+        present(&main, &settings, &mut model, Panel::Lookup);
+        assert!(visible(&main));
+        // SAFETY: 仅最小化本测试窗口，接着经正式唤起路径还原。
+        unsafe {
+            ShowWindow(main.handle, SW_MINIMIZE);
+        }
+        present(&main, &settings, &mut model, Panel::Lookup);
+        assert!(visible(&main));
+        // SAFETY: 只查询本测试窗口是否已还原。
+        assert_eq!(unsafe { IsIconic(main.handle) }, 0);
+    }
 
     /// 在内存位图上作画并读像素，不显示窗口、不碰桌面。
     struct Canvas(HDC, HBITMAP, HGDIOBJ);

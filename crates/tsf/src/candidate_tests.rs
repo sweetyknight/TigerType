@@ -226,6 +226,25 @@ fn hidden_popup_lays_out_rows_and_turns_matching_press_release_into_one_stamped_
     popup.hide();
     let view = popup.view.borrow();
     assert!(view.state.is_none() && view.layout.rows.is_empty() && view.serial == serial + 2);
+    // 隐藏后必须释放可合成的窗口面积，不能只清空候选内容而保留旧圆角边框的矩形。
+    let mut hidden = RECT::default();
+    // SAFETY: 只读本测试创建并仍持有的窗口，不操作用户宿主。
+    unsafe {
+        GetWindowRect(popup.hwnd, &mut hidden).unwrap();
+        assert!(!IsWindowVisible(popup.hwnd).as_bool());
+    }
+    assert_eq!(
+        (hidden.right - hidden.left, hidden.bottom - hidden.top),
+        (0, 0)
+    );
+    drop(view);
+    // 同一窗口和字体缓存继续复用；下一次组合须重新计算正常尺寸。
+    popup.show(&state(2, 0), CARET, HWND::default()).unwrap();
+    assert_eq!(popup.view.borrow().layout.rows.len(), 2);
+    let mut restored = RECT::default();
+    // SAFETY: 同上，只读隐藏测试窗口的重新布局结果。
+    unsafe { GetWindowRect(popup.hwnd, &mut restored).unwrap() };
+    assert!(restored.right > restored.left && restored.bottom > restored.top);
 }
 
 #[test]
