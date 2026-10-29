@@ -11,6 +11,11 @@ use windows::{
 
 #[derive(Default)]
 pub(crate) struct Document {
+    /// 记录查询/会话次数，防止无用宿主调用与未执行定位请求堆积。
+    screen_queries: Cell<usize>,
+    edit_requests: Cell<usize>,
+    reject_edit: Cell<bool>,
+    invalid_extent: Cell<bool>,
     pub(crate) text: RefCell<Vec<u16>>,
     pub(crate) selection: Cell<(usize, usize)>,
     pub(crate) sink: RefCell<Option<ITfCompositionSink>>,
@@ -81,7 +86,14 @@ impl ITfContextView_Impl for View_Impl {
         if self.doc.caret_only.get() && start != end {
             return Err(TS_E_NOLAYOUT.into());
         }
-        let extent = if self.doc.blank.get() {
+        let extent = if self.doc.invalid_extent.get() {
+            RECT {
+                left: 20,
+                right: 10,
+                top: 0,
+                bottom: 20,
+            }
+        } else if self.doc.blank.get() {
             RECT::default()
         } else {
             RECT {
@@ -99,6 +111,9 @@ impl ITfContextView_Impl for View_Impl {
         Ok(())
     }
     fn GetScreenExt(&self) -> Result<RECT> {
+        self.doc
+            .screen_queries
+            .set(self.doc.screen_queries.get() + 1);
         self.doc.screen.get().ok_or_else(|| E_NOTIMPL.into())
     }
     fn GetWnd(&self) -> Result<HWND> {
@@ -167,6 +182,10 @@ impl ITfContext_Impl for Context_Impl {
         flags: TF_CONTEXT_EDIT_CONTEXT_FLAGS,
     ) -> Result<HRESULT> {
         self.doc.flags.set(flags);
+        self.doc.edit_requests.set(self.doc.edit_requests.get() + 1);
+        if self.doc.reject_edit.get() {
+            return Ok(E_FAIL);
+        }
         if self.doc.defer.get() {
             *self.doc.deferred.borrow_mut() = edit.as_ref().cloned();
             return Ok(HRESULT(0));
@@ -803,7 +822,7 @@ fn missing_composition_layout_falls_back_to_the_insertion_point_and_reports_rece
     };
     assert_eq!(
         (report.caret, report.recent, report.area),
-        (Some(start), Some(start), Some(area))
+        (Some(start), Some(start), None)
     );
     // 全零矩形是“不知道”：没有位置，但仍带上次位置与输入区域。
     doc.caret_only.set(false);
@@ -812,7 +831,7 @@ fn missing_composition_layout_falls_back_to_the_insertion_point_and_reports_rece
     assert!(report.handled);
     assert_eq!(
         (report.caret, report.recent, report.area),
-        (None, Some(start), Some(area))
+        (None, Some(start), None)
     );
     // 宿主完全没有布局：同样只剩退路。
     doc.blank.set(false);
@@ -822,6 +841,107 @@ fn missing_composition_layout_falls_back_to_the_insertion_point_and_reports_rece
     assert_eq!(
         (report.caret, report.recent, report.area),
         (None, Some(start), None)
+    );
+}
+
+#[test]
+fn layout_requests_coalesce_run_late_and_release_on_execution_rejection_drop() {
+    let (doc, editor) = setup();
+    assert!(apply(&editor, outcome(1, "u", None), deadline()).handled);
+    doc.defer.set(true);
+    doc.edit_requests.set(0);
+    let completed = Rc::new(Cell::new(0));
+    for _ in 0..64 {
+        let done = completed.clone();
+        editor.locate(move |_| done.set(done.get() + 1));
+    }
+    assert_eq!(doc.edit_requests.get(), 1, "每个编辑器至多一个在途定位");
+    let first = doc.deferred.take().unwrap();
+    // SAFETY: 只执行合成宿主排队的只读会话；保留 COM 引用以模拟宿主延迟释放。
+    unsafe { first.DoEditSession(1) }.unwrap();
+    assert_eq!(completed.get(), 1);
+    editor.locate(|_| {});
+    assert_eq!(doc.edit_requests.get(), 2);
+    // 旧回调重复执行不得解除新请求的锁。
+    // SAFETY: 同一测试会话的重复回调必须被拒绝。
+    assert!(unsafe { first.DoEditSession(1) }.is_err());
+    editor.locate(|_| {});
+    assert_eq!(doc.edit_requests.get(), 2);
+    drop(doc.deferred.take());
+    doc.reject_edit.set(true);
+    editor.locate(|_| {});
+    doc.reject_edit.set(false);
+    let late = Rc::new(RefCell::new(None));
+    let sink = late.clone();
+    editor.locate(move |report| *sink.borrow_mut() = Some(report));
+    assert_eq!(
+        doc.edit_requests.get(),
+        4,
+        "宿主丢弃或拒绝请求后可以重新定位"
+    );
+    // 排队超过 50ms 才执行：只读定位不作废（否则期间并入的通知会丢），预算从执行时重新起算。
+    let queued = doc.deferred.take().unwrap();
+    std::thread::sleep(SESSION_BUDGET + Duration::from_millis(20));
+    // SAFETY: 合成宿主迟到执行排队的只读会话。
+    unsafe { queued.DoEditSession(1) }.unwrap();
+    assert!(
+        late.borrow()
+            .as_ref()
+            .is_some_and(|report| report.error.is_none() && report.caret.is_some())
+    );
+    editor.locate(|_| {});
+    assert_eq!(doc.edit_requests.get(), 5);
+    editor.invalidate();
+    let old = doc.deferred.take().unwrap();
+    // SAFETY: 失效编辑器的旧会话只能返回失败。
+    assert!(unsafe { old.DoEditSession(1) }.is_err());
+    editor.locate(|_| panic!("失效编辑器不得重新定位"));
+    assert_eq!(doc.edit_requests.get(), 5);
+}
+
+#[test]
+fn screen_fallback_is_lazy_and_invalid_extents_are_not_cached() {
+    let (doc, editor) = setup();
+    let area = RECT {
+        left: 100,
+        top: 100,
+        right: 500,
+        bottom: 200,
+    };
+    doc.screen.set(Some(area));
+    doc.invalid_extent.set(true);
+    let report = apply(&editor, outcome(1, "u", None), deadline());
+    assert_eq!(
+        (report.caret, report.recent, report.area),
+        (None, None, Some(area))
+    );
+    assert_eq!(doc.screen_queries.get(), 1);
+    doc.invalid_extent.set(false);
+    let report = apply(&editor, outcome(2, "un", None), deadline());
+    assert!(report.caret.is_some());
+    doc.no_layout.set(true);
+    let report = apply(&editor, outcome(3, "uni", None), deadline());
+    assert!(report.caret.is_none() && report.recent.is_some());
+    assert_eq!(
+        doc.screen_queries.get(),
+        1,
+        "有效本次/最近坐标不再查询区域退路"
+    );
+}
+
+#[test]
+fn panicking_finish_does_not_escape_com_or_hold_the_next_layout() {
+    let (doc, editor) = setup();
+    assert!(apply(&editor, outcome(1, "u", None), deadline()).handled);
+    doc.defer.set(true);
+    editor.locate(|_| panic!("测试结束通知故障"));
+    let old = doc.deferred.take().unwrap();
+    // SAFETY: 合成宿主执行回调，通知 panic 必须在 COM 边界内转为失败。
+    assert!(unsafe { old.DoEditSession(1) }.is_err());
+    editor.locate(|_| {});
+    assert!(
+        doc.deferred.borrow().is_some(),
+        "旧 COM 对象仍存活也不挡下一次定位"
     );
 }
 

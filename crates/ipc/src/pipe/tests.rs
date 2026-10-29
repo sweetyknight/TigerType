@@ -41,8 +41,87 @@ fn request() -> Request {
         command: Command::Key {
             epoch: 1,
             key: tigertype_contracts::Key::Space,
+            prepare: tigertype_contracts::protocol::Prepare::Keep,
         },
     }
+}
+
+#[test]
+fn synchronous_io_does_not_wait_for_a_busy_completion_thread() -> Result<()> {
+    use windows_sys::Win32::System::Threading::*;
+    // 只阻塞测试运行时自己的完成线程，确定性模拟调度延迟，不压满用户 CPU。
+    struct Gate {
+        entered: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+    }
+    unsafe extern "system" fn hold(
+        _: PTP_CALLBACK_INSTANCE,
+        context: *mut std::ffi::c_void,
+        _: PTP_WORK,
+    ) {
+        // SAFETY: Box<Gate> 由测试持有到 WaitForThreadpoolWorkCallbacks 完成。
+        let gate = unsafe { &*context.cast::<Gate>() };
+        let _ = gate.entered.try_send(());
+        let _ = gate.release.recv_timeout(Duration::from_secs(5));
+    }
+    struct Work(PTP_WORK, mpsc::SyncSender<()>);
+    impl Drop for Work {
+        fn drop(&mut self) {
+            let _ = self.1.try_send(());
+            // SAFETY: 测试只创建这一个工作项，先放行再等退出，最后回收注册。
+            unsafe {
+                WaitForThreadpoolWorkCallbacks(self.0, 0);
+                CloseThreadpoolWork(self.0);
+            }
+        }
+    }
+    let runtime = Runtime::new()?;
+    let (mut client, mut server) = pair(&runtime)?;
+    let (entered, ready) = mpsc::sync_channel(1);
+    let (release, released) = mpsc::sync_channel(1);
+    let mut gate = Box::new(Gate {
+        entered,
+        release: released,
+    });
+    let environment = TP_CALLBACK_ENVIRON_V3 {
+        Version: 3,
+        Pool: runtime.0.pool,
+        CallbackPriority: TP_CALLBACK_PRIORITY_NORMAL,
+        Size: size_of::<TP_CALLBACK_ENVIRON_V3>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: Gate 地址稳定且有效至工作项回收；只使用本测试的私有线程池。
+    let work =
+        unsafe { CreateThreadpoolWork(Some(hold), (&mut *gate as *mut Gate).cast(), &environment) };
+    assert!(work != 0);
+    let work = Work(work, release);
+    // SAFETY: 新建工作项保持存活，Drop 配对等待和关闭。
+    unsafe {
+        SubmitThreadpoolWork(work.0);
+    }
+    ready.recv_timeout(Duration::from_secs(2)).unwrap();
+    let frame = crate::encode(&Message::Request(request()))?;
+    // 先挂起读取，再由写入让内核完成；回收线程仍被挡住，正常异步完成也必须可直接领取。
+    let mut pending = server.start_read()?;
+    assert!(pending.try_complete()?.is_none());
+    client.send_frame(&frame, Instant::now() + Duration::from_millis(50))?;
+    let (bytes, count) = pending.try_complete()?.expect("内核完成不能等待线程池转交");
+    assert_eq!(&bytes[..count], frame);
+    drop(pending);
+    for _ in 0..32 {
+        let end = Instant::now() + Duration::from_millis(50);
+        client.send_frame(&frame, end)?;
+        assert_eq!(server.receive_frame(end)?, frame);
+    }
+    // 同步完成尚未领取时发生取消，仍不得交付结果。
+    let mut pending = client.start_write(frame)?;
+    client.cancellation().cancel();
+    assert!(matches!(pending.try_complete(), Err(Error::Cancelled)));
+    drop(pending);
+    drop(work);
+    drop(client);
+    drop(server);
+    runtime.shutdown(deadline())
 }
 
 // 新的空闲读没有请求期限，测试异常也必须取消，避免 scope 在 panic 时等待永不结束的读。

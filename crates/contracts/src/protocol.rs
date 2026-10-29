@@ -24,6 +24,20 @@ pub struct Request {
     pub command: Command,
 }
 
+/// 按键的前置状态转换与本键在同一次后台调度中执行；开会话/焦点/清空没有单独命令。
+/// 后台一律以当前设置开会话，宿主不读盘、也不携带选项；焦点代次每宿主单调递增，光标与候选窗位置不出宿主进程。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Prepare {
+    Keep,
+    /// 新会话，同时取得焦点。
+    Open,
+    /// 重新取得焦点，同时清空本会话组合。
+    Focus,
+    /// 只清空当前焦点会话的组合。
+    Clear,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -32,13 +46,10 @@ pub struct Request {
     deny_unknown_fields
 )]
 pub enum Command {
-    /// 宿主不读盘，选项只是占位；后台调度一律以其当前设置打开会话。
-    Open {
-        options: Options,
-    },
     Key {
         key: Key,
         epoch: u64,
+        prepare: Prepare,
     },
     /// 索引针对当前页，并绑定快照，禁止旧候选点击产生提交。
     Select {
@@ -49,12 +60,6 @@ pub enum Command {
     Configure {
         options: Options,
     },
-    /// 每个宿主单调递增，只报告取得/失去；光标与候选窗位置不出宿主进程。
-    Focus {
-        epoch: u64,
-        focused: bool,
-    },
-    Clear,
     Close,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,11 +77,8 @@ pub struct Response {
     deny_unknown_fields
 )]
 pub enum Reply {
-    Opened(InputState),
     Key(KeyOutcome),
     Configured(InputState),
-    Cleared(InputState),
-    Focused(InputState),
     Closed,
     Rejected(Rejection),
 }

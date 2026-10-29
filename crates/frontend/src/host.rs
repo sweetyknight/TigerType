@@ -1,9 +1,9 @@
-//! 宿主侧会话：懒连接；新连接先 Open，文档焦点变化后先 Focus，宿主终止组合后先 Clear，
+//! 宿主侧会话：懒连接；开会话/焦点/清空与本键在同一次请求中执行，
 //! 均与本键共用同一截止时间。通道失败即作废连接，已发出的请求不重放；各平台前端同一份。
 use std::time::Instant;
 use tigertype_contracts::{
-    InputState, Key, KeyOutcome, Options,
-    protocol::{Command, Panel, Rejection, Reply},
+    InputState, Key, KeyOutcome,
+    protocol::{Command, Panel, Prepare, Rejection, Reply},
 };
 
 /// 会话失败的原因；调用方一律取消未上屏组合、放行原键，原因只供诊断。
@@ -102,12 +102,12 @@ impl<C: Channel> Host<C> {
         }
         sent.is_ok()
     }
-    /// 文档焦点变化：下次按键先报告焦点，后台据此清除旧组合。
+    /// 文档焦点变化：下次按键携带 Prepare::Focus，后台据此清除旧组合。
     pub fn blur(&mut self) {
         self.focused = false;
         self.state.composing = false;
     }
-    /// 宿主终止组合或写入失败：下次按键先 Clear。
+    /// 宿主终止组合或写入失败：下次按键携带 Prepare::Clear。
     pub fn discard(&mut self) {
         self.dirty = true;
         self.state.composing = false;
@@ -185,54 +185,43 @@ impl<C: Channel> Host<C> {
         self.dirty = false;
         self.state = InputState::default();
     }
-    fn call(&mut self, command: Command, deadline: Instant) -> Result<(), Error> {
-        // 回复类型已由协议层与请求配对校验，这里只需区分拒绝。
-        match self.channel.request(self.session, command, deadline)? {
-            Reply::Rejected(_) => Err(Error::Rejected),
-            _ => Ok(()),
-        }
-    }
     fn exchange(&mut self, key: Key, deadline: Instant) -> Result<KeyOutcome, Error> {
         self.ensure(deadline)?;
-        if self.session == 0 {
+        let new = self.session == 0;
+        if new {
             self.last_session = self.last_session.checked_add(1).ok_or(Error::Exhausted)?;
             self.session = self.last_session;
             self.focused = false;
-            // 选项以后台启动时读入的设置为准，宿主不读盘，Open 只携带占位默认值。
-            self.call(
-                Command::Open {
-                    options: Options::default(),
-                },
-                deadline,
-            )?;
-            self.dirty = false;
         }
         for retry in [false, true] {
+            // 前置操作互斥：新建包含焦点/清空，重取焦点包含清空。
+            let prepare = if new {
+                Prepare::Open
+            } else if !self.focused {
+                Prepare::Focus
+            } else if self.dirty {
+                Prepare::Clear
+            } else {
+                Prepare::Keep
+            };
             if !self.focused {
                 self.epoch = self.epoch.checked_add(1).ok_or(Error::Exhausted)?;
-                self.call(
-                    Command::Focus {
-                        epoch: self.epoch,
-                        focused: true,
-                    },
-                    deadline,
-                )?;
-                // 后台处理焦点时已清空本会话组合。
-                self.focused = true;
-                self.dirty = false;
-            }
-            if self.dirty {
-                self.call(Command::Clear, deadline)?;
-                self.dirty = false;
             }
             let command = Command::Key {
                 key,
                 epoch: self.epoch,
+                prepare,
             };
             match self.channel.request(self.session, command, deadline)? {
-                Reply::Key(outcome) => return Ok(outcome),
+                Reply::Key(outcome) => {
+                    self.focused = true;
+                    self.dirty = false;
+                    return Ok(outcome);
+                }
                 // 其他宿主取得了后台焦点：被拒的键未处理，重新报告焦点后补发一次不算重放。
-                Reply::Rejected(Rejection::NotFocused | Rejection::StaleFocus) if !retry => {
+                Reply::Rejected(Rejection::NotFocused | Rejection::StaleFocus)
+                    if !retry && !new =>
+                {
                     self.focused = false;
                 }
                 _ => break,
@@ -304,28 +293,24 @@ mod tests {
             },
         })
     }
-    fn ok(state: fn(InputState) -> Reply) -> Result<Reply, Error> {
-        Ok(state(InputState::default()))
-    }
     fn take_log(fake: &Fake) -> Vec<(u64, Command)> {
         std::mem::take(&mut fake.0.borrow_mut().log)
     }
-    fn key(epoch: u64) -> Command {
+    fn prepared(epoch: u64, prepare: Prepare) -> Command {
         Command::Key {
             key: Key::Character('u'),
             epoch,
+            prepare,
         }
+    }
+    fn key(epoch: u64) -> Command {
+        prepared(epoch, Prepare::Keep)
+    }
+    fn open(epoch: u64) -> Command {
+        prepared(epoch, Prepare::Open)
     }
     fn focus(epoch: u64) -> Command {
-        Command::Focus {
-            epoch,
-            focused: true,
-        }
-    }
-    fn open() -> Command {
-        Command::Open {
-            options: Options::default(),
-        }
+        prepared(epoch, Prepare::Focus)
     }
 
     #[test]
@@ -338,17 +323,13 @@ mod tests {
         assert!(host.indicate(true, deadline()));
         assert_eq!(indicated(&fake), [true]);
         assert!(take_log(&fake).is_empty());
-        // 连接作废后，下一键的新连接先补报取得，再 Open/Focus。
+        // 连接作废后，下一键的新连接先补报取得，再合并开会话/焦点与本键。
         host.close();
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-        ]);
+        fake.0.borrow_mut().replies.extend([Ok(outcome("u"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
         assert_eq!(indicated(&fake), [true]);
-        assert_eq!(take_log(&fake), [(1, open()), (1, focus(1)), (1, key(1))]);
+        assert_eq!(take_log(&fake), [(1, open(1))]);
         // 失去经现有连接报告；此后的新连接不再补报。
         assert!(host.indicate(false, deadline()));
         assert_eq!(indicated(&fake), [false]);
@@ -373,19 +354,14 @@ mod tests {
         let fake = Fake::default();
         let mut host = Host::new(fake.clone());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-            Ok(outcome("uu")),
-        ]);
+        fake.0
+            .borrow_mut()
+            .replies
+            .extend([Ok(outcome("u")), Ok(outcome("uu"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
         assert!(host.state().composing);
         host.key(Key::Character('u'), deadline()).unwrap();
-        assert_eq!(
-            take_log(&fake),
-            [(1, open()), (1, focus(1)), (1, key(1)), (1, key(1))]
-        );
+        assert_eq!(take_log(&fake), [(1, open(1)), (1, key(1))]);
     }
 
     #[test]
@@ -393,29 +369,19 @@ mod tests {
         let fake = Fake::default();
         let mut host = Host::new(fake.clone());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-        ]);
+        fake.0.borrow_mut().replies.extend([Ok(outcome("u"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
         take_log(&fake);
         host.discard();
         assert!(!host.state().composing);
-        fake.0
-            .borrow_mut()
-            .replies
-            .extend([ok(Reply::Cleared), Ok(outcome("u"))]);
+        fake.0.borrow_mut().replies.extend([Ok(outcome("u"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
-        assert_eq!(take_log(&fake), [(1, Command::Clear), (1, key(1))]);
+        assert_eq!(take_log(&fake), [(1, prepared(1, Prepare::Clear))]);
         host.blur();
         host.discard();
-        fake.0
-            .borrow_mut()
-            .replies
-            .extend([ok(Reply::Focused), Ok(outcome("u"))]);
+        fake.0.borrow_mut().replies.extend([Ok(outcome("u"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
-        assert_eq!(take_log(&fake), [(1, focus(2)), (1, key(2))]);
+        assert_eq!(take_log(&fake), [(1, focus(2))]);
     }
 
     #[test]
@@ -423,32 +389,23 @@ mod tests {
         let fake = Fake::default();
         let mut host = Host::new(fake.clone());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(Reply::Rejected(Rejection::NotFocused)),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-        ]);
+        fake.0.borrow_mut().replies.push_back(Ok(outcome("u")));
         host.key(Key::Character('u'), deadline()).unwrap();
-        assert_eq!(
-            take_log(&fake),
-            [
-                (1, open()),
-                (1, focus(1)),
-                (1, key(1)),
-                (1, focus(2)),
-                (1, key(2))
-            ]
-        );
+        take_log(&fake);
+        // 已有会话被其他宿主夺走焦点，拒绝的键未处理，第二次合并取焦点与本键。
+        fake.0
+            .borrow_mut()
+            .replies
+            .extend([Ok(Reply::Rejected(Rejection::NotFocused)), Ok(outcome("u"))]);
+        host.key(Key::Character('u'), deadline()).unwrap();
+        assert_eq!(take_log(&fake), [(1, key(1)), (1, focus(2))]);
         fake.0.borrow_mut().replies.extend([
             Ok(Reply::Rejected(Rejection::StaleFocus)),
-            ok(Reply::Focused),
             Ok(Reply::Rejected(Rejection::NotFocused)),
         ]);
         assert!(host.key(Key::Character('u'), deadline()).is_err());
         assert_eq!(fake.0.borrow().cancelled, 1);
-        assert_eq!(take_log(&fake).len(), 3);
+        assert_eq!(take_log(&fake), [(1, key(2)), (1, focus(3))]);
     }
 
     #[test]
@@ -456,30 +413,24 @@ mod tests {
         let fake = Fake::default();
         let mut host = Host::new(fake.clone());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-            Err(Error::Transport),
-        ]);
+        fake.0
+            .borrow_mut()
+            .replies
+            .extend([Ok(outcome("u")), Err(Error::Transport)]);
         host.key(Key::Character('u'), deadline()).unwrap();
         assert!(host.key(Key::Character('u'), deadline()).is_err());
         assert_eq!(fake.0.borrow().cancelled, 1);
         assert!(!host.state().composing);
         // 失败的键不在本层重发；下一键才在新连接上重建会话。
-        assert_eq!(take_log(&fake).len(), 4);
+        assert_eq!(take_log(&fake).len(), 2);
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("a")),
-        ]);
+        fake.0.borrow_mut().replies.extend([Ok(outcome("a"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
-        assert_eq!(take_log(&fake), [(2, open()), (2, focus(2)), (2, key(2))]);
+        assert_eq!(take_log(&fake), [(2, open(2))]);
     }
 
     #[test]
-    fn connect_failure_and_rejected_open_never_send_the_key() {
+    fn connect_failure_sends_nothing_and_rejected_open_is_not_retried() {
         let fake = Fake::default();
         let mut host = Host::new(fake.clone());
         fake.0.borrow_mut().fresh.push_back(Err(Error::Transport));
@@ -491,7 +442,7 @@ mod tests {
             .replies
             .push_back(Ok(Reply::Rejected(Rejection::SessionLimit)));
         assert!(host.key(Key::Character('u'), deadline()).is_err());
-        assert_eq!(take_log(&fake), [(1, open())]);
+        assert_eq!(take_log(&fake), [(1, open(1))]);
         assert_eq!(fake.0.borrow().cancelled, 2);
     }
 
@@ -502,11 +453,7 @@ mod tests {
         // 尚未打开会话：快照不可能属于当前连接，不发请求。
         assert!(host.select(5, 0, deadline()).unwrap().is_none());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-        ]);
+        fake.0.borrow_mut().replies.extend([Ok(outcome("u"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
         take_log(&fake);
         let select = |revision| Command::Select {
@@ -541,24 +488,19 @@ mod tests {
         // 待清空或刚重连时快照已过期；传输失败才作废连接。
         host.discard();
         assert!(host.select(7, 1, deadline()).unwrap().is_none());
-        fake.0
-            .borrow_mut()
-            .replies
-            .extend([ok(Reply::Cleared), Ok(outcome("u"))]);
+        fake.0.borrow_mut().replies.extend([Ok(outcome("u"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
         fake.0.borrow_mut().fresh.push_back(Ok(true));
         assert!(host.select(8, 1, deadline()).unwrap().is_none());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-            Err(Error::Transport),
-        ]);
+        fake.0
+            .borrow_mut()
+            .replies
+            .extend([Ok(outcome("u")), Err(Error::Transport)]);
         host.key(Key::Character('u'), deadline()).unwrap();
         assert!(host.select(9, 1, deadline()).is_err());
         assert_eq!(fake.0.borrow().cancelled, 1);
-        assert_eq!(take_log(&fake).len(), 6);
+        assert_eq!(take_log(&fake).len(), 3);
     }
 
     #[test]
@@ -570,27 +512,19 @@ mod tests {
         assert!(!host.ready(deadline()));
         assert!(take_log(&fake).is_empty());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-        ]);
+        fake.0.borrow_mut().replies.extend([Ok(outcome("u"))]);
         assert!(host.ready(deadline()));
         assert!(take_log(&fake).is_empty());
         host.key(Key::Character('u'), deadline()).unwrap();
-        // 预判时建立的连接在按键时复用：先 Open/Focus 再发键。
-        assert_eq!(take_log(&fake), [(1, open()), (1, focus(1)), (1, key(1))]);
+        // 预判时建立的连接在按键时复用：合并开会话/焦点与本键。
+        assert_eq!(take_log(&fake), [(1, open(1))]);
         // 预判时发现连接被重建：旧会话作废，判定状态回到默认，下一键重新打开会话。
         fake.0.borrow_mut().fresh.push_back(Ok(true));
         assert!(host.ready(deadline()));
         assert!(!host.state().composing);
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-        ]);
+        fake.0.borrow_mut().replies.extend([Ok(outcome("u"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
-        assert_eq!(take_log(&fake), [(2, open()), (2, focus(2)), (2, key(2))]);
+        assert_eq!(take_log(&fake), [(2, open(2))]);
     }
 
     #[test]
@@ -602,12 +536,10 @@ mod tests {
         assert!(!host.show(Panel::Settings, deadline()));
         assert!(fake.0.borrow().shown.is_empty());
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-            Ok(outcome("uu")),
-        ]);
+        fake.0
+            .borrow_mut()
+            .replies
+            .extend([Ok(outcome("u")), Ok(outcome("uu"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
         take_log(&fake);
         // 唤起成功不打断组合：下一键仍在原会话上直接发送。
@@ -621,12 +553,8 @@ mod tests {
         assert_eq!(fake.0.borrow().cancelled, 2);
         assert_eq!(fake.0.borrow().shown, [Panel::Settings, Panel::Lookup]);
         fake.0.borrow_mut().fresh.push_back(Ok(true));
-        fake.0.borrow_mut().replies.extend([
-            ok(Reply::Opened),
-            ok(Reply::Focused),
-            Ok(outcome("u")),
-        ]);
+        fake.0.borrow_mut().replies.extend([Ok(outcome("u"))]);
         host.key(Key::Character('u'), deadline()).unwrap();
-        assert_eq!(take_log(&fake), [(2, open()), (2, focus(2)), (2, key(2))]);
+        assert_eq!(take_log(&fake), [(2, open(2))]);
     }
 }

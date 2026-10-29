@@ -4,7 +4,7 @@ use crate::Result;
 use std::collections::BTreeMap;
 use tigertype_contracts::{
     Options,
-    protocol::{Command, Rejection, Reply, Request, Response},
+    protocol::{Command, Prepare, Rejection, Reply, Request, Response},
 };
 use tigertype_engine::{Dictionary, Session};
 const MAX_HOSTS: usize = 16;
@@ -120,7 +120,13 @@ impl<'a> Dispatcher<'a> {
             return Err(Rejection::OutOfOrder);
         }
         host.last_request = request.route.request_id;
-        if matches!(request.command, Command::Open { .. }) {
+        if matches!(
+            request.command,
+            Command::Key {
+                prepare: Prepare::Open,
+                ..
+            }
+        ) {
             if request.route.session_id <= host.last_session {
                 return Err(Rejection::SessionReused);
             }
@@ -135,45 +141,20 @@ impl<'a> Dispatcher<'a> {
     }
     fn execute(&mut self, host: u64, request: &Request) -> Result<Reply> {
         let session = request.route.session_id;
-        if let Command::Focus { epoch, focused } = request.command {
-            if epoch <= self.hosts[&host].last_focus {
+        if let Command::Key {
+            epoch,
+            prepare: prepare @ (Prepare::Open | Prepare::Focus),
+            ..
+        } = request.command
+        {
+            // 可拒绝的代次检查先于新建/清空，拒绝的按键没有处理。
+            if epoch == 0 || epoch <= self.hosts[&host].last_focus {
                 return Ok(Reply::Rejected(Rejection::StaleFocus));
             }
-            self.hosts.get_mut(&host).unwrap().last_focus = epoch;
-            // 新焦点取消上一个未上屏组合；迟到的旧宿主失焦不能清掉其他宿主的候选。
-            if focused
-                || self
-                    .active
-                    .is_some_and(|f| f.host == host && f.session == session)
-            {
-                if let Some(old) = self.active.take()
-                    && (old.host != host || old.session != session)
-                {
-                    self.hosts
-                        .get_mut(&old.host)
-                        .unwrap()
-                        .sessions
-                        .get_mut(&old.session)
-                        .unwrap()
-                        .0
-                        .clear()?;
-                }
-                self.active = focused.then_some(Focus {
-                    host,
-                    session,
-                    epoch,
-                });
+            if prepare == Prepare::Open {
+                self.open(host, session);
             }
-            let entry = self
-                .hosts
-                .get_mut(&host)
-                .unwrap()
-                .sessions
-                .get_mut(&session)
-                .unwrap();
-            entry.0.clear()?;
-            adopt(entry, self.options, self.settings)?;
-            return Ok(Reply::Focused(entry.0.snapshot()));
+            self.focus(host, session, epoch)?;
         }
         if matches!(
             request.command,
@@ -192,13 +173,6 @@ impl<'a> Dispatcher<'a> {
         }
         let owner = self.hosts.get_mut(&host).ok_or("宿主准入状态不一致")?;
         Ok(match command {
-            // 宿主携带的选项只是占位：以后台当前设置打开，输入路径不读盘。
-            Command::Open { .. } => {
-                let engine = Session::new(self.dictionary, self.options);
-                let state = engine.snapshot();
-                owner.sessions.insert(session, (engine, self.settings));
-                Reply::Opened(state)
-            }
             Command::Close => {
                 owner.sessions.remove(&session);
                 if self
@@ -217,8 +191,13 @@ impl<'a> Dispatcher<'a> {
                 adopt(entry, self.options, self.settings)?;
                 let engine = &mut entry.0;
                 match command {
-                    Command::Key { key, .. } => Reply::Key(engine.process(key)?),
-                    Command::Clear => Reply::Cleared(engine.clear()?),
+                    Command::Key { key, prepare, .. } => {
+                        // 已确认焦点/代次后才清空，省掉中间快照和一次往返。
+                        if prepare == Prepare::Clear {
+                            engine.clear()?;
+                        }
+                        Reply::Key(engine.process(key)?)
+                    }
                     Command::Configure { options } => Reply::Configured(engine.configure(options)?),
                     Command::Select {
                         revision, index, ..
@@ -230,6 +209,42 @@ impl<'a> Dispatcher<'a> {
                 }
             }
         })
+    }
+    /// 新会话总是使用后台当前设置；宿主不读盘，也无从携带选项。
+    fn open(&mut self, host: u64, session: u64) {
+        self.hosts.get_mut(&host).unwrap().sessions.insert(
+            session,
+            (Session::new(self.dictionary, self.options), self.settings),
+        );
+    }
+    /// 取得焦点：取消其他会话未上屏的组合，清空本会话并采用新设置。
+    fn focus(&mut self, host: u64, session: u64, epoch: u64) -> Result<()> {
+        self.hosts.get_mut(&host).unwrap().last_focus = epoch;
+        if let Some(old) = self.active.replace(Focus {
+            host,
+            session,
+            epoch,
+        }) && (old.host != host || old.session != session)
+        {
+            self.hosts
+                .get_mut(&old.host)
+                .unwrap()
+                .sessions
+                .get_mut(&old.session)
+                .unwrap()
+                .0
+                .clear()?;
+        }
+        let entry = self
+            .hosts
+            .get_mut(&host)
+            .unwrap()
+            .sessions
+            .get_mut(&session)
+            .unwrap();
+        entry.0.clear()?;
+        adopt(entry, self.options, self.settings)?;
+        Ok(())
     }
     /// 可回收：非当前焦点且所有会话都无组合；回收后宿主下次请求重连并重新打开会话，不丢未上屏内容。
     pub fn idle(&self, host: u64) -> bool {

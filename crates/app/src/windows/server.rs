@@ -377,12 +377,20 @@ impl<'a> Server<'a> {
                     .div_ceil(1_000_000)
                     .min((u32::MAX - 1) as u128) as u32
             });
-            let events = [
-                self.runtime.completion_event().as_raw_handle(),
-                self.reload.event().as_raw_handle(),
-            ];
-            // SAFETY: Runtime 与热重载交接槽持有两个事件；完成、热重载与最近期限共用一次等待，不等待宿主进程句柄。
-            if unsafe { WaitForMultipleObjects(2, events.as_ptr(), 0, timeout) } == WAIT_FAILED {
+            // 固定最多 18 个事件：16 个内核 I/O 完成、取消尾部回收、设置重载，不逐连接创建线程。
+            // 管道事件为自动复位且只能有一个等待者：已移出 slots 的连接其 Pending 已交回收等待，不得再放进本数组。
+            let mut events = [std::ptr::null_mut(); HOST_SLOTS + 2];
+            events[0] = self.runtime.completion_event().as_raw_handle();
+            events[1] = self.reload.event().as_raw_handle();
+            let mut count = 2;
+            for slot in self.slots.iter().flatten() {
+                events[count] = slot.end.pipe.completion_event().as_raw_handle();
+                count += 1;
+            }
+            // SAFETY: 所有句柄由当前反应器持有，等待期间不销毁；事件与最近期限共用一次阻塞等待。
+            if unsafe { WaitForMultipleObjects(count as u32, events.as_ptr(), 0, timeout) }
+                == WAIT_FAILED
+            {
                 return Err(std::io::Error::last_os_error().into());
             }
         }
@@ -463,8 +471,8 @@ mod tests {
     use std::process::Command as ProcessCommand;
     use tigertype_backend::{Data as EngineData, Entry};
     use tigertype_contracts::{
-        OutputForm,
-        protocol::{Command, Reply},
+        Key, OutputForm,
+        protocol::{Command, Prepare, Reply},
     };
     use tigertype_ipc::service::Client;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -531,21 +539,23 @@ mod tests {
                     taskbar.take() == Ok(Some(false))
                 });
                 assert!(restored);
-                // 保存交接之后发出的 Open 一定拿到新设置，无需重启后台。
+                // 保存交接之后新开的会话一定拿到新设置，无需重启后台。
                 reload.set(changed).unwrap();
-                let Reply::Opened(state) = client
+                let Reply::Key(outcome) = client
                     .request(
                         1,
-                        Command::Open {
-                            options: Options::default(),
+                        Command::Key {
+                            key: Key::Space,
+                            epoch: 1,
+                            prepare: Prepare::Open,
                         },
                         deadline(),
                     )
                     .unwrap()
                 else {
-                    panic!("需要 Opened 回复");
+                    panic!("需要按键回复");
                 };
-                assert_eq!(state.options, changed);
+                assert_eq!(outcome.state.options, changed);
                 client.stop_backend(deadline()).unwrap();
             });
             server.run()?;

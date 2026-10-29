@@ -1,4 +1,4 @@
-//! 本机、单对端命名管道；一个 Runtime 共用最多一个完成线程，不按连接创建线程。
+//! 本机、单对端命名管道；正常输入直接等待内核事件，Runtime 共用至多一个取消回收线程。
 //! 默认入口拒绝 DLL；显式驻留入口锁定模块至宿主退出，关闭排空不宣称允许热卸载。
 
 mod io;
@@ -62,7 +62,7 @@ struct Pool {
 }
 impl Drop for Pool {
     fn drop(&mut self) {
-        // SAFETY: 所有 I/O 注册均已释放；Windows 在最后回调退出后回收线程池。
+        // SAFETY: 所有取消等待均已释放；Windows 在最后回调退出后回收线程池。
         unsafe {
             CloseThreadpool(self.pool);
         }
@@ -106,7 +106,7 @@ impl Runtime {
         }
         // SAFETY: 成功创建的事件由唯一 RAII 所有者回收，覆盖线程池创建失败路径。
         let drained = unsafe { OwnedHandle::from_raw_handle(drained) };
-        // SAFETY: 自动复位事件合并完成通知；反应器被唤醒后检查所有有界在途操作。
+        // SAFETY: 自动复位事件合并取消尾部回收通知，反应器据此补建失效监听。
         let wake = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
         if wake.is_null() {
             return Err(std_io::Error::last_os_error().into());
@@ -118,7 +118,7 @@ impl Runtime {
         if pool == 0 {
             return Err(std_io::Error::last_os_error().into());
         }
-        // SAFETY: 固定最多一个完成线程，所有回调只投递结果，不阻塞或调用引擎。
+        // SAFETY: 固定最多一个取消回收线程，回调只释放已完成操作，不阻塞或调用引擎。
         unsafe {
             SetThreadpoolThreadMaximum(pool, 1);
         }
@@ -146,7 +146,7 @@ impl Runtime {
             })?;
         Ok(Slot(self.0.clone()))
     }
-    /// 固定反应器只等待此事件与最近期限，不等待宿主进程句柄，不受 64 个等待对象上限约束。
+    /// 取消尾部回收事件；固定反应器另等各 Pipe 的内核事件和设置事件，最多 18 个等待对象。
     pub fn completion_event(&self) -> BorrowedHandle<'_> {
         self.0.wake.as_handle()
     }
@@ -168,7 +168,7 @@ impl Runtime {
                 _ => return Err(std_io::Error::last_os_error().into()),
             }
         }
-        // 成功只代表资源所有权已排空；完成线程仍可能处于返回尾部，由 EXE 或 DLL PIN 保护。
+        // 成功只代表资源所有权已排空；取消回调仍可能处于返回尾部，由 EXE 或 DLL PIN 保护。
         Ok(())
     }
 
@@ -241,7 +241,7 @@ impl Runtime {
 
 pub struct Listener(Pipe);
 impl Listener {
-    /// 一个完成线程可同时维护所有有界监听，不为连接创建线程。
+    /// 挂起可取消的内核监听，不为连接创建线程。
     pub fn start_accept(mut self) -> Result<(Pipe, Pending)> {
         let pending = self.0.submit(Kind::Connect, Vec::new())?;
         Ok((self.0, pending))
@@ -268,6 +268,10 @@ impl Drop for Pipe {
 }
 
 impl Pipe {
+    /// 每连接的内核完成事件；反应器直接等待它，不必等完成线程先被调度。
+    pub fn completion_event(&self) -> BorrowedHandle<'_> {
+        self.io.ready.as_handle()
+    }
     /// 服务端接纳：只核对同会话；不打开宿主进程，宿主断开由常驻读失败发现。
     pub fn verify_client(&self) -> Result<()> {
         self.io

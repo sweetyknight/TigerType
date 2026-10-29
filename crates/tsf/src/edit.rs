@@ -5,7 +5,7 @@ use std::{
     cell::{Cell, RefCell},
     mem::ManuallyDrop,
     panic::{AssertUnwindSafe, catch_unwind},
-    rc::Rc,
+    rc::{Rc, Weak},
     time::{Duration, Instant},
 };
 use tigertype_contracts::{KeyOutcome, MAX_TEXT_BYTES};
@@ -17,11 +17,16 @@ use windows::{
     core::{Error, HRESULT, IUnknown, Interface, Ref, Result, implement},
 };
 
-/// 失焦取消只处理本地文档，不等待后台；排队的取消与点击超过此期限才开始即作废。
+/// 失焦取消只处理本地文档，不等待后台；排队的取消与点击超过此期限才开始即作废（只读定位不受此限）。
 const CANCEL_BUDGET: Duration = Duration::from_millis(50);
 const QUEUED: Duration = Duration::from_secs(2);
-/// 点击会话的后台预算从会话开始计算，与按键回调同为 50ms。
-const SELECT_BUDGET: Duration = Duration::from_millis(50);
+/// 排队的点击/定位会话从开始执行时计算预算，与按键回调同为 50ms。
+const SESSION_BUDGET: Duration = Duration::from_millis(50);
+
+/// 与候选摆放共用有界矩形规则；全零是宿主尚未完成布局的特殊值。
+fn usable_rect(rect: RECT) -> bool {
+    rect != RECT::default() && tigertype_frontend::bounded(&crate::candidate::portable(rect))
+}
 
 /// 后台交换的结论；决定会话是写入、原样放弃，还是撤回自有组合。
 // 每个会话只移动一次，不值得为缩小枚举而分配。
@@ -73,6 +78,8 @@ pub struct Editor {
     /// 宿主终止当前组合时的通知（收起候选窗）；不在回调内访问编辑状态。
     ended: Rc<dyn Fn()>,
     busy: Cell<bool>,
+    /// 只保留一个待执行定位；弱令牌随回调完成或宿主丢弃请求释放，不依赖 COM 对象何时析构。
+    locating: RefCell<Weak<()>>,
     /// 已登记的宿主布局 sink cookie；随编辑器释放注销。
     layout: Cell<Option<u32>>,
     /// 最近一次取得的组合矩形，只在本上下文内作摆放退路。
@@ -152,26 +159,35 @@ struct EditSession {
 impl ITfEditSession_Impl for EditSession_Impl {
     fn DoEditSession(&self, cookie: u32) -> Result<()> {
         // 所有系统 COM 回调截住 panic；迟到或重复回调在任何文档访问之前拒绝。
-        catch_unwind(AssertUnwindSafe(|| {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            // 只读定位在执行时读取最新组合，排队再久也不会写入旧结果，因此不按排队期限作废，
+            // 否则排队期间被合并掉的布局通知会随过期一起丢失。
             if !self.valid.replace(false)
-                || Instant::now() >= self.deadline.get()
+                || (Instant::now() >= self.deadline.get() && !matches!(self.action, Action::Locate))
                 || self.epoch.get() != self.expected_epoch
                 || (self.expected_epoch == 0 && !matches!(self.action, Action::Cancel))
             {
                 // 过期或失效的排队会话不碰文档，但仍须通知结束，否则点击锁不会解除。
-                self.completion.borrow_mut().report.error = Some(E_FAIL);
-                self.finish();
                 return Err(E_FAIL.into());
             }
             if let Some(budget) = self.budget {
                 self.deadline.set(Instant::now() + budget);
             }
             self.completion.borrow_mut().ran = true;
-            let result = self.execute(cookie);
-            if result.is_err() && self.completion.borrow().report.exchanged {
-                // 后台已有结论而写入失败：同一会话撤回仍一致的自有组合，已提交文字不动。
-                let _ = self.withdraw(cookie);
-            }
+            self.execute(cookie)
+        }))
+        .unwrap_or_else(|_| Err(E_FAIL.into()));
+        if result.is_err()
+            && self
+                .completion
+                .try_borrow()
+                .is_ok_and(|completion| completion.report.exchanged)
+        {
+            // 执行失败或 panic 都只撤回仍一致的未提交组合；清理失败不能跳过在途令牌释放。
+            let _ = catch_unwind(AssertUnwindSafe(|| self.withdraw(cookie)));
+        }
+        // 执行 panic 也必须释放点击/定位的在途令牌；结束通知本身同样不能穿过 COM 边界。
+        catch_unwind(AssertUnwindSafe(|| {
             if let Err(error) = &result {
                 self.completion.borrow_mut().report.error = Some(error.code());
             }
@@ -317,19 +333,29 @@ impl EditSession_Impl {
     }
     /// 组合位置与视图窗口只用于摆放候选窗；取不到不影响已完成的写入。
     fn locate(&self, range: &ITfRange, cookie: u32) {
+        self.completion.borrow_mut().report.recent = self.recent.get();
+        if Instant::now() >= self.deadline.get() {
+            return;
+        }
         // SAFETY: 同一编辑会话内读取当前视图与布局，失败只是缺少位置。
         let Ok(view) = (unsafe { self.context.GetActiveView() }) else {
             return;
         };
         let extent = |target: &ITfRange| {
+            if Instant::now() >= self.deadline.get() {
+                return None;
+            }
             let (mut rect, mut clipped) = (RECT::default(), false.into());
             // SAFETY: target 属于本会话的自有组合，cookie 有效；输出为本地值。
             let found = unsafe { view.GetTextExt(cookie, target, &mut rect, &mut clipped) };
-            // 全零矩形是宿主“不知道”的回答，不当作位置。
-            found.ok().filter(|_| rect != RECT::default()).map(|_| rect)
+            // 全零、倒置或越界矩形都不可缓存，否则后续退路会一直被无效位置挡住。
+            found.ok().filter(|_| usable_rect(rect)).map(|_| rect)
         };
         // 整段组合取不到时退到组合起点：有的宿主只给得出插入点位置。
         let caret = extent(range).or_else(|| {
+            if Instant::now() >= self.deadline.get() {
+                return None;
+            }
             // SAFETY: 复制自有组合范围，cookie 有效。
             let start = unsafe { range.Clone() }.ok()?;
             // SAFETY: 折叠只改副本，不动组合本身。
@@ -339,15 +365,31 @@ impl EditSession_Impl {
         if caret.is_some() {
             self.recent.set(caret);
         }
+        // 不持有报告借用调用宿主 COM，允许宿主同步重入布局通知。
+        // 已超时不再发起额外查询，窗口层仍可取本线程焦点窗口。
+        let owner = if Instant::now() < self.deadline.get() {
+            // SAFETY: 视图由当前编辑上下文持有，只读窗口属性。
+            unsafe { view.GetWnd() }.unwrap_or_default()
+        } else {
+            HWND::default()
+        };
+        // 已有本次或最近的有效坐标时，区域退路不会被使用；不要让慢宿主阻塞首帧。
+        let area = if caret.is_none()
+            && self.recent.get().is_none()
+            && Instant::now() < self.deadline.get()
+        {
+            // SAFETY: 只读视图区域；仅在确需最后退路且预算仍有余量时调用。
+            unsafe { view.GetScreenExt() }
+                .ok()
+                .filter(|rect| usable_rect(*rect))
+        } else {
+            None
+        };
         let mut report = self.completion.borrow_mut();
-        // SAFETY: 只读视图属性。
-        report.report.owner = unsafe { view.GetWnd() }.unwrap_or_default();
+        report.report.owner = owner;
         report.report.caret = caret;
         report.report.recent = self.recent.get();
-        // SAFETY: 只读视图在屏幕上的范围。
-        report.report.area = unsafe { view.GetScreenExt() }
-            .ok()
-            .filter(|rect| *rect != RECT::default());
+        report.report.area = area;
     }
     fn execute(&self, cookie: u32) -> Result<()> {
         if matches!(self.action, Action::Locate) {
@@ -588,6 +630,7 @@ impl Editor {
             composition_generation: Rc::new(Cell::new(0)),
             ended: Rc::new(ended),
             busy: Cell::new(false),
+            locating: RefCell::new(Weak::new()),
             layout: Cell::new(None),
             recent: Rc::new(Cell::new(None)),
         })
@@ -611,14 +654,27 @@ impl Editor {
     }
     /// 布局变化后重取组合位置：只读会话，宿主空闲时同步执行，否则排队（`TF_ES_ASYNCDONTCARE`）。
     /// 组合仍属本服务且未被改写才定位；finish 在会话被调起时收到报告，被拒绝时不调用。
+    /// 在途期间的通知并入待执行的那一个：它执行时才读组合，且不按排队期限作废，不会丢位置。
     pub fn locate(&self, finish: impl FnOnce(EditReport) + 'static) {
-        let _ = self.run(
+        if self.epoch.get() == 0 || self.locating.borrow().upgrade().is_some() {
+            return;
+        }
+        let pending = Rc::new(());
+        *self.locating.borrow_mut() = Rc::downgrade(&pending);
+        let request = self.run(
             Action::Locate,
-            Instant::now() + QUEUED,
+            Instant::now() + SESSION_BUDGET,
             false,
-            None,
-            Some(Box::new(finish)),
+            Some(SESSION_BUDGET),
+            Some(Box::new(move |report| {
+                // 回调会读取最新组合；先释放令牌，宿主仍持有已完成会话也不会挡住后续通知。
+                drop(pending);
+                finish(report);
+            })),
         );
+        if !request.queued {
+            *self.locating.borrow_mut() = Weak::new();
+        }
     }
     /// 以 IUnknown 比较 COM 身份，不依赖宿主每次返回同一个接口指针。
     pub fn is(&self, context: &ITfContext) -> bool {
@@ -638,6 +694,7 @@ impl Editor {
     /// 失焦先使旧回调代次失效；取消只可另在原上下文的合法编辑会话中执行。
     pub fn invalidate(&self) {
         self.epoch.set(0);
+        *self.locating.borrow_mut() = Weak::new();
     }
     /// 按键会话（同步）：文档核对通过后才调用 exchange 取得后台结论并写入。
     /// 错误不代表未写入：调用方须检查 exchanged/committed，不重放。
@@ -664,7 +721,7 @@ impl Editor {
             action,
             Instant::now() + QUEUED,
             false,
-            Some(SELECT_BUDGET),
+            Some(SESSION_BUDGET),
             Some(Box::new(finish)),
         )
         .queued

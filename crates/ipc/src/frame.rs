@@ -60,7 +60,7 @@ mod tests {
                 request_id: 1,
                 session_id: 1,
             },
-            command: Command::Clear,
+            command: Command::Close,
         }))
         .unwrap()
     }

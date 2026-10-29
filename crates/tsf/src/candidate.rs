@@ -437,6 +437,9 @@ impl Fonts {
     }
 }
 
+#[cfg(test)]
+type BeforeNotify = Box<dyn Fn(u32)>;
+
 pub struct Popup {
     pub(crate) hwnd: HWND,
     pub(crate) view: RefCell<View>,
@@ -449,6 +452,9 @@ pub struct Popup {
     root: RefCell<Option<IRawElementProviderSimple>>,
     /// 测试保持隐藏，不在桌面显示窗口；其余行为不变。
     quiet: bool,
+    /// 测试在外部通知发出前检查首帧已画完，不把通知时间误当成绘制时间。
+    #[cfg(test)]
+    before_notify: RefCell<Option<BeforeNotify>>,
 }
 
 // SAFETY: 回调截住 panic；只按句柄在本线程登记表中查找候选窗，其余消息交系统默认处理。
@@ -541,6 +547,8 @@ impl Popup {
             click: Box::new(click),
             root: RefCell::new(None),
             quiet,
+            #[cfg(test)]
+            before_notify: RefCell::new(None),
         });
         POPUPS.with(|popups| {
             popups
@@ -966,8 +974,18 @@ impl Popup {
         }
         // SAFETY: 读取本窗口所在上下文的 DPI；未声明感知的宿主恒为 96。
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96);
+        // 布局通知只移动同快照且 DPI 未变时复用测量结果，不重新量每行文本。
+        let remeasure = !same || self.fonts.get().dpi != dpi;
         self.ensure_fonts(dpi, state.options.candidate_font)?;
-        let layout = self.measure(state)?;
+        let layout = if remeasure {
+            self.measure(state)?
+        } else {
+            self.view
+                .try_borrow()
+                .map_err(|_| Error::from(E_FAIL))?
+                .layout
+                .clone()
+        };
         let size = layout.size;
         let border = colors(state.options.palette()).border;
         if self.rounded && self.border.get() != Some(border) {
@@ -1044,16 +1062,16 @@ impl Popup {
                 )?;
             }
         }
+        // 先画首帧再通知外部监听者；读屏器或宿主 hook 变慢时不能把空白边框留在屏幕上。
+        // SAFETY: 句柄属于本线程候选窗，UpdateWindow 只同步处理该窗口的无状态 WM_PAINT。
+        unsafe {
+            let _ = UpdateWindow(self.hwnd);
+        }
         if shown && visible {
             self.notify(EVENT_OBJECT_IME_CHANGE);
         } else {
             self.notify(EVENT_OBJECT_IME_SHOW);
             self.raise(|| Some(self.root()), UIA_MenuOpenedEventId);
-        }
-        // 逐键刷新必须在同一回调内完成，避免候选窗已显示而内容仍为空的可见窗口。
-        // SAFETY: 句柄属于本线程候选窗，UpdateWindow 只同步处理该窗口的无状态 WM_PAINT。
-        unsafe {
-            let _ = UpdateWindow(self.hwnd);
         }
         if let Some(index) = state.highlighted.filter(|_| !same) {
             self.raise(
@@ -1176,6 +1194,10 @@ impl Popup {
         self.hit(at).map(usize::from)
     }
     fn notify(&self, event: u32) {
+        #[cfg(test)]
+        if let Some(notify) = self.before_notify.borrow().as_ref() {
+            notify(event);
+        }
         // SAFETY: 为本窗口客户区发出 IME 显示/隐藏/变化事件。
         unsafe { NotifyWinEvent(event, self.hwnd, OBJID_CLIENT.0, CHILDID_SELF as i32) };
     }

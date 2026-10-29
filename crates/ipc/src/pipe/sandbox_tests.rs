@@ -15,10 +15,7 @@ use std::{
     os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
 };
-use tigertype_contracts::{
-    InputState,
-    protocol::{Command, Reply, Response, Route},
-};
+use tigertype_contracts::protocol::{Command, Reply, Response, Route};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, ERROR_ACCESS_DENIED},
     Security::{
@@ -385,7 +382,7 @@ fn request() -> Request {
             request_id: 1,
             session_id: 1,
         },
-        command: Command::Clear,
+        command: Command::Close,
     }
 }
 
@@ -442,7 +439,7 @@ fn run_sandbox(kind: Sandbox) -> Result<()> {
         pipe.send_frame(
             &crate::encode(&Message::Response(Response {
                 route: request().route,
-                reply: Reply::Cleared(InputState::default()),
+                reply: Reply::Closed,
             }))?,
             Instant::now() + Duration::from_secs(5),
         )?;
@@ -544,6 +541,6 @@ fn sandbox_worker() -> Result<()> {
     }
     let mut pipe = connected?;
     let reply = pipe.transact(&mut ClientState::new(5)?, request(), deadline)?;
-    assert_eq!(reply.reply, Reply::Cleared(InputState::default()));
+    assert_eq!(reply.reply, Reply::Closed);
     Ok(())
 }

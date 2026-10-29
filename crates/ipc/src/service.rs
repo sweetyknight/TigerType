@@ -156,7 +156,7 @@ impl Link {
             client: None,
         }
     }
-    /// 返回 true 表示刚建立连接：宿主编号、请求序号与会话均为新值，调用方须先 Open/Focus 再发按键。
+    /// 返回 true 表示刚建立连接：宿主编号、序号与会话均为新值，首键须携带 Prepare::Open。
     /// 连接失败直接返回错误，由调用方放行原键；不在此循环重试。
     pub fn ensure(&mut self, runtime: &Runtime, deadline: Instant) -> Result<(&mut Client, bool)> {
         let fresh = !self.client.as_mut().is_some_and(Client::usable);

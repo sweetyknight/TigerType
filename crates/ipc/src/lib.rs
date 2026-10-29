@@ -31,8 +31,9 @@ use tigertype_contracts::{
 /// v11 配色主题加入玫红（高亮候选只换字色）；加入全角开关（`ToggleFullShape` 键与输入状态 `full_shape`）。旧 DLL 无法解析，所以升版。
 /// v12 选项加入单字/词输入模式；旧 DLL 无法解析，所以升版。
 /// v13 选项加入每页候选数（3–9），候选页大小随之可变；旧 DLL 无法解析，所以升版。
+/// v14 按键携带互斥前置操作，开会话/焦点/清空与本键一次往返，删除单独的 Open/Focus/Clear 命令，旧帧直接拒绝。
 /// 旧协议直接拒绝。
-pub const VERSION: u16 = 13;
+pub const VERSION: u16 = 14;
 
 /// 跨进程信封：握手、管理信号与会话请求/回复。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,12 +181,9 @@ pub fn decode_response(frame: &[u8], expected: &Request) -> Result<Response> {
     }
     if !matches!(
         (&expected.command, &response.reply),
-        (Command::Open { .. }, Reply::Opened(_))
-            | (Command::Key { .. }, Reply::Key(_))
+        (Command::Key { .. }, Reply::Key(_))
             | (Command::Select { .. }, Reply::Key(_))
-            | (Command::Focus { .. }, Reply::Focused(_))
             | (Command::Configure { .. }, Reply::Configured(_))
-            | (Command::Clear, Reply::Cleared(_))
             | (Command::Close, Reply::Closed)
             | (_, Reply::Rejected(_))
     ) {
@@ -281,10 +279,8 @@ fn validate(message: &Message) -> Result<()> {
                 } if revision == 0 || index as usize >= MAX_CANDIDATES => {
                     return Err(Error::Invalid("候选选择的快照或索引非法"));
                 }
-                Command::Key { epoch: 0, .. }
-                | Command::Select { epoch: 0, .. }
-                | Command::Focus { epoch: 0, .. } => {
-                    return Err(Error::Invalid("按键、选字和焦点必须绑定焦点代次"));
+                Command::Key { epoch: 0, .. } | Command::Select { epoch: 0, .. } => {
+                    return Err(Error::Invalid("按键和选字必须绑定焦点代次"));
                 }
                 _ => {}
             }
@@ -292,10 +288,7 @@ fn validate(message: &Message) -> Result<()> {
         Message::Response(response) => {
             route(&response.route)?;
             match &response.reply {
-                Reply::Opened(value)
-                | Reply::Cleared(value)
-                | Reply::Configured(value)
-                | Reply::Focused(value) => state(value)?,
+                Reply::Configured(value) => state(value)?,
                 Reply::Key(outcome) => {
                     state(&outcome.state)?;
                     if let Some(commit) = &outcome.commit {

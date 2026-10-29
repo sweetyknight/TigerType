@@ -196,6 +196,15 @@ fn system_hidden_or_covered_popup_recovers_without_stealing_focus() {
             assert_eq!(GetFocus(), owner);
         }
         let popup = Popup::new(|_, _| {}, false).unwrap();
+        let watched = Rc::downgrade(&popup);
+        *popup.before_notify.borrow_mut() = Some(Box::new(move |event| {
+            if matches!(event, EVENT_OBJECT_IME_SHOW | EVENT_OBJECT_IME_CHANGE) {
+                let popup = watched.upgrade().unwrap();
+                // SAFETY: 仅检查私有桌面测试窗口，发送通知时必须已无待绘制区域。
+                let dirty = unsafe { GetUpdateRect(popup.hwnd, None, false) }.as_bool();
+                assert!(!dirty, "外部通知不能先于首帧绘制");
+            }
+        }));
         let mut sample = state(2, 0);
         popup.show(&sample, CARET, owner).unwrap();
         let serial = popup.view.borrow().serial;

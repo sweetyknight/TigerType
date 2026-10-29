@@ -138,6 +138,7 @@ mod tests {
             command: Command::Key {
                 epoch: 1,
                 key: tigertype_contracts::Key::Space,
+                prepare: tigertype_contracts::protocol::Prepare::Keep,
             },
         }
     }

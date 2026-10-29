@@ -362,7 +362,7 @@ impl Active {
         state.composing &= composing;
         state.consumes(key).then_some(key)
     }
-    /// 取得该上下文的编辑器；换上下文时旧编辑器先失效并取消其自有组合，后台下次按键先报告焦点。
+    /// 取得该上下文的编辑器；换上下文时旧编辑器先失效并取消其自有组合，下次按键携带 Prepare::Focus。
     fn focus(self: &Rc<Self>, context: &ITfContext) -> Result<Rc<Editor>> {
         if let Some(editor) = self.current_editor().filter(|editor| editor.is(context)) {
             return Ok(editor);

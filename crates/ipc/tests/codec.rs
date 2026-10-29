@@ -21,7 +21,7 @@ fn request(command: Command) -> Request {
 
 fn reply(value: Reply) -> Message {
     Message::Response(Response {
-        route: request(Command::Clear).route,
+        route: request(Command::Close).route,
         reply: value,
     })
 }
@@ -51,7 +51,7 @@ fn handshake_rejects_zero_identity_and_cannot_be_input_replies() {
         assert!(encode(&message).is_err());
         assert!(decode(&raw(&serde_json::to_vec(&message).unwrap())).is_err());
     }
-    let expected = request(Command::Clear);
+    let expected = request(Command::Close);
     for message in [
         Message::Hello,
         Message::Stopped,
@@ -66,10 +66,11 @@ fn handshake_rejects_zero_identity_and_cannot_be_input_replies() {
 
 #[test]
 fn fixed_wire_bytes_do_not_depend_on_pointer_width() {
-    let body = br#"{"type":"request","value":{"route":{"generation":18446744073709551615,"request_id":2,"session_id":3},"command":{"type":"key","value":{"key":{"type":"character","value":"u"},"epoch":1}}}}"#;
+    let body = br#"{"type":"request","value":{"route":{"generation":18446744073709551615,"request_id":2,"session_id":3},"command":{"type":"key","value":{"key":{"type":"character","value":"u"},"epoch":1,"prepare":"keep"}}}}"#;
     let expected = Message::Request(request(Command::Key {
         epoch: 1,
         key: tigertype_contracts::Key::Character('u'),
+        prepare: tigertype_contracts::protocol::Prepare::Keep,
     }));
     assert_eq!(encode(&expected).unwrap(), raw(body));
     assert_eq!(decode(&raw(body)).unwrap(), expected);
@@ -84,12 +85,12 @@ fn fixed_wire_bytes_do_not_depend_on_pointer_width() {
         ..Default::default()
     };
     assert_eq!(
-        decode(&encode(&reply(Reply::Opened(state.clone()))).unwrap()).unwrap(),
-        reply(Reply::Opened(state.clone()))
+        decode(&encode(&reply(Reply::Configured(state.clone()))).unwrap()).unwrap(),
+        reply(Reply::Configured(state.clone()))
     );
     // 超出 x86 范围的合法 JSON 在两个架构上都必须拒绝。
     state.page_index = 0;
-    let oversized = serde_json::to_string(&reply(Reply::Opened(state)))
+    let oversized = serde_json::to_string(&reply(Reply::Configured(state)))
         .unwrap()
         .replace("\"page_index\":0", "\"page_index\":4294967296");
     assert!(decode(&raw(oversized.as_bytes())).is_err());
@@ -133,14 +134,26 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
             generation: 7,
             host: 8,
         },
-        Message::Request(request(Command::Open {
-            options: Default::default(),
-        })),
         Message::Request(request(Command::Key {
             epoch: 1,
             key: tigertype_contracts::Key::Character('𠀀'),
+            prepare: tigertype_contracts::protocol::Prepare::Keep,
         })),
-        Message::Request(request(Command::Clear)),
+        Message::Request(request(Command::Key {
+            epoch: 1,
+            key: tigertype_contracts::Key::Space,
+            prepare: tigertype_contracts::protocol::Prepare::Open,
+        })),
+        Message::Request(request(Command::Key {
+            epoch: 2,
+            key: tigertype_contracts::Key::Backspace,
+            prepare: tigertype_contracts::protocol::Prepare::Focus,
+        })),
+        Message::Request(request(Command::Key {
+            epoch: 2,
+            key: tigertype_contracts::Key::Character('u'),
+            prepare: tigertype_contracts::protocol::Prepare::Clear,
+        })),
         Message::Request(request(Command::Configure {
             options: Default::default(),
         })),
@@ -150,18 +163,7 @@ fn requests_and_all_replies_round_trip_owned_unicode() {
             index: 0,
         })),
         Message::Request(request(Command::Close)),
-        Message::Request(request(Command::Focus {
-            epoch: 1,
-            focused: true,
-        })),
-        Message::Request(request(Command::Focus {
-            epoch: 2,
-            focused: false,
-        })),
-        reply(Reply::Opened(state.clone())),
-        reply(Reply::Configured(state.clone())),
-        reply(Reply::Focused(state.clone())),
-        reply(Reply::Cleared(state)),
+        reply(Reply::Configured(state)),
         reply(Reply::Key(outcome)),
         reply(Reply::Closed),
         reply(Reply::Rejected(Rejection::SessionLimit)),
@@ -207,6 +209,7 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
     let original = serde_json::to_string(&Message::Request(request(Command::Key {
         epoch: 1,
         key: tigertype_contracts::Key::Character('u'),
+        prepare: tigertype_contracts::protocol::Prepare::Keep,
     })))
     .unwrap();
     for (from, to) in [
@@ -221,23 +224,28 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
         ("\"value\":\"u\"", "\"value\":\"u\",\"extra\":true"),
         ("\"session_id\":3", "\"session_id\":3,\"extra\":true"),
         ("\"type\":\"key\"", "\"type\":\"unknown\""),
+        ("\"prepare\":\"keep\"", "\"prepare\":\"unknown\""),
+        (",\"prepare\":\"keep\"", ""),
     ] {
         let changed = original.replace(from, to);
         assert_ne!(changed, original);
         assert!(decode(&raw(changed.as_bytes())).is_err(), "{to}");
     }
     for command in [
-        Command::Focus {
+        Command::Key {
             epoch: 0,
-            focused: true,
+            key: tigertype_contracts::Key::Space,
+            prepare: tigertype_contracts::protocol::Prepare::Open,
         },
         Command::Key {
             epoch: 0,
             key: tigertype_contracts::Key::Space,
+            prepare: tigertype_contracts::protocol::Prepare::Keep,
         },
         Command::Key {
             epoch: 1,
             key: tigertype_contracts::Key::Character('\0'),
+            prepare: tigertype_contracts::protocol::Prepare::Keep,
         },
         Command::Select {
             epoch: 1,
@@ -259,7 +267,8 @@ fn rejects_invalid_utf8_json_unknown_fields_numbers_and_zero_ids() {
 #[test]
 fn old_bodies_are_rejected_under_the_current_header() {
     // 即使伪造当前版本头，旧正文也不能把光标位置、点击领取或缺少标点开关的 v5 状态带回协议。
-    let mut v5_state = serde_json::to_value(reply(Reply::Opened(InputState::default()))).unwrap();
+    let mut v5_state =
+        serde_json::to_value(reply(Reply::Configured(InputState::default()))).unwrap();
     v5_state["value"]["reply"]["value"]
         .as_object_mut()
         .unwrap()
@@ -267,7 +276,8 @@ fn old_bodies_are_rejected_under_the_current_header() {
         .unwrap();
     assert!(decode(&raw(&serde_json::to_vec(&v5_state).unwrap())).is_err());
     // v10 状态缺少全角开关，同样拒绝。
-    let mut v10_state = serde_json::to_value(reply(Reply::Opened(InputState::default()))).unwrap();
+    let mut v10_state =
+        serde_json::to_value(reply(Reply::Configured(InputState::default()))).unwrap();
     v10_state["value"]["reply"]["value"]
         .as_object_mut()
         .unwrap()
@@ -279,13 +289,16 @@ fn old_bodies_are_rejected_under_the_current_header() {
         r#"{"type":"request","value":{"route":{"generation":1,"request_id":1,"session_id":1},"command":{"type":"take_selection","value":{"epoch":1}}}}"#,
         r#"{"type":"request","value":{"route":{"generation":1,"request_id":1,"session_id":1},"command":{"type":"focus","value":{"epoch":1,"caret":null}}}}"#,
         r#"{"type":"request","value":{"route":{"generation":1,"request_id":1,"session_id":1},"command":{"type":"focus","value":{"epoch":1,"focused":true,"caret":null}}}}"#,
+        // v13 的单独焦点/清空命令已删除，只能经按键的前置操作执行。
+        r#"{"type":"request","value":{"route":{"generation":1,"request_id":1,"session_id":1},"command":{"type":"focus","value":{"epoch":1,"focused":true}}}}"#,
+        r#"{"type":"request","value":{"route":{"generation":1,"request_id":1,"session_id":1},"command":{"type":"clear"}}}"#,
     ] {
         assert!(decode(&raw(body.as_bytes())).is_err(), "{body}");
     }
 }
 
 fn rejects_state(state: InputState) {
-    let message = reply(Reply::Opened(state));
+    let message = reply(Reply::Configured(state));
     // 同时覆盖发送前与接收后检查，不能依赖发送端总是可信。
     assert!(encode(&message).is_err());
     assert!(decode(&raw(&serde_json::to_vec(&message).unwrap())).is_err());
@@ -361,7 +374,7 @@ fn limits_encoded_bytes_even_when_each_field_is_within_bounds() {
         highlighted: Some(0),
         ..Default::default()
     };
-    assert!(encode(&reply(Reply::Opened(state))).is_err());
+    assert!(encode(&reply(Reply::Configured(state))).is_err());
 }
 
 #[test]
@@ -369,6 +382,7 @@ fn only_the_expected_route_and_reply_type_can_be_delivered() {
     let request = request(Command::Key {
         epoch: 1,
         key: tigertype_contracts::Key::Space,
+        prepare: tigertype_contracts::protocol::Prepare::Keep,
     });
     let response = Response {
         route: request.route,

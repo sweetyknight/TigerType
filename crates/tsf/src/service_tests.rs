@@ -423,16 +423,12 @@ fn backend(
                     state: state("", revision),
                 })
             };
+            // 假后台只模拟按键前置清空；完整准入/焦点/代次由 backend 的真实调度测试覆盖。
+            if matches!(request.command, Command::Key { prepare, .. } if prepare != tigertype_contracts::protocol::Prepare::Keep)
+            {
+                buffer.clear();
+            }
             let reply = match request.command {
-                Command::Open { .. } => Reply::Opened(state("", revision)),
-                Command::Focus { .. } => {
-                    buffer.clear();
-                    Reply::Focused(state("", revision))
-                }
-                Command::Clear => {
-                    buffer.clear();
-                    Reply::Cleared(state("", revision))
-                }
                 // 同引擎：英文模式不处理字母。
                 Command::Key {
                     key: Key::Character(_),
@@ -842,7 +838,8 @@ fn taskbar_icon_follows_the_chinese_english_toggle_from_the_backend() {
         log.last(),
         Some(&Command::Key {
             key: Key::ToggleFullShape,
-            epoch: 1
+            epoch: 1,
+            prepare: tigertype_contracts::protocol::Prepare::Keep
         })
     );
 }
@@ -970,37 +967,32 @@ fn activated_service_shows_candidates_selects_by_click_and_refocuses_after_focus
         *manager.released.borrow(),
         ["indicator", "keys", "thread", "focus", "keyboard"]
     );
-    let key = |key, epoch| Command::Key { key, epoch };
-    let focus = |epoch| Command::Focus {
+    use tigertype_contracts::protocol::Prepare;
+    let key = |key, epoch, prepare| Command::Key {
+        key,
         epoch,
-        focused: true,
+        prepare,
     };
     let (log, panels, indicated) = server.join().unwrap();
     assert_eq!(panels, [Panel::Settings, Panel::Lookup]);
-    // 线程未持有输入焦点：任务栏不显示本输入法图标，不报告、不让后台隐藏通知区图标。
     assert!(indicated.is_empty());
-    let Command::Select { revision, .. } = log[6] else {
-        panic!("第七个请求应是选字：{log:?}");
+    let Command::Select { revision, .. } = log[3] else {
+        panic!("第四个请求应是选字：{log:?}");
     };
+    // 开会话、重新取焦点都不再单独往返，选择仍绑定原快照和代次。
     assert_eq!(
         log,
         [
-            Command::Open {
-                options: Default::default()
-            },
-            focus(1),
-            key(Key::Character('u'), 1),
-            key(Key::Space, 1),
-            focus(2),
-            key(Key::Character('a'), 2),
+            key(Key::Character('u'), 1, Prepare::Open),
+            key(Key::Space, 1, Prepare::Keep),
+            key(Key::Character('a'), 2, Prepare::Focus),
             Command::Select {
                 revision,
                 index: 1,
                 epoch: 2
             },
-            key(Key::Character('a'), 2),
-            focus(3),
-            key(Key::Character('b'), 3),
+            key(Key::Character('a'), 2, Prepare::Keep),
+            key(Key::Character('b'), 3, Prepare::Focus),
         ]
     );
 }
