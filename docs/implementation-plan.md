@@ -93,8 +93,8 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 | backend | 码表核对与加载、`settings.toml`、受管目录（所有权标记、会话租约、链接拒绝、事务替换）、类型化调度 `Dispatcher::handle(host, Request) -> Response`、宿主表与回收策略、查字/设置控制器、进程内引擎线程运行器（M1 随 macOS 组装加入）；公开其接口所用的词表类型（`Dictionary` 及构造合成词表的 `Data`/`Entry`） | contracts、engine | serde、serde_json（锁定清单与设置模板）、toml、sha2；文件原语：windows-sys（Windows）、libc（unix，macOS 与 Linux 共用） |
 | ipc | 跨进程线协议：帧、编解码与校验、握手/管理信封 `Message`（Hello/Welcome/Stop/Show/Indicator 等）与协议版本、Windows 命名管道传输；Linux 选插件形态时再加 Unix 套接字传输 | contracts | serde（信封派生）、serde_json、windows-sys |
 | tsf | Windows TIP DLL | contracts、frontend、ipc | windows、windows-core |
-| imk | macOS IMK 前端：控制器、NSEvent 到物理键、标记文本与上屏、候选面板、输入法菜单 | contracts、frontend | objc2、objc2-foundation、objc2-app-kit、objc2-input-method-kit（M1 锁定版本） |
-| ui | 查字/设置：`model` 共用，`win32` 与 `appkit` 两套视图；Linux 视图预留 | contracts | windows-sys、objc2-app-kit |
+| imk | macOS IMK 前端：控制器、NSEvent 到物理键、标记文本与上屏、候选面板、输入法菜单；按 10-29 调序先实现展示组件 | contracts、frontend | objc2 =0.6.5、objc2-foundation/objc2-app-kit =0.3.2；objc2-input-method-kit 待 M1 |
+| ui | 查字/设置：`model` 与纯 `layout` 共用，`win32` 与 `appkit` 两套原生视图；Mac `editor` 管即时保存草稿；Linux 视图预留 | contracts | windows-sys；macOS：objc2、objc2-foundation、objc2-app-kit、dispatch2 =0.3.1（仅主队列回复，不启动线程） |
 | app | 唯一组装点：`windows/`（后台进程：管道反应器、通知区、命令行、字体安装）、`macos/`（输入法进程：NSApplication + IMKServer、三线程、安装器）、`linux/` 预留 | contracts、backend、ui；Windows 另加 ipc；macOS 另加 frontend、imk | 各平台 |
 
 依赖规则（架构测试按真实解析图检查，含 dev/build/平台条件依赖与传递依赖，均有反例）：
@@ -191,6 +191,14 @@ Linux 预留（开工前另行批准）：
 - 测试：平台无关层（含 backend 的进程内通道、截止时间、迟到回复丢弃与热重载）在两种宿主上都运行；imk 用合成客户端对象（实现 `IMKTextInput` 所需方法）验证标记文本、上屏、故障撤回与位置退路，不安装或激活输入法；候选面板与查字/设置窗做离屏渲染和隐藏窗口事件测试；安装器测试只操作新建临时目录、不触碰 `/Library`，覆盖链接拒绝、冲突副本与失败恢复。
 
 分阶段（每阶段统一入口通过并更新状态后再进入下一阶段）：
+
+2026-10-29 用户调整顺序：M1 暂缓，先开发 M2/M3 的完整展示组件；不创建假 IMK 控制器或绕过受管目录安全。M2/M3 的原生组件与真实输入法验收分别记录：M1 接线、Mac 原生执行与视觉/VoiceOver 验收未通过前，不宣称 Mac 输入法或阶段验收完成。
+
+- UI 以现有 Windows 版为基准：候选窗共用 frontend 的逻辑尺寸；查字窗 520×400（最小 440×340）、设置窗 720×520、184 侧栏、卡片/分段/分组/键帽/主题色板的位置与内容共用 `ui::layout`。不另维护一份 Mac 设计；系统窗口边框、字体、⌃ 快捷键写法与系统菜单保留平台差异。
+- `imk::CandidatePanel` 每进程一份，`Location` 每控制器一份；输入展示只接收拥有所有权的快照与坐标，点击输出控制器/展示/快照/索引，不上屏。组装方须在焦点/连接改变时作废旧身份，并经 `accepts` 和 `frontend::Host::select` 再验证。`Menu` 只返回带身份的语义动作，不依赖 ui；真正菜单创建与模式提示由 M1 回调驱动。
+- `ui::appkit::Views` 通过非阻塞的请求闭包和不可克隆 `Completion` 接工作线程。回复由主队列一次唤醒；不读盘、查询引擎、创建工作线程或轮询。工作线程必须在事务保存并提交热重载之后才返回 Saved；保存中后续编辑合并，失败回退，错配永久禁用。关闭释放原生视图，模型和在途操作继续存活。
+- M1 前 app 的 backend 依赖保持 Windows 条件；Mac 合成预览只有开发依赖 imk/objc2/基础绑定，无真实后台。统一 Windows 入口额外检查两种 Apple 架构的 ui/imk 全目标与合成预览；Mac 原生隐藏窗口测试由各组件的主线程测试入口单独运行，不把交叉编译算作执行。
+
 1. P0 Windows 侧重构，行为不变：建立 frontend、backend；`Dispatcher` 类型化；回收策略移入 backend；`Message` 与协议版本移入 ipc；删除 `CandidateFont::face()`；app 分出 `windows/`；架构测试与统一入口改为本方案规则。验收：统一入口通过，Windows 真机回归（记事本、Typora 首键候选窗、点击选字、热重载、安装升级）。
 2. M1 macOS 骨架与探针：引入并锁定 objc2 系列与 libc；imk 控制器、按键映射、标记文本与上屏、进程内通道、三线程组装、纯文字候选面板、最小 Info.plist、安装命令。探针三项：只有链接器签名的输入法能否从 `/Library/Input Methods` 被系统列出并加载；objc2 能否子类化 `IMKInputController`（类须在创建 IMKServer 前注册，全部回调 `catch_unwind`）；主线程进入菜单或窗口拖动跟踪循环时 IMK 消息是否被延迟。验收：TextEdit 中打字、选重、翻页、退格、单击 Shift、⌃.。
 3. M2 候选面板完整：主题、字体、视图模型、点击、位置退路、多显示器、全屏 Space、增强对比度、VoiceOver。

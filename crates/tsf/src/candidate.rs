@@ -9,6 +9,7 @@ use std::{
     rc::{Rc, Weak},
 };
 use tigertype_contracts::{CandidateFont, InputState, MAX_CANDIDATES, Options, Palette, mix};
+use tigertype_frontend::metrics::*;
 use tigertype_frontend::{Rect, bounded, footer, position, rows};
 use windows::{
     Win32::{
@@ -45,18 +46,6 @@ use windows::{
 /// 窗口过程投递给自己的点击通知：WPARAM 为展示编号，LPARAM 为当前页内序号。
 const CLICK: u32 = WM_APP + 0x54;
 const CLASS: PCWSTR = w!("TigerType.Candidate");
-// 96 DPI 下的设计稿尺寸，按窗口 DPI 缩放。
-const TEXT_POINT: i32 = 15;
-const SMALL_POINT: i32 = 11;
-/// 窗口内边距，含 Win10 自绘的 1px 外框。
-const PAD: i32 = 4;
-const ROW: i32 = 32;
-const ROW_LEFT: i32 = 12;
-const ROW_RIGHT: i32 = 14;
-const GAP: i32 = 10;
-const FOOTER: i32 = 26;
-const MIN_WIDTH: i32 = 112;
-const MAX_WIDTH: i32 = 480;
 pub(crate) const UI_FACE: &str = "Microsoft YaHei UI";
 /// 候选字体的 Windows 字体名；未安装时由 create_font 回退到界面字体。
 pub(crate) const fn font_face(font: CandidateFont) -> &'static str {

@@ -83,6 +83,11 @@ impl Model {
         self.settings_notice = "正在重新载入…".into();
         Ok(Request::ReloadSettings)
     }
+    /// Mac 草稿在重新载入期间只读；保存期间仍允许合并后续编辑。
+    #[cfg(any(target_os = "macos", test))]
+    pub fn reloading(&self) -> bool {
+        matches!(self.pending, Some(Request::ReloadSettings))
+    }
     pub fn fail(&mut self, notice: String) {
         match self.pending.take() {
             Some(Request::Lookup { .. }) | None => self.notice = notice,
@@ -93,6 +98,12 @@ impl Model {
     pub fn receive(&mut self, reply: Reply) -> Result<Effect, &'static str> {
         let pending = self.pending.take();
         self.busy = false;
+        // 类型正确不等于设置有效；界面不能展示或确认违反颜色/页数约束的工作线程回复。
+        if let Reply::Saved(Ok(options)) = &reply
+            && options.validate().is_err()
+        {
+            return Err("回复包含无效设置，请重新启动工具");
+        }
         Ok(match (pending, reply) {
             (Some(Request::Lookup { query, page }), Reply::Lookup(Ok(result))) => {
                 self.query = query;
@@ -158,6 +169,22 @@ pub(crate) fn details(item: &LookupItem) -> String {
 mod tests {
     use super::*;
     use tigertype_contracts::LearningInfo;
+    #[test]
+    fn invalid_settings_reply_never_changes_confirmed_options() {
+        let mut model = Model::new(Options::default());
+        let original = model.options;
+        model.reload().unwrap();
+        assert!(
+            model
+                .receive(Reply::Saved(Ok(Options {
+                    page_size: 0,
+                    ..original
+                })))
+                .is_err()
+        );
+        assert_eq!(model.options, original);
+        assert!(!model.busy);
+    }
     #[test]
     fn single_pending_action_and_page_binding() {
         let mut model = Model::new(Options::default());

@@ -15,7 +15,28 @@ const RULES: &[(&str, &[&str])] = &[
         "tigertype-ipc",
         &["tigertype-contracts", "serde", "serde_json", "windows-sys"],
     ),
-    ("tigertype-ui", &["tigertype-contracts", "windows-sys"]),
+    (
+        "tigertype-ui",
+        &[
+            "tigertype-contracts",
+            "windows-sys",
+            "objc2",
+            "objc2-foundation",
+            "objc2-app-kit",
+            "dispatch2",
+        ],
+    ),
+    // IMK 当前仅含展示组件；不得借此绕过前端/引擎/UI 隔离规则。
+    (
+        "tigertype-imk",
+        &[
+            "tigertype-contracts",
+            "tigertype-frontend",
+            "objc2",
+            "objc2-foundation",
+            "objc2-app-kit",
+        ],
+    ),
     (
         "tigertype-backend",
         &[
@@ -45,13 +66,17 @@ const RULES: &[(&str, &[&str])] = &[
             "tigertype-backend",
             "tigertype-ipc",
             "tigertype-ui",
+            "tigertype-imk",
+            "objc2",
+            "objc2-foundation",
+            "objc2-app-kit",
             "serde",
             "serde_json",
             "windows-sys",
         ],
     ),
 ];
-/// 平台前端 crate 清单（将来的 imk 与 Linux 前端加入此处）：彼此不依赖，只有 app 组装它们。
+/// 平台前端 crate 清单：彼此不依赖，只有 app（含合成预览）组装它们。
 const FRONTENDS: &[&str] = &["tigertype-tsf", "tigertype-imk"];
 /// 平台包：系统绑定、Objective-C 运行时与 libc。
 fn platform(name: &str) -> bool {

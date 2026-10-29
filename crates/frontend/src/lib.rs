@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 mod host;
 mod key;
+pub mod metrics;
 mod view;
 pub use host::{Channel, Error, Host};
 pub use key::{Modifiers, PhysicalKey, ShiftTap, map};

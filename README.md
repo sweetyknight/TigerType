@@ -16,6 +16,21 @@ cargo test --workspace --locked --offline
 
 完整资源和真实应用验收另见状态。普通测试使用合成数据，不加载 librime、不安装输入法。
 
+### macOS 视图组件（M1 暂缓）
+
+M2/M3 先按 Windows UI 实现独立候选面板、输入法菜单与查字/设置视图。它们不是已能输入的 Mac 版；当前无 IMKServer、真实上屏、Mac 后台或安装包。Windows 统一检查额外执行 ARM64/Intel Apple 目标的组件与预览 Clippy；首次准备还需 `rustup target add aarch64-apple-darwin x86_64-apple-darwin` 和锁定依赖缓存。仅类型检查，不在 Windows 链接 Apple 框架。
+
+在有图形登录会话的 Mac 上单独运行（本机架构、无注册/启用输入法）：
+
+```sh
+# 主线程创建隐藏窗口，合成事件与异步回复断言，离屏 PNG 输出到新建临时目录。
+cargo test --locked --offline -p tigertype-ui -p tigertype-imk --test appkit
+# 人工视觉/交互对照：只用合成资料，保存/载入仅在内存，配置文件打开会失败。
+cargo run --locked --offline -p tigertype-app --example macos_views
+```
+
+预览的菜单是创建时状态快照，不产生输入提交；用 ⌘Q 退出。离屏测试不会自动证明布局正确，须查看输出图像，并与 Windows 版对照。全屏、多屏、VoiceOver、菜单跟踪循环和真实热重载仍须 Mac 真机及 M1 接线验证。当前完整 app/工作区还不能在 Mac 构建，不能用预览成功替代 M1。
+
 统一入口显式运行 lib/bin/integration 测试并单列 doctest，避免 Windows 工作区特性合并时重链接正在运行的 `check.exe`；所有目标仍经 Clippy，DLL 探针仍由集成测试构建/执行。
 
 普通测试还会为当前位数构建本仓库的 `resident_probe` 测试 DLL，在限时子进程内验证显式驻留和管道关闭；不加载到用户应用，不注册 COM/TSF。仅复跑该项：

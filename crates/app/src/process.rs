@@ -3,8 +3,10 @@
 use crate::Result;
 #[cfg(windows)]
 use std::os::windows::{io::AsRawHandle, process::CommandExt};
+#[cfg(windows)]
+use std::process::{Child, Stdio};
 use std::{
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Command, ExitStatus},
     time::Duration,
 };
 #[cfg(windows)]
@@ -13,7 +15,9 @@ use windows_sys::Win32::{
     System::Threading::WaitForSingleObject,
 };
 
+#[cfg(windows)]
 struct ChildGuard(Child);
+#[cfg(windows)]
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         // panic、超时和等待失败均回收自己创建的进程，不触碰其他进程。

@@ -117,6 +117,7 @@ fn layering_follows_the_multi_platform_rules() {
         ("tigertype-backend", "windows-sys", "windows-link"),
         ("tigertype-app", "tigertype-backend", "tigertype-engine"),
         ("tigertype-tsf", "tigertype-frontend", "tigertype-contracts"),
+        ("tigertype-imk", "tigertype-frontend", "tigertype-contracts"),
     ] {
         assert!(
             policy::architecture(&reach(origin, via, reached)).is_ok(),
@@ -146,6 +147,9 @@ fn layering_follows_the_multi_platform_rules() {
         ("tigertype-tsf", "tigertype-ipc", "tigertype-backend"),
         ("tigertype-tsf", "tigertype-frontend", "tigertype-imk"),
         ("tigertype-tsf", "tigertype-frontend", "tigertype-engine"),
+        ("tigertype-imk", "tigertype-frontend", "tigertype-ui"),
+        ("tigertype-imk", "tigertype-contracts", "tigertype-backend"),
+        ("tigertype-ui", "tigertype-contracts", "tigertype-imk"),
         // 只有 app 组装平台前端；组装层也不直接依赖 engine。
         ("tigertype-ipc", "tigertype-contracts", "tigertype-tsf"),
         ("tigertype-app", "tigertype-engine", "tigertype-contracts"),
