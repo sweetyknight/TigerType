@@ -1,12 +1,10 @@
 //! 共享后台业务：码表核对与加载、settings.toml、受管目录、类型化调度与宿主回收策略、查字/设置控制器。
-//! 不依赖 Windows IPC、input-client 或界面；跨进程传输与进程组装在平台 app，受管目录的文件原语按平台实现（现为 Windows）。
+//! 不依赖 Windows IPC、input-client 或界面；传输与进程组装在平台 app，文件原语集中于 storage。
 pub mod dispatch;
 pub mod import;
-#[cfg(windows)]
 pub mod lookup;
 pub mod resources;
 pub mod settings;
-#[cfg(windows)]
 pub mod storage;
 
 use tigertype_contracts::{Key, KeyOutcome, Options};

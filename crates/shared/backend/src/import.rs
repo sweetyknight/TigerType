@@ -201,7 +201,9 @@ mod tests {
     }
     #[test]
     fn verified_bytes_reject_corruption_and_keep_original_file() -> Result<()> {
-        let root = resources::new_directory(&std::env::temp_dir(), "tigertype-import")?;
+        // 系统临时目录在 Mac 可能经 /var 链接；测试先确定系统给定根，不放宽生产路径拒绝规则。
+        let root =
+            resources::new_directory(&std::env::temp_dir().canonicalize()?, "tigertype-import")?;
         let path = root.join("source.txt");
         storage::write_new(&path, b"original")?;
         let entry = Entry {

@@ -99,7 +99,8 @@ mod tests {
     fn queries_and_transactional_settings_roundtrip_without_input_session() -> Result<()> {
         let dictionary = dictionary()?;
         let root =
-            resources::new_directory(&std::env::temp_dir(), "tiger-lookup-test")?.join("data");
+            resources::new_directory(&std::env::temp_dir().canonicalize()?, "tiger-lookup-test")?
+                .join("data");
         let mut controller = Controller::new(&dictionary, Data::create(&root)?)?;
         let options = Options {
             output_form: OutputForm::Traditional,
@@ -178,7 +179,8 @@ mod tests {
     fn first_run_writes_the_commented_defaults_and_invalid_files_are_kept() -> Result<()> {
         let dictionary = dictionary()?;
         let root =
-            resources::new_directory(&std::env::temp_dir(), "tiger-lookup-first")?.join("data");
+            resources::new_directory(&std::env::temp_dir().canonicalize()?, "tiger-lookup-first")?
+                .join("data");
         let controller = Controller::new(&dictionary, Data::create(&root)?)?;
         let written = std::fs::read(root.join("config/settings.toml"))?;
         assert_eq!(settings::parse(&written)?, Options::default());
@@ -188,8 +190,11 @@ mod tests {
         assert!(!shown.to_string_lossy().starts_with(r"\\?\"), "{shown:?}");
         assert_eq!(std::fs::read(&shown)?, written);
         drop(controller);
-        let root =
-            resources::new_directory(&std::env::temp_dir(), "tiger-lookup-invalid")?.join("data");
+        let root = resources::new_directory(
+            &std::env::temp_dir().canonicalize()?,
+            "tiger-lookup-invalid",
+        )?
+        .join("data");
         let data = Data::create(&root)?;
         std::fs::write(root.join("config/settings.toml"), b"not toml")?;
         assert!(Controller::new(&dictionary, data).is_err());

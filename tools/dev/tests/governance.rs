@@ -133,6 +133,17 @@ fn layering_follows_the_multi_platform_rules() {
     // 允许：backend 经 windows-sys 到达链接支撑；app 组装 backend（及其下的 engine）；平台前端经 input-client 到 contracts。
     for (origin, via, reached) in [
         ("tigertype-backend", "windows-sys", "windows-link"),
+        ("tigertype-backend", "libc", "libc"),
+        (
+            "tigertype-macos-app",
+            "tigertype-backend",
+            "tigertype-engine",
+        ),
+        (
+            "tigertype-macos-app",
+            "tigertype-macos-input-method",
+            "objc2-input-method-kit",
+        ),
         (
             "tigertype-windows-app",
             "tigertype-backend",
@@ -162,6 +173,16 @@ fn layering_follows_the_multi_platform_rules() {
             "windows-sys",
         ),
         ("tigertype-input-client", "tigertype-contracts", "objc2"),
+        (
+            "tigertype-macos-app",
+            "tigertype-backend",
+            "tigertype-windows-app",
+        ),
+        (
+            "tigertype-macos-input-method",
+            "tigertype-contracts",
+            "tigertype-macos-app",
+        ),
         ("tigertype-engine", "tigertype-contracts", "libc"),
         // backend 只许文件原语，且不碰传输、前端会话与界面。
         ("tigertype-backend", "windows-sys", "windows"),

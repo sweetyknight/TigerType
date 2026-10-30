@@ -21,9 +21,10 @@ Windows Rust 专用虎码输入法项目：默认单字输入，可在设置切�
 | Windows 认证管道与线协议 | [Windows IPC](crates/windows/ipc/src/lib.rs) |
 | Windows 查字/设置、托盘与后台入口 | [UI](crates/windows/ui/src/lib.rs)、[app](crates/windows/app/src/lib.rs) |
 | Mac 候选面板/菜单、查字/设置 | [macOS input-method](crates/macos/input-method/src/lib.rs)、[UI](crates/macos/ui/src/lib.rs) |
+| Mac 程序、进程内通道、应用包与安装 | [macOS app](crates/macos/app/src/lib.rs) |
 | 检查、打包、合成预览、架构测试 | [开发工具](tools/dev/Cargo.toml) |
 
-共享不等于全部平台无关：backend 当前只有 Windows 安全存储原语；Mac 后台仍待 M1。候选窗归 input-method，不混进查字/设置 UI。依赖表与进程/线程模型只维护在[实施方案](docs/implementation-plan.md#多平台架构)。
+共享不等于全部平台无关：backend 的安全存储按 Windows/macOS 实现；进程和线程由各平台 app 组装。候选窗归 input-method，不混进查字/设置 UI。依赖表与进程/线程模型只维护在[实施方案](docs/implementation-plan.md#多平台架构)。
 
 原始资源在 `resources`，Windows 安装定义在 `installer/windows`。`target`、`artifacts`、`.cache`、`vendor` 是本地生成物或缓存，不是产品源码；不为 Linux 或未实现的 Mac app 建空目录。
 
@@ -37,20 +38,39 @@ cargo test --workspace --locked --offline
 
 完整资源和真实应用验收另见状态。普通测试使用合成数据，不加载 librime、不安装输入法。
 
-### macOS 视图组件（M1 暂缓）
+### macOS（Apple 芯片，本机验收前不可视为可用版本）
 
-M2/M3 先按 Windows UI 实现独立候选面板、输入法菜单与查字/设置视图。它们不是已能输入的 Mac 版；当前无 IMKServer、真实上屏、Mac 后台或安装包。Windows 统一检查额外执行 ARM64/Intel Apple 目标的组件与预览 Clippy；首次准备还需 `rustup target add aarch64-apple-darwin x86_64-apple-darwin` 和锁定依赖缓存。仅类型检查，不在 Windows 链接 Apple 框架。
+Windows 常规测试执行输入边界、进程内通道、固定工作线程、设置热重载和包替换反例；统一入口还检查全部共享/Mac 产品与开发工具的 ARM64/Intel Apple 目标类型。首次准备需 `rustup target add aarch64-apple-darwin x86_64-apple-darwin`、`cargo fetch --locked`。在 Windows 不链接或执行 AppKit/IMK、Mac 文件系统和安装操作；实际完成情况见[项目状态](docs/project-status.md)。
+
+完整资源的 Mac 包映射可在 Windows 单列验证：`cargo test --locked --offline -p tigertype-macos-app complete_locked_resources_assemble_and_detect_corruption -- --ignored`。该测试只在新建临时目录使用合成不可执行头和测试图标，产物不可安装，不是 Mac Release 包或链接器签名有效性证据。
 
 在有图形登录会话的 Mac 上单独运行（本机架构、无注册/启用输入法）：
 
 ```sh
-# 主线程创建隐藏窗口，合成事件与异步回复断言，离屏 PNG 输出到新建临时目录。
+# 主线程检查原生按键/标记文本、隐藏窗口、合成事件与异步回复，离屏 PNG 输出到新建临时目录。
 cargo test --locked --offline -p tigertype-macos-ui -p tigertype-macos-input-method --test appkit
 # 人工视觉/交互对照：只用合成资料，保存/载入仅在内存，配置文件打开会失败。
 cargo run --locked --offline -p tigertype-dev --example macos_views
 ```
 
-预览的菜单是创建时状态快照，不产生输入提交；用 ⌘Q 退出。离屏测试不会自动证明布局正确，须查看输出图像，并与 Windows 版对照。全屏、多屏、VoiceOver、菜单跟踪循环和真实热重载仍须 Mac 真机及 M1 接线验证。当前完整 app/工作区还不能在 Mac 构建，不能用预览成功替代 M1。
+预览的菜单是创建时状态快照，不产生输入提交；用 ⌘Q 退出。离屏图像须与 Windows 版人工对照，不能用预览成功替代真实输入验收。
+
+在 Apple 芯片 Mac 的图形登录会话中，准备锁定缓存后：
+
+```sh
+# 本机执行共享/Mac 测试（含 IMK 合成客户端），对两个 Windows 目标只做 Clippy。
+cargo run --locked --offline -p tigertype-dev --example check
+# 原生图标离屏检查，不安装；输出 icns/PNG 到新建临时目录。
+cargo test --locked --offline -p tigertype-macos-app --test native
+# 只构建本机 ARM64 包，链接后不修改可执行文件；不调用 codesign/lipo/iconutil。
+cargo run --locked --offline -p tigertype-dev --example package
+# 以下命令会修改系统安装目录、结束旧输入法进程；须明确授权后执行。
+sudo target/package/TigerType.app/Contents/MacOS/tigertype install
+# 卸载保留所有用户数据，系统输入法条目由用户手动移除。
+sudo '/Library/Input Methods/TigerType.app/Contents/MacOS/tigertype' uninstall
+```
+
+首次安装后注销重登，在系统设置中手动添加 TigerType 虎码。默认最低 macOS 13；最终系统版本兼容、链接器签名加载、真实上屏与升级恢复必须在目标 Mac 验收。安装失败保留 staging/旧包证据，不要手工批量清理。
 
 统一入口显式运行 lib/bin/integration 测试并单列 doctest，避免 Windows 工作区特性合并时重链接正在运行的 `check.exe`；所有目标仍经 Clippy，DLL 探针仍由集成测试构建/执行。
 

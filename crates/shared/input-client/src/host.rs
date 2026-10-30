@@ -36,6 +36,30 @@ pub trait Channel {
     fn cancel(&mut self);
 }
 
+// 平台组装通过工厂注入具体通道；动态持有不改变期限、取消或重放约束。
+impl<C: Channel + ?Sized> Channel for Box<C> {
+    fn ensure(&mut self, deadline: Instant) -> Result<bool, Error> {
+        (**self).ensure(deadline)
+    }
+    fn request(
+        &mut self,
+        session: u64,
+        command: Command,
+        deadline: Instant,
+    ) -> Result<Reply, Error> {
+        (**self).request(session, command, deadline)
+    }
+    fn show(&mut self, panel: Panel, deadline: Instant) -> Result<(), Error> {
+        (**self).show(panel, deadline)
+    }
+    fn indicate(&mut self, visible: bool, deadline: Instant) -> Result<(), Error> {
+        (**self).indicate(visible, deadline)
+    }
+    fn cancel(&mut self) {
+        (**self).cancel();
+    }
+}
+
 pub struct Host<C> {
     channel: C,
     /// 当前连接上已打开的会话；0 表示尚未打开。编号跨连接单调，不复用。

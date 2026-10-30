@@ -22,6 +22,7 @@ pub const COMPONENTS: &[(&str, &str)] = &[
     ("tigertype-windows-app", "crates/windows/app"),
     ("tigertype-macos-input-method", "crates/macos/input-method"),
     ("tigertype-macos-ui", "crates/macos/ui"),
+    ("tigertype-macos-app", "crates/macos/app"),
     ("tigertype-dev", "tools/dev"),
 ];
 /// 直接依赖含 dev/build/平台条件；不能用别名、测试辅助或空壳绕开边界。
@@ -40,6 +41,7 @@ const RULES: &[(&str, &[&str])] = &[
             "sha2",
             "toml",
             "windows-sys",
+            "libc",
         ],
     ),
     (
@@ -80,6 +82,7 @@ const RULES: &[(&str, &[&str])] = &[
             "objc2",
             "objc2-foundation",
             "objc2-app-kit",
+            "objc2-input-method-kit",
         ],
     ),
     (
@@ -94,6 +97,22 @@ const RULES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "tigertype-macos-app",
+        &[
+            "tigertype-contracts",
+            "tigertype-input-client",
+            "tigertype-backend",
+            "tigertype-macos-input-method",
+            "tigertype-macos-ui",
+            "objc2",
+            "objc2-foundation",
+            "objc2-app-kit",
+            "libc",
+            "serde",
+            "serde_json",
+        ],
+    ),
+    (
         "tigertype-dev",
         &[
             "tigertype-contracts",
@@ -102,7 +121,9 @@ const RULES: &[(&str, &[&str])] = &[
             "tigertype-windows-ui",
             "tigertype-macos-input-method",
             "tigertype-macos-ui",
+            "tigertype-macos-app",
             "serde_json",
+            "libc",
             "windows-sys",
             "objc2",
             "objc2-foundation",
@@ -154,6 +175,11 @@ fn forbidden(origin: &str, reached: &str) -> Option<&'static str> {
     if origin != "tigertype-dev" && reached == "tigertype-dev" {
         return Some("产品不得反向依赖开发工具");
     }
+    if origin != "tigertype-dev"
+        && matches!(reached, "tigertype-windows-app" | "tigertype-macos-app")
+    {
+        return Some("产品组件不得反向依赖平台组装层");
+    }
     if (origin.starts_with("tigertype-windows-") && reached.starts_with("tigertype-macos-"))
         || (origin.starts_with("tigertype-macos-") && reached.starts_with("tigertype-windows-"))
     {
@@ -162,8 +188,10 @@ fn forbidden(origin: &str, reached: &str) -> Option<&'static str> {
     if origin == "tigertype-backend" && platform(reached) && !file_primitive(reached) {
         return Some("backend 只许文件原语平台包");
     }
-    if !matches!(origin, "tigertype-dev" | "tigertype-windows-app")
-        && (reached == "tigertype-backend" || FRONTENDS.contains(&reached))
+    if !matches!(
+        origin,
+        "tigertype-dev" | "tigertype-windows-app" | "tigertype-macos-app"
+    ) && (reached == "tigertype-backend" || FRONTENDS.contains(&reached))
     {
         return Some("只有平台组装与开发工具接入后台和输入法");
     }

@@ -1,4 +1,4 @@
-//! 候选面板的 AppKit 边界。主线程拥有所有对象；不激活应用、不读取宿主或词表。
+//! 输入与候选面板的 AppKit 边界。主线程拥有所有对象；不激活应用、不读取宿主或词表。
 use crate::{Action, Location, NativeRect, Presentation, Screen, Selection};
 use objc2::rc::Retained;
 use objc2::{
@@ -20,6 +20,12 @@ use tigertype_input_client::{footer, rows};
 #[path = "appkit/menu.rs"]
 mod menu;
 pub use menu::Menu;
+#[path = "appkit/input.rs"]
+mod input;
+pub use input::{key_event, marked_text};
+#[path = "appkit/imk.rs"]
+mod imk;
+pub use imk::Server;
 
 /// UI 回调中的 Rust panic 不得穿过 Objective-C 栈；失败时不产生用户动作。
 pub(super) fn callback<T>(f: impl FnOnce() -> T) -> Option<T> {
@@ -619,6 +625,8 @@ pub mod tests {
     pub fn run() {
         let mtm = MainThreadMarker::new().expect("面板检查必须在主线程");
         let _app = NSApplication::sharedApplication(mtm);
+        input::tests::run();
+        imk::tests::run(mtm);
         let clicks = Rc::new(RefCell::new(Vec::new()));
         let sink = clicks.clone();
         let panel = CandidatePanel::new(mtm, Rc::new(move |a| sink.borrow_mut().push(a)));
@@ -698,6 +706,27 @@ pub mod tests {
         assert_eq!(clicks.borrow().len(), 1);
         let menu = Menu::new(mtm, 1, &state, Some("合成不可用"), Rc::new(|_| {}));
         assert_eq!(menu.native().numberOfItems(), 7);
+        let actionable = Menu::new(mtm, 17, &state, None, Rc::new(|_| {}));
+        let item = actionable.native().itemAtIndex(0).unwrap();
+        // SAFETY: 公开 IMK 字典键；测试仅构造本地命令字典，不唤起系统菜单。
+        let info = unsafe {
+            NSDictionary::from_slices(
+                &[objc2_input_method_kit::kIMKCommandMenuItemName],
+                &[item.as_ref()],
+            )
+        };
+        assert_eq!(
+            Menu::forwarded(17, Some(sel!(invoke:)), Some(&info)),
+            Some(Action::Menu {
+                owner: 17,
+                action: crate::MenuAction::Key(tigertype_contracts::Key::ToggleAscii)
+            })
+        );
+        assert!(Menu::forwarded(18, Some(sel!(invoke:)), Some(&info)).is_none());
+        assert!(Menu::forwarded(17, Some(sel!(unknownAction:)), Some(&info)).is_none());
+        assert!(Menu::forwarded(17, Some(sel!(invoke:)), None).is_none());
+        item.setEnabled(false);
+        assert!(Menu::forwarded(17, Some(sel!(invoke:)), Some(&info)).is_none());
         let _status = CandidatePanel::status;
         let _accepts = CandidatePanel::accepts;
         assert!(

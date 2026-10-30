@@ -32,7 +32,7 @@
 源码路径与部署名相互独立。重组不改变 `tigertype.exe`、`tigertype_tsf.dll`、`tigertype_tsf_x86.dll`、COM 标识、协议或用户目录；打包驱动校验新构建 DLL 到部署名的映射。这不是兼容层：旧 crate、转发入口和混合目录直接删除。
 
 ### 目录与职责
-仅下表 12 个有实现的叶子目录是工作区成员；macOS app 在 M1 实现时再建立，Linux 不建占位目录。下表同时是架构门禁的明确白名单，新增依赖须同步修改，不能使用通配放行。
+仅下表 13 个有实现的叶子目录是工作区成员；macOS app 承载进程组装与安装，Linux 不建占位目录。下表同时是架构门禁的明确白名单，新增依赖须同步修改，不能使用通配放行。
 
 | 目录（相对仓库根） | 职责 | 项目内直接依赖（省略 tigertype 前缀） | 外部直接依赖 |
 |---|---|---|---|
@@ -40,16 +40,17 @@
 | crates/shared/engine | 引擎状态机、词表索引、字形转换 | contracts | 无 |
 | crates/shared/input-client | Host/Channel、物理键规则、Shift 判定、候选内容/尺寸与位置退路 | contracts | 无 |
 | crates/shared/ui-model | 查字/设置 Model、文案、控件标识与纯布局 | contracts | 无 |
-| crates/shared/backend | 锁定资源加载、settings.toml、受管目录、Dispatcher、宿主回收和查字控制器 | contracts、engine | serde、serde_json、sha2、toml；Windows 文件原语 windows-sys |
+| crates/shared/backend | 锁定资源加载、settings.toml、受管目录、Dispatcher、宿主回收和查字控制器 | contracts、engine | serde、serde_json、sha2、toml；Windows 文件原语 windows-sys、Mac 文件原语 libc |
 | crates/windows/ipc | Windows 跨进程信封、帧校验、认证管道、取消和驻留保护 | contracts | serde、serde_json、windows-sys |
 | crates/windows/input-method | TSF DLL、编辑会话、候选窗、UIA、输入法菜单与注册 | contracts、input-client、windows-ipc | windows、windows-core |
 | crates/windows/ui | Win32 查字/设置窗、托盘、事件邮箱 | contracts、ui-model | windows-sys |
 | crates/windows/app | Windows 后台/命令行/字体管理，组装固定线程 | contracts、backend、windows-ipc、windows-ui | serde、serde_json、windows-sys |
-| crates/macos/input-method | macOS 输入法系统适配；分阶段实现控制器、候选面板、菜单 | contracts、input-client | objc2、objc2-foundation、objc2-app-kit |
+| crates/macos/input-method | IMKServer/控制器、按键/文本边界、候选面板、菜单；由组装层注入通道与窗口动作 | contracts、input-client | objc2、objc2-foundation、objc2-app-kit、objc2-input-method-kit |
 | crates/macos/ui | AppKit 查字/设置视图、Mac 草稿交互和主线程回复 | contracts、ui-model | objc2、objc2-foundation、objc2-app-kit、dispatch2 |
-| tools/dev | 检查、打包、合成预览和跨组件治理测试，不进入产品 | contracts；Windows：backend、windows-app、windows-ui；Mac 预览：macos-input-method、macos-ui | serde_json；Windows：windows-sys；Mac：objc2、objc2-foundation、objc2-app-kit |
+| crates/macos/app | Mac 主程序、进程内有界通道、固定线程组装、包清单/图标及安装 | contracts、input-client、backend；Mac：macos-input-method、macos-ui | serde、serde_json；Mac：objc2、objc2-foundation、objc2-app-kit、libc |
+| tools/dev | 检查、打包、合成预览和跨组件治理测试，不进入产品 | contracts、backend；Windows：windows-app、windows-ui；Mac：macos-input-method、macos-ui、macos-app | serde_json；Windows：windows-sys；Mac：objc2、objc2-foundation、objc2-app-kit、libc |
 
-backend 的 `storage/windows.rs` 集中目录固定、链接/硬链接拒绝、租约、原子替换及 Windows 路径呈现；其余后台模块不直接调用平台 API。Unix 实现属于 M1，不能用普通文件读取占位而绕过校验。词表类型通过 backend 公开，组装层不直接依赖 engine。
+backend 的 `storage/windows.rs` 与 `storage/macos.rs` 集中各平台目录固定、链接/硬链接拒绝、租约和原子替换；其余后台模块不直接调用平台 API。不得用普通文件读取占位绕过校验。词表类型通过 backend 公开，组装层不直接依赖 engine；产品组件不得反向依赖平台 app。
 
 原始资源在 `resources`，安装定义在 `installer/windows`；构建产物、缓存与证据不作为源码。测试跟随组件：纯模型测试在 shared，原生测试在对应平台，架构/文档与安装脚本校验归 tools/dev。
 
@@ -136,7 +137,7 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 
 ## macOS 端
 范围：
-- 只在本人的 Mac 上使用。最低 macOS 13（M1 按实际机器确认），只构建本机架构（Apple 芯片为 `aarch64-apple-darwin`，Intel 为 `x86_64-apple-darwin`），不做通用二进制。功能同 Windows：单字/词、常用字、简繁、拼音反查、全角、标点、学习信息、查字/设置、配色主题、每页候选数、热重载。
+- 只在本人的 Mac 上使用。2026-10-30 已确认机器为 M 系列：只打包 `aarch64-apple-darwin`，Intel Apple 目标仅保留类型检查，不做通用二进制。最低 macOS 13（实际系统版本仍待 Mac 确认）。功能同 Windows：单字/词、常用字、简繁、拼音反查、全角、标点、学习信息、查字/设置、配色主题、每页候选数、热重载。
 - 不做：代码签名、Developer ID/公证、App Store/沙箱、通用二进制、自动注册/启用/切换输入法、辅助功能或输入监控权限（不读其他进程界面）、菜单栏状态项（NSStatusItem）、开机自启（系统按需拉起）。
 - 签名说明：Apple 芯片只运行带签名的可执行文件，链接器会自动加 ad-hoc 链接器签名，这不属于代码签名流程；链接后不得再改写可执行文件（`strip`、`install_name_tool`、`lipo` 等），否则内核拒绝运行。Intel 无此要求。未签名的包在本机构建、本机安装，不带隔离属性，不经 Gatekeeper 评估。
 
@@ -153,6 +154,7 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 - IMKServer 为每个客户端输入会话创建一个控制器；每个控制器持有一个 `tigertype_input_client::Host`，相当于 Windows 的一个 TIP 线程实例，第一个需要引擎的按键才在引擎线程登记宿主。`activateServer` 使下一键携带 `Prepare::Focus` 取得焦点；`deactivateServer` 取消自有组合并在本地标记失焦（协议没有单独的失焦消息，其他控制器取得焦点时后台清掉旧组合）；控制器释放时通知引擎移除宿主。
 - 宿主与会话上限沿用 16/64 与 backend 统一的回收策略（最久未用、无焦点、无组合者先回收）；被回收的控制器下次请求发现断开即重连一次，同 Windows。
 - 进程内通道：主线程以 `try_send` 投递，通道满视为不可用、放行原键（不吞键）；以 `recv_timeout` 等到同一绝对截止时间（50ms，含排队）；超时即丢弃回复槽，迟到回复无处投递；Host 作废连接并通知引擎移除该宿主及其会话（超时请求可能已改动会话），下一键以新宿主 `Prepare::Open` 重开会话。不持锁等待、不忙轮询。
+- 取消通知用连接寿命位和有界邮箱唤醒：满队列本身保证唤醒，引擎处理下一项前清理已失效宿主，不依赖一定能入队的 Close 消息。保存回复须等设置事务成功且引擎确认热重载；若文件已保存但确认失败，明确提示重启，不伪称回滚了磁盘。
 
 按键：
 - `recognizedEvents` 只含 keyDown 与 flagsChanged。`handle(_:client:)` 是一次同步调用，没有 Windows 的预判/处理两段：先以上次状态 `InputState::consumes` 判定，不吃的键不发请求、返回 NO。
@@ -211,10 +213,17 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 
 2026-10-29 用户调整顺序：M1 暂缓，先开发 M2/M3 的完整展示组件；不创建假 IMK 控制器或绕过受管目录安全。M2/M3 的原生组件与真实输入法验收分别记录：M1 接线、Mac 原生执行与视觉/VoiceOver 验收未通过前，不宣称 Mac 输入法或阶段验收完成。
 
+2026-10-30 用户授权先推进 Windows 可验证的 Mac 基础：M1 的按键与文本边界可先独立实现，继续放在 macOS input-method，不增加占位 app 或假 IMK 控制器。纯逻辑在 Windows 常规测试中执行，AppKit 适配在两种 Apple 目标类型检查、原生检查入口中覆盖；系统加载、实际输入及安装仍须 Mac 探针与授权，不能以交叉检查代替。
+
+同日追加授权：先完成 Windows 能实现和检查的 Mac 适配，目标为 M 系列芯片。允许提前编写 M1–M4 的真实系统接线、存储、打包与安装源码，并建立有实现的 macOS app；不能在 Windows 执行的探针/运行结果在项目状态保留待验收清单，不创建成功返回的假实现或占位空 crate。原生测试只在临时目录/合成客户端执行，实际安装、结束现用进程与启用输入法仍另行授权。
+
+- 按键边界区分普通输入动作与单击 Shift；Shift 即使产生切中英动作，原修饰键事件也始终放行。失焦/激活/故障清空半次 Shift，双 Shift 重叠或其他键/修饰键介入取消单击。未映射的 AppKit 功能键私用字符不作为文字发送。
+- 标记文本先校验长度及 UTF-8 光标/选区边界，再转换 UTF-16 折叠光标并构造整段单下划线；实际 `setMarkedText`/`insertText` 仍由 IMK 控制器执行，不把准备好的字符串当作上屏结果。
+
 - UI 以现有 Windows 版为基准：候选窗共用 input-client 的逻辑尺寸；查字窗 520×400（最小 440×340）、设置窗 720×520、184 侧栏、卡片/分段/分组/键帽/主题色板的位置与内容共用 `tigertype_ui_model::layout`。不另维护一份 Mac 设计；系统窗口边框、字体、⌃ 快捷键写法与系统菜单保留平台差异。
 - `tigertype_macos_input_method::appkit::CandidatePanel` 每进程一份，`Location` 每控制器一份；输入展示只接收拥有所有权的快照与坐标，点击输出控制器/展示/快照/索引，不上屏。组装方须在焦点/连接改变时作废旧身份，并经 `accepts` 和 `tigertype_input_client::Host::select` 再验证。`Menu` 只返回带身份的语义动作，不依赖 ui；真正菜单创建与模式提示由 M1 回调驱动。
 - `tigertype_macos_ui::appkit::Views` 通过非阻塞的请求闭包和不可克隆 `Completion` 接工作线程。回复由主队列一次唤醒；不读盘、查询引擎、创建工作线程或轮询。工作线程必须在事务保存并提交热重载之后才返回 Saved；保存中后续编辑合并，失败回退，错配永久禁用。关闭释放原生视图，模型和在途操作继续存活。
-- M1 前 Windows app 与 backend 不进入 Mac 合成预览；预览位于 tools/dev，仅按 Apple 目标引入 macOS 展示组件。统一 Windows 入口检查两种 Apple 架构的 macos-ui/input-method 全目标与预览；原生隐藏窗口测试由组件主线程入口单独运行，不把交叉编译算作执行。
+- Mac 合成预览仍只用内存资料，不启动正式后台或读取用户目录。统一 Windows 入口检查两个 Apple 目标的全部共享/Mac 产品和开发工具（含打包器）；Mac 入口实际执行共享/Mac 测试并交叉检查两个 Windows 目标，原生隐藏窗口/图标测试在主线程运行，不把交叉编译算作执行。
 
 1. P0 共享基础：类型化 Dispatcher、统一回收策略、input-client、backend 和 UI 模型按上表分层；Windows 运行行为不变。验收包含统一入口与 Windows 真机核心回归，不以目录整理替代运行验收。
 2. M1 macOS 骨架与探针：引入并锁定 objc2 系列与 libc；macOS input-method 控制器、按键映射、标记文本与上屏、进程内通道、三线程组装、纯文字候选面板、最小 Info.plist、安装命令。探针三项：只有链接器签名的输入法能否从 `/Library/Input Methods` 被系统列出并加载；objc2 能否子类化 `IMKInputController`（类须在创建 IMKServer 前注册，全部回调 `catch_unwind`）；主线程进入菜单或窗口拖动跟踪循环时 IMK 消息是否被延迟。验收：TextEdit 中打字、选重、翻页、退格、单击 Shift、⌃.。
@@ -223,7 +232,7 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 5. M4 打包与安装：图标现画、完整 Info.plist、安装/升级/卸载与冲突检测。
 6. M5 验收：TextEdit、备忘录、Safari、Chrome、VS Code（Electron）、终端、iTerm2、微信、Pages、Microsoft Office、JetBrains、Spotlight、密码框、全屏与多显示器、VoiceOver；按键处理预热 P95≤10ms、P99≤25ms、主动等待≤50ms；空闲 CPU 为零，常驻内存以 M1 实测为基线、长期使用不增长；两小时压力与八小时使用。
 
-M1 前待确认：Mac 的芯片与系统版本（决定构建目标与最低版本）；Kaiti SC 是否须在“字体册”中下载；只带链接器签名的输入法是否触发权限提示（M1 探针）。
+Mac 验收前待确认：实际系统版本；Kaiti SC 是否须在“字体册”中下载；只带链接器签名的输入法是否触发权限提示（M1 探针）。芯片已确认为 M 系列，不再等待该项。
 
 ## 数据与配置
 - Rust 工具只解析锁定单字表、tigress 词码、常用字集、拼音单字/读音、拆分和简繁映射；不导入小狼毫外观配置（候选窗配色与字体由设置给出）。复用数据不是兼容运行时。

@@ -108,6 +108,40 @@ pub enum MenuAction {
     Key(Key),
     Show(Panel),
 }
+impl MenuAction {
+    /// IMK 转发菜单命令时不依赖原 target 对象；整数 tag 同时绑定激活身份和固定语义动作。
+    pub fn tag(self, owner: u64) -> Option<i64> {
+        let kind = match self {
+            Self::Key(Key::ToggleAscii) => 1,
+            Self::Key(Key::ToggleFullShape) => 2,
+            Self::Key(Key::TogglePunctuation) => 3,
+            Self::Show(Panel::Lookup) => 4,
+            Self::Show(Panel::Settings) => 5,
+            _ => return None,
+        };
+        if owner == 0 {
+            return None;
+        }
+        owner.checked_mul(8)?.checked_add(kind)?.try_into().ok()
+    }
+    /// 转发者还须是 tag 对应的控制器，不能让失焦控制器借用另一个当前宿主的菜单身份。
+    pub fn from_tag(tag: i64, expected_owner: u64) -> Option<Action> {
+        let tag = u64::try_from(tag).ok()?;
+        let owner = tag / 8;
+        if owner == 0 || owner != expected_owner {
+            return None;
+        }
+        let action = match tag % 8 {
+            1 => Self::Key(Key::ToggleAscii),
+            2 => Self::Key(Key::ToggleFullShape),
+            3 => Self::Key(Key::TogglePunctuation),
+            4 => Self::Show(Panel::Lookup),
+            5 => Self::Show(Panel::Settings),
+            _ => return None,
+        };
+        Some(Action::Menu { owner, action })
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Select(Selection),
@@ -192,6 +226,30 @@ impl Presentation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn menu_tags_bind_identity_and_reject_unknown_actions_and_overflow() {
+        for owner in [1, 17, i64::MAX as u64 / 8] {
+            for action in [
+                MenuAction::Key(Key::ToggleAscii),
+                MenuAction::Key(Key::ToggleFullShape),
+                MenuAction::Key(Key::TogglePunctuation),
+                MenuAction::Show(Panel::Lookup),
+                MenuAction::Show(Panel::Settings),
+            ] {
+                assert_eq!(
+                    MenuAction::from_tag(action.tag(owner).unwrap(), owner),
+                    Some(Action::Menu { owner, action })
+                );
+                assert!(MenuAction::from_tag(action.tag(owner).unwrap(), owner + 1).is_none());
+            }
+        }
+        for tag in [-1, 0, 1, 7, 8, 14, 15] {
+            assert!(MenuAction::from_tag(tag, 1).is_none());
+        }
+        assert!(MenuAction::Show(Panel::Lookup).tag(0).is_none());
+        assert!(MenuAction::Show(Panel::Lookup).tag(u64::MAX).is_none());
+        assert!(MenuAction::Key(Key::Character('a')).tag(1).is_none());
+    }
     use tigertype_contracts::Candidate;
     fn state() -> InputState {
         InputState {

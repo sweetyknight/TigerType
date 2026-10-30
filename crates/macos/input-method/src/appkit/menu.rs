@@ -1,8 +1,12 @@
 //! 菜单目标由 Menu 持有，不使用全局回调表；旧菜单只能输出原控制器身份。
 use super::*;
 use crate::MenuAction;
-use objc2::{runtime::AnyObject, sel};
+use objc2::{
+    runtime::{AnyObject, Sel},
+    sel,
+};
 use objc2_foundation::NSObject;
+use objc2_input_method_kit::kIMKCommandMenuItemName;
 use tigertype_contracts::{Key, protocol::Panel};
 
 struct TargetState {
@@ -84,7 +88,9 @@ impl Menu {
                 // representedObject 强持有 target：调用方保留原生菜单后释放 Rust 包装也不会悬空。
                 item.setRepresentedObject(Some(&target));
                 item.setAction(Some(sel!(invoke:)));
-                item.setEnabled(owner != 0 && (index >= 3 || unavailable.is_none()));
+                let tag = command.tag(owner);
+                item.setTag(tag.unwrap_or(0) as isize);
+                item.setEnabled(tag.is_some() && (index >= 3 || unavailable.is_none()));
                 menu.addItem(&item);
             }
         }
@@ -92,5 +98,22 @@ impl Menu {
     }
     pub fn native(&self) -> &NSMenu {
         &self.menu
+    }
+    /// 系统菜单走 IMK 命令字典，合成预览仍走 target/action；两者输出相同的带身份动作。
+    pub(super) fn forwarded(
+        owner: u64,
+        selector: Option<Sel>,
+        info: Option<&NSDictionary<NSString>>,
+    ) -> Option<Action> {
+        if selector != Some(sel!(invoke:)) {
+            return None;
+        }
+        // SAFETY: 仅读取 InputMethodKit 的公开字典键；对象类型和禁用状态仍须核对。
+        let item = unsafe { info?.objectForKey(kIMKCommandMenuItemName) }?;
+        let item = item.downcast_ref::<NSMenuItem>()?;
+        if !item.isEnabled() {
+            return None;
+        }
+        MenuAction::from_tag(item.tag() as i64, owner)
     }
 }

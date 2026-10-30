@@ -1,6 +1,6 @@
 [workspace]
 # 分组目录不是包；只登记已有实现，不为未开发的平台建立占位 crate。
-members = ["crates/shared/contracts", "crates/shared/engine", "crates/shared/input-client", "crates/shared/ui-model", "crates/shared/backend", "crates/windows/ipc", "crates/windows/ui", "crates/windows/input-method", "crates/windows/app", "crates/macos/input-method", "crates/macos/ui", "tools/dev"]
+members = ["crates/shared/contracts", "crates/shared/engine", "crates/shared/input-client", "crates/shared/ui-model", "crates/shared/backend", "crates/windows/ipc", "crates/windows/ui", "crates/windows/input-method", "crates/windows/app", "crates/macos/input-method", "crates/macos/ui", "crates/macos/app", "tools/dev"]
 resolver = "3"
 
 [workspace.package]
@@ -20,6 +20,7 @@ tigertype-windows-app = { path = "crates/windows/app" }
 tigertype-windows-ui = { path = "crates/windows/ui" }
 tigertype-macos-input-method = { path = "crates/macos/input-method" }
 tigertype-macos-ui = { path = "crates/macos/ui" }
+tigertype-macos-app = { path = "crates/macos/app" }
 sha2 = "=0.10.9"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.154"
@@ -28,8 +29,10 @@ toml = { version = "=1.1.8", default-features = false, features = ["std", "parse
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
 windows = { version = "=0.62.2", default-features = false }
 windows-core = "=0.62.2"
-# M2/M3 先实现独立视图；仅 Apple 目标链接原生绑定，不提前引入 IMK 服务或后台运行器。
+# Apple 平台绑定锁定版本；仅在 Apple 目标链接，Windows 运行共享及纯逻辑测试。
 objc2 = "=0.6.5"
+objc2-input-method-kit = "=0.3.2"
+libc = "=0.2.191"
 objc2-foundation = "=0.3.2"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityElement", "NSAccessibilityProtocols", "NSAttributedString", "NSBezierPath", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSControl", "NSEvent", "NSFont", "NSGraphics", "NSGraphicsContext", "NSMenu", "NSMenuItem", "NSPanel", "NSPasteboard", "NSResponder", "NSScreen", "NSScrollView", "NSScroller", "NSStringDrawing", "NSText", "NSTextField", "NSTextView", "NSView", "NSWindow", "NSWorkspace"] }
 dispatch2 = { version = "=0.3.1", default-features = false, features = ["std", "objc2"] }

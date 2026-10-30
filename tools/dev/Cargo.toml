@@ -13,20 +13,24 @@ test = true
 [dependencies]
 serde_json.workspace = true
 tigertype-contracts.workspace = true
+tigertype-backend.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-tigertype-backend.workspace = true
 tigertype-windows-app.workspace = true
 tigertype-windows-ui.workspace = true
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-# 合成预览只依赖 Mac 展示组件，不链接 Windows 产品或尚未实现的 Mac 后台。
+# Mac 打包使用产品组装层；合成预览不启动正式后台，不链接 Windows 产品。
 tigertype-macos-input-method.workspace = true
 tigertype-macos-ui.workspace = true
 objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-app-kit = { workspace = true, features = ["NSRunningApplication"] }
+tigertype-macos-app.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
 
 [lints]
 workspace = true
