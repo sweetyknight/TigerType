@@ -1,0 +1,12 @@
+[package]
+name = "tigertype-ui-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tigertype-contracts.workspace = true
+
+[lints]
+workspace = true

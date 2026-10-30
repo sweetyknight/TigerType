@@ -6,11 +6,32 @@ Windows Rust 专用虎码输入法项目：默认单字输入，可在设置切�
 - [项目状态](docs/project-status.md)：实际已实现、缺陷和验证；不要把规划当成可用功能。
 - [开发约束](AGENTS.md)：代码、数据保护和交付流程。
 
+## 项目地图
+
+先看平台归属，再看职责；分组目录本身不是 crate。TSF/IMK 是平台输入法接口，不是与 engine/ui 并列的职责。
+
+| 要改什么 | 入口 |
+|---|---|
+| 逻辑键、输入状态、请求/回复 | [contracts](crates/shared/contracts/src/lib.rs) |
+| 虎码索引与引擎状态机 | [engine](crates/shared/engine/src/lib.rs) |
+| 宿主会话、按键规则、候选内容/位置 | [input-client](crates/shared/input-client/src/lib.rs) |
+| 调度、码表、设置事务与受管目录 | [backend](crates/shared/backend/src/lib.rs)，系统文件原语集中在 storage |
+| 查字/设置共享状态与布局 | [ui-model](crates/shared/ui-model/src/lib.rs) |
+| Windows 输入法、候选窗、上屏 | [Windows input-method](crates/windows/input-method/src/lib.rs) |
+| Windows 认证管道与线协议 | [Windows IPC](crates/windows/ipc/src/lib.rs) |
+| Windows 查字/设置、托盘与后台入口 | [UI](crates/windows/ui/src/lib.rs)、[app](crates/windows/app/src/lib.rs) |
+| Mac 候选面板/菜单、查字/设置 | [macOS input-method](crates/macos/input-method/src/lib.rs)、[UI](crates/macos/ui/src/lib.rs) |
+| 检查、打包、合成预览、架构测试 | [开发工具](tools/dev/Cargo.toml) |
+
+共享不等于全部平台无关：backend 当前只有 Windows 安全存储原语；Mac 后台仍待 M1。候选窗归 input-method，不混进查字/设置 UI。依赖表与进程/线程模型只维护在[实施方案](docs/implementation-plan.md#多平台架构)。
+
+原始资源在 `resources`，Windows 安装定义在 `installer/windows`。`target`、`artifacts`、`.cache`、`vendor` 是本地生成物或缓存，不是产品源码；不为 Linux 或未实现的 Mac app 建空目录。
+
 ## 构建和检查
 需要 Windows x64、锁定 Rust 1.94.1、MSVC 工具链与 i686-pc-windows-msvc 目标。首次准备缓存可运行 `cargo fetch --locked`；之后离线检查，不自动下载原词表或引擎。两种 MSVC 目标经 `.cargo/config.toml` 静态链接 CRT，产物不依赖 VC++ 运行库。
 
 ```powershell
-cargo run --locked --offline -p tigertype-app --example check
+cargo run --locked --offline -p tigertype-dev --example check
 cargo test --workspace --locked --offline
 ```
 
@@ -24,9 +45,9 @@ M2/M3 先按 Windows UI 实现独立候选面板、输入法菜单与查字/设�
 
 ```sh
 # 主线程创建隐藏窗口，合成事件与异步回复断言，离屏 PNG 输出到新建临时目录。
-cargo test --locked --offline -p tigertype-ui -p tigertype-imk --test appkit
+cargo test --locked --offline -p tigertype-macos-ui -p tigertype-macos-input-method --test appkit
 # 人工视觉/交互对照：只用合成资料，保存/载入仅在内存，配置文件打开会失败。
-cargo run --locked --offline -p tigertype-app --example macos_views
+cargo run --locked --offline -p tigertype-dev --example macos_views
 ```
 
 预览的菜单是创建时状态快照，不产生输入提交；用 ⌘Q 退出。离屏测试不会自动证明布局正确，须查看输出图像，并与 Windows 版对照。全屏、多屏、VoiceOver、菜单跟踪循环和真实热重载仍须 Mac 真机及 M1 接线验证。当前完整 app/工作区还不能在 Mac 构建，不能用预览成功替代 M1。
@@ -36,7 +57,7 @@ cargo run --locked --offline -p tigertype-app --example macos_views
 普通测试还会为当前位数构建本仓库的 `resident_probe` 测试 DLL，在限时子进程内验证显式驻留和管道关闭；不加载到用户应用，不注册 COM/TSF。仅复跑该项：
 
 ```powershell
-cargo test --locked --offline -p tigertype-ipc --test dll_residency
+cargo test --locked --offline -p tigertype-windows-ipc --test dll_residency
 ```
 
 此探针不是 TSF 输入法 DLL。进程期驻留的 DLL 不能热卸载，停止管道不代表宿主已卸载模块；宿主退出前仍会占用映像。
@@ -52,7 +73,7 @@ cargo test --locked --offline -p tigertype-ipc --test dll_residency
 下面的 Release 验收只把独立测试进程及其合成后台限制到一个 CPU，并用最多 3 秒的计算线程制造竞争；不注册输入法、不改现用后台/用户应用的优先级或亲和性。每个按键仍为 50ms，输出首键与 1,000 轮两键往返耗时；不是 TSF 首帧或长期验收。
 
 ```powershell
-cargo test --locked --offline --release -p tigertype-app --test backend_process backend_input_under_single_cpu_contention -- --ignored --exact --nocapture
+cargo test --locked --offline --release -p tigertype-windows-app --test backend_process backend_input_under_single_cpu_contention -- --ignored --exact --nocapture
 ```
 
 ## 码表与离线核心工具
@@ -61,10 +82,10 @@ cargo test --locked --offline --release -p tigertype-app --test backend_process 
 
 ```powershell
 # 码表目录也可换成安装版的 'C:\Program Files\TigerType\tiger'。
-cargo run --locked --offline -p tigertype-app -- lookup 'D:\Projects\TigerType\resources\tiger' 'han'
-cargo run --locked --offline -p tigertype-app -- lookup 'D:\Projects\TigerType\resources\tiger' '漢'
+cargo run --locked --offline -p tigertype-windows-app -- lookup 'D:\Projects\TigerType\resources\tiger' 'han'
+cargo run --locked --offline -p tigertype-windows-app -- lookup 'D:\Projects\TigerType\resources\tiger' '漢'
 # 核心诊断仅输出 JSON 状态，不向其他应用上屏。
-cargo run --locked --offline -p tigertype-app -- demo-input 'D:\Projects\TigerType\resources\tiger' 'unid '
+cargo run --locked --offline -p tigertype-windows-app -- demo-input 'D:\Projects\TigerType\resources\tiger' 'unid '
 # 完整码表单列验收，不包含在普通测试的 passed 中。
 cargo test --locked --offline -p tigertype-backend --test locked_resources -- --ignored --nocapture
 ```
@@ -85,7 +106,7 @@ CLI 查询输出第一页。锁定清单编译进程序，SHA256 用于核对来
 
 ```powershell
 # 请本会话的后台显示查字窗（映像须与后台相同）；后台未运行时以安装版位置启动后台并显示。
-cargo run --locked --offline -p tigertype-app -- lookup-window
+cargo run --locked --offline -p tigertype-windows-app -- lookup-window
 ```
 
 查字窗默认 520×400，可缩放。在查询框输入拼音、虎码或粘贴汉字/词后按 Enter 查询，每页最多九项排成一行字块（‹ › 翻页，左右方向键换字），下方详情卡显示字形、码位、可用编码与完整编码（键帽）、读音与拆分（字块）；缺资料明确标注。查询始终使用全字集和原字形，不产生上屏提交。
@@ -108,9 +129,9 @@ cargo run --locked --offline -p tigertype-app -- lookup-window
 安装包把三个字体装到全机字体目录（见下文“安装包”）。不走安装包时，可以普通权限只为当前用户安装（无需管理员）：
 
 ```powershell
-cargo run --locked --offline -p tigertype-app -- install-fonts 'D:\Projects\TigerType\resources\fonts'
+cargo run --locked --offline -p tigertype-windows-app -- install-fonts 'D:\Projects\TigerType\resources\fonts'
 # 完整资源核对（单列，不计入普通测试）
-cargo test --locked --offline -p tigertype-app --lib fonts -- --ignored
+cargo test --locked --offline -p tigertype-windows-app --lib fonts -- --ignored
 ```
 
 命令先核对全部字体与清单一致才开始，复制到 `%LOCALAPPDATA%\Microsoft\Windows\Fonts` 并登记到当前用户；已有同名而内容不同的文件不覆盖，已装过的不改动。之后新开的程序即可使用；UWP 宿主能否看到当前用户安装的字体尚未实测。
@@ -119,9 +140,9 @@ cargo test --locked --offline -p tigertype-app --lib fonts -- --ignored
 
 ```powershell
 # 单独终端运行。首次指定不存在的新目录；后续只打开本工具创建、带所有权标记的目录，不接管旧输入法目录。
-cargo run --locked --offline -p tigertype-app -- serve 'D:\Projects\TigerType\resources\tiger' 'D:\Projects\TigerType\.cache\backend-data'
+cargo run --locked --offline -p tigertype-windows-app -- serve 'D:\Projects\TigerType\resources\tiger' 'D:\Projects\TigerType\.cache\backend-data'
 # 从同一份 tigertype.exe 发出认证停止请求；无需注册或切换输入法。
-cargo run --locked --offline -p tigertype-app -- stop
+cargo run --locked --offline -p tigertype-windows-app -- stop
 ```
 
 `serve` 省略两个路径时使用安装版位置：程序目录下的 `tiger` 码表目录与 `%APPDATA%\TigerType`（不存在则新建）。`tigertype.exe` 为 GUI 子系统程序，开机自启与开始菜单唤起都不弹控制台；从终端直接运行时借用父控制台输出（PowerShell 不等待 GUI 程序结束，诊断请用 `cargo run`）。无控制台时 `serve`、`lookup-window` 启动失败会弹出错误框。
@@ -130,20 +151,20 @@ cargo run --locked --offline -p tigertype-app -- stop
 
 管道只授权本登录 SID 与 ALL APPLICATION PACKAGES，并带低完整性标签：AppContainer/低完整性宿主可连接，Untrusted 级被拒。后台只核对同会话，不打开宿主进程；宿主核对管道所有者、会话和后台映像，因此后台须以普通（非提升）权限运行，提升启动时管道所有者为 Administrators，宿主会拒绝连接。16 槽占满或合计会话达上限时，后台回收最久未用、无焦点且无组合的宿主，该宿主下次发送前发现断开并重连一次。`stop` 在停止确认后还等后台进程真正退出（与确认共用 5 秒期限）才返回成功，不承诺宿主 DLL 已卸载。
 
-`tigertype-tsf` 构建出 `tigertype_tsf.dll`：导出 `DllGetClassObject`/`DllCanUnloadNow`/`DllRegisterServer`/`DllUnregisterServer`，含类工厂、按键与焦点 sink、组合编辑组件、宿主进程内候选窗（自绘、UIA、IME WinEvent，点击经异步编辑会话选字）和任务栏输入法图标（显示中英状态，单击切换中英，右键菜单显示并切换中英、全半角与标点状态，或唤起查字窗/设置页），按键在同步编辑会话内经管道连接与 DLL 同目录的 `tigertype.exe`。未经真实宿主验收，不能当作可用输入法；快捷键、焦点与候选窗规则见实施方案。普通测试用合成 COM 文本宿主/线程管理器、隐藏候选窗、进程内假后台及临时私有注册表配置单元，不激活系统 TSF，不写系统或用户注册表，不往现用应用上屏；唯一例外是输入法图标右键测试会走真实菜单模态循环，菜单在屏幕左上角一闪而过（预先投递按键选择，不移动鼠标）。
+`tigertype-windows-input-method` 的 x64/x86 构建产物均名为 `tigertype_windows_input_method.dll`，分别位于对应目标的产物目录；安装器才将它们部署为 `tigertype_tsf.dll` / `tigertype_tsf_x86.dll`，不能从构建目录取残留的旧名 DLL。DLL 导出 `DllGetClassObject`/`DllCanUnloadNow`/`DllRegisterServer`/`DllUnregisterServer`，含类工厂、按键与焦点 sink、组合编辑组件、宿主进程内候选窗（自绘、UIA、IME WinEvent，点击经异步编辑会话选字）和任务栏输入法图标（显示中英状态，单击切换中英，右键菜单显示并切换中英、全半角与标点状态，或唤起查字窗/设置页），按键在同步编辑会话内经管道连接与 DLL 同目录的 `tigertype.exe`。未经真实宿主验收，不能当作可用输入法；快捷键、焦点与候选窗规则见实施方案。普通测试用合成 COM 文本宿主/线程管理器、隐藏候选窗、进程内假后台及临时私有注册表配置单元，不激活系统 TSF，不写系统或用户注册表，不往现用应用上屏；唯一例外是输入法图标右键测试会走真实菜单模态循环，菜单在屏幕左上角一闪而过（预先投递按键选择，不移动鼠标）。
 
 ## 安装包
 
 用 Inno Setup 6.7 把程序、两种位数 DLL、锁定码表、虎码印章图标（`tigertype.ico`，打包时现画，注册输入法时登记为配置图标）和随包字体做成一个 `TigerType-Setup-<版本>.exe`，拷到其他电脑上双击安装。资源整体授权未确认，安装包只用于自己的电脑，不公开分发。
 
-码表、字体与简体中文语言文件都随仓库保存，换电脑后克隆即可打包；每台打包机只需另装一次 Inno Setup 6.7.3：官方 GitHub <https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe>，SHA256 `9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732`，以 `/CURRENTUSER` 为当前用户安装（装到 `%LOCALAPPDATA%\Programs\Inno Setup 6`，打包驱动只在此处查找）。语言文件 `installer/ChineseSimplified.isl` 取自官方仓库同一标签的 <https://raw.githubusercontent.com/jrsoftware/issrc/is-6_7_3/Files/Languages/Unofficial/ChineseSimplified.isl>，SHA256 `7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278`。
+码表、字体与简体中文语言文件都随仓库保存，换电脑后克隆即可打包；每台打包机只需另装一次 Inno Setup 6.7.3：官方 GitHub <https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe>，SHA256 `9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732`，以 `/CURRENTUSER` 为当前用户安装（装到 `%LOCALAPPDATA%\Programs\Inno Setup 6`，打包驱动只在此处查找）。语言文件 `installer/windows/ChineseSimplified.isl` 取自官方仓库同一标签的 <https://raw.githubusercontent.com/jrsoftware/issrc/is-6_7_3/Files/Languages/Unofficial/ChineseSimplified.isl>，SHA256 `7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278`。
 
 ```powershell
 # 构建 release（静态 CRT，目标机无需 VC++ 运行库）、校验码表/字体/语言文件后编译；不修改系统。
-cargo run --locked --offline -p tigertype-app --example package
+cargo run --locked --offline -p tigertype-dev --example package
 ```
 
-产物为 `target\package\TigerType-Setup-<版本>.exe`，驱动最后打印其 SHA256。安装脚本为 [installer/tigertype.iss](installer/tigertype.iss)；驱动在打包前核对脚本逐个列出的字体与码表和锁定清单一致。
+产物为 `target\package\TigerType-Setup-<版本>.exe`，驱动最后打印其 SHA256。安装脚本为 [installer/windows/tigertype.iss](installer/windows/tigertype.iss)；驱动在打包前核对脚本逐个列出的字体与码表和锁定清单一致。
 
 安装（需管理员，Windows 10/11 x64）做这些事：
 
@@ -155,14 +176,14 @@ cargo run --locked --offline -p tigertype-app --example package
 
 升级：直接运行新版安装包。安装前先以原用户身份 `stop` 后台（等到旧后台退出）；已加载 DLL 的程序无法释放映像，且协议严格相等，不重开就只能出英文，所以“准备安装”页会列出仍载着现版或历次 `*.old` 旧版 DLL 的程序（资源管理器、浏览器、编辑器等），建议选“自动关闭应用程序”：支持重启的程序（如资源管理器）装完自动重开，其余须手动重开。选择不关闭或关不掉的，旧文件改名为 `*.old` 并登记重启后删除，新文件照常就位，这些程序重开前仍只出英文；装完删掉已无人使用的 `*.old`。静默安装（`/SILENT`）默认会关闭这些程序，加 `/NOCLOSEAPPLICATIONS` 则不关。卸载：在“设置 → 应用”中卸载，先请求停止后台（卸载程序为提升权限，实测可被普通权限后台接受），再注销两个 DLL、删除程序与自启项；仍被占用的文件在重启后删除；`%APPDATA%\TigerType` 用户数据保留。
 
-本机已有 C 批暂存注册（`C:\TigerType-Staging`）：安装前先在系统设置中移除旧键盘，`& 'C:\TigerType-Staging\tigertype.exe' stop` 停止暂存后台，以管理员分别用 System32/SysWOW64 的 `regsvr32 /u` 注销暂存的两个 DLL；暂存目录待相关进程退出后以管理员删除。暂存后台用的 `.cache\backend-data` 与安装版的 `%APPDATA%\TigerType` 互不相干，旧设置不会迁移。
+若升级前仍有暂存版注册，先核对注册路径与占用进程，再由用户移除旧键盘、停止对应后台并以管理员注销两个位数的 DLL；不要凭旧记录操作不存在的暂存目录。暂存数据与安装版的 `%APPDATA%\TigerType` 互不相干，旧设置不会迁移。本机部署与重启清理的实际状态只记录在[项目状态](docs/project-status.md)。
 
 ## 沙箱宿主前提测试（须单独授权）
 
 AppContainer 宿主前提测试会创建并删除一个临时 AppContainer 配置（当前用户注册表与 `%LOCALAPPDATA%\Packages`），默认忽略，须经用户授权后单独运行：
 
 ```powershell
-cargo test --locked --offline -p tigertype-ipc --lib -- --ignored --exact pipe::sandbox_tests::app_container_host_connects_with_logon_sid_and_limited_query_but_cannot_squat
+cargo test --locked --offline -p tigertype-windows-ipc --lib -- --ignored --exact pipe::sandbox_tests::app_container_host_connects_with_logon_sid_and_limited_query_but_cannot_squat
 ```
 
 ## 数据边界

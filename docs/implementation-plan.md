@@ -1,6 +1,6 @@
-# TigerType：Rust 专用虎码引擎与工程治理
+# TigerType 实施方案
 
-批准：2026-10-22；同日修订 UWP/AppContainer 宿主、认证、宿主内候选窗、编辑会话与槽位回收，并在 A 批实现时补充 AppContainer 配置前提、回收与停止细节，B1 实现时补充协议 v6、按键映射、焦点上报与外部改写处理，B2 实现时补充交换结论、候选窗登记与点击受理细节；10-23 界面重设计补充配色主题、候选字体与协议 v7，同日补充安装包（Inno Setup）、查字窗并入后台与设置热重载，并按用户要求删除候选窗提示行（协议 v8），加入任务栏输入法图标作为设置入口（协议 v9）；10-24 任务栏输入法图标改显示中英状态，前台程序正用本输入法时隐藏通知区图标，同一时刻只显示一个（协议 v10）；同日任务栏与通知区图标改为无底板单字（字色随任务栏深浅），并加入小狼毫 MacRoseo 风格的玫红主题（协议 v11）；同日按外部审阅改为选中文字后输入替换选区、热重载在顶屏处生效，并删去数据包中的旧外观段（包格式 v2）；10-26 候选窗登记宿主布局变化通知，组合矩形晚到时补显示或移动，取不到位置时按组合起点、系统光标、原位置、上次组合位置、输入区域逐级退；同日按用户批准的 UI 重设计：设置窗分输入/外观/快捷键/高级四区并即时生效，配置改为带中文注释的 `settings.toml`（可手工修改后重新载入），加入每页候选数（3–9，默认 5，协议 v13），候选窗只在多页时显示翻页指示，查字窗改为紧凑的字块行加详情卡，任务栏输入法图标右键菜单改为显示当前状态的中英/全半角/标点三项加查字与设置，输入法配置图标、通知区与窗口统一用虎码印章；同日按用户要求锁定码表、字体与安装语言文件随仓库入库，码表不再生成 JSON 数据包，改为启动时核对原文后直接解析；10-27 因升级后已打开程序仍载旧 DLL 只出英文，安装包改为经重启管理器列出并关闭/重启这些程序（含历次改名的 `*.old`），`stop` 改为等后台进程退出才返回；同日批准多平台架构与 macOS 端方案：平台无关层另立 frontend/backend，macOS 为 IMK 输入法进程，管理员安装、不做代码签名、打包与安装全用 Rust，Linux 只预留；同日实施 P0 时补充：ipc 为信封派生另依赖 serde，backend 另依赖 serde_json（锁定清单与设置模板），backend 公开词表类型供组装层借用（app 不直接依赖 engine），调度器自记最近使用、平台只补传输条件，引擎内部失败改为回复不可用。唯一当前范围与架构依据。实际进度见 [项目状态](project-status.md)。开发期不向后兼容，旧路线代码和文档直接删除，不保留兼容层或归档副本。
+本文维护批准范围、架构与验收，不记录完成进度。实际状态和证据见 [项目状态](project-status.md)，开发入口见 [README](../README.md)。2026-10-29 批准按平台归属重组目录，开发期不向后兼容；旧路线、转发包和归档文档直接删除。
 
 ## 产品范围
 - 产品名统一为 TigerType，crate 使用 `tigertype-*`、程序为 `tigertype.exe`，工作区目录为 `TigerType`，正式数据目录为 `%APPDATA%\TigerType`。窗口、IPC 管道/帧标识及目录所有权标记同步使用新名称；开发期不兼容旧名称的程序或受管目录，不迁移或改写已有数据。
@@ -18,24 +18,87 @@
 - 设置窗分“输入、外观、快捷键、高级”四区（左侧导航，内容超出窗口时纵向滚动），修改即时保存并热加载，不设保存/取消按钮；保存在途时的新改动不排队，回复后按最新草稿与已确认设置比较再存一次，保存失败时控件撤回已确认设置并说明原因。输入区：单字/词输入模式（默认单字）、仅常用字、四码唯一自动上屏、输出字形；外观区：按草稿现画的候选窗预览、候选字体、每页候选数、显示拆分与编码（开启后候选注释为小狼毫虎码方案同款〔拆分 · 编码〕，缺拆分时只列编码；默认关闭）、配色主题卡片与自定义四色（色块点开 8×4 无蓝色板或输入 `#RRGGBB`，提示最低对比度或不可用原因）；快捷键区只读列出现有快捷键（数字键范围随每页候选数）；高级区用系统默认编辑器打开受管 `config/settings.toml`，手工修改后点“重新载入”生效（格式错误时保留当前设置并指出行号），另有版本信息。`settings.toml` 按带中文注释的固定模板写出（`[input]`、`[candidate]`、`[theme]`、`[theme.custom]` 四节，颜色写作 `"#RRGGBB"`），读回时缺键、多键、类型或范围不符都拒绝；首次运行写出默认文件；界面保存按模板重写，用户自加的注释不保留；文件被外部修改后界面保存被拒，须先重新载入。旧 `settings.json` 不再读取（开发期不兼容）。当前程序任务栏输入法图标右键菜单前三项写当前状态（中文/英文、半角/全角、中文标点/英文标点），点击即翻转，其下为查字、设置；全角与标点开关仍为会话状态。保存成功即热重载到后台，新会话与无组合的会话立即使用；组合中的会话在本次组合结束时换上，无需重启后台。
 - 不做 librime、Lua、OpenCC 运行库、数据库、英文补全、计算器、日期、Emoji、网址启动或通用 YAML 配置兼容。
 
-## 架构与接口
-本节为 Windows 实现细节；crate 分层、职责与依赖以“多平台架构”为准（P0 已落地）。
+## 多平台架构
+
+### 阅读顺序与命名
+目录一级按共享/Windows/macOS，二级按职责；分组目录不是 crate。包名使用 `tigertype-<平台>-<职责>`，共享包省略平台。TSF（Windows 文本服务框架）、IMK（macOS Input Method Kit）、Win32、AppKit 是系统适配技术，不作为一级组件分类。
+
+- **input-client**：宿主侧会话、按键与候选展示逻辑，不是 GUI，也不加载引擎。
+- **input-method**：平台输入法适配，拥有候选窗、编辑/上屏和输入法菜单。
+- **ui / ui-model**：只指查字/设置窗口及其共享模型，不包含宿主候选窗。
+- **backend**：共享后台业务，不等于独立进程；Windows app 和未来 macOS app 决定进程/线程形态。
+- **shared** 表示复用职责，不代表每个文件完全平台无关。仅 backend 的具名存储边界允许文件系统平台绑定；不引入通用文件系统框架。
+
+源码路径与部署名相互独立。重组不改变 `tigertype.exe`、`tigertype_tsf.dll`、`tigertype_tsf_x86.dll`、COM 标识、协议或用户目录；打包驱动校验新构建 DLL 到部署名的映射。这不是兼容层：旧 crate、转发入口和混合目录直接删除。
+
+### 目录与职责
+仅下表 12 个有实现的叶子目录是工作区成员；macOS app 在 M1 实现时再建立，Linux 不建占位目录。下表同时是架构门禁的明确白名单，新增依赖须同步修改，不能使用通配放行。
+
+| 目录（相对仓库根） | 职责 | 项目内直接依赖（省略 tigertype 前缀） | 外部直接依赖 |
+|---|---|---|---|
+| crates/shared/contracts | 数据契约、逻辑键、主题、输入状态、请求与回复 | 无 | serde |
+| crates/shared/engine | 引擎状态机、词表索引、字形转换 | contracts | 无 |
+| crates/shared/input-client | Host/Channel、物理键规则、Shift 判定、候选内容/尺寸与位置退路 | contracts | 无 |
+| crates/shared/ui-model | 查字/设置 Model、文案、控件标识与纯布局 | contracts | 无 |
+| crates/shared/backend | 锁定资源加载、settings.toml、受管目录、Dispatcher、宿主回收和查字控制器 | contracts、engine | serde、serde_json、sha2、toml；Windows 文件原语 windows-sys |
+| crates/windows/ipc | Windows 跨进程信封、帧校验、认证管道、取消和驻留保护 | contracts | serde、serde_json、windows-sys |
+| crates/windows/input-method | TSF DLL、编辑会话、候选窗、UIA、输入法菜单与注册 | contracts、input-client、windows-ipc | windows、windows-core |
+| crates/windows/ui | Win32 查字/设置窗、托盘、事件邮箱 | contracts、ui-model | windows-sys |
+| crates/windows/app | Windows 后台/命令行/字体管理，组装固定线程 | contracts、backend、windows-ipc、windows-ui | serde、serde_json、windows-sys |
+| crates/macos/input-method | macOS 输入法系统适配；分阶段实现控制器、候选面板、菜单 | contracts、input-client | objc2、objc2-foundation、objc2-app-kit |
+| crates/macos/ui | AppKit 查字/设置视图、Mac 草稿交互和主线程回复 | contracts、ui-model | objc2、objc2-foundation、objc2-app-kit、dispatch2 |
+| tools/dev | 检查、打包、合成预览和跨组件治理测试，不进入产品 | contracts；Windows：backend、windows-app、windows-ui；Mac 预览：macos-input-method、macos-ui | serde_json；Windows：windows-sys；Mac：objc2、objc2-foundation、objc2-app-kit |
+
+backend 的 `storage/windows.rs` 集中目录固定、链接/硬链接拒绝、租约、原子替换及 Windows 路径呈现；其余后台模块不直接调用平台 API。Unix 实现属于 M1，不能用普通文件读取占位而绕过校验。词表类型通过 backend 公开，组装层不直接依赖 engine。
+
+原始资源在 `resources`，安装定义在 `installer/windows`；构建产物、缓存与证据不作为源码。测试跟随组件：纯模型测试在 shared，原生测试在对应平台，架构/文档与安装脚本校验归 tools/dev。
+
+### 依赖方向与禁止边
+**A → B 表示 A 依赖 B**；返回消息不构成反向代码依赖。直接依赖以上表为准，另检查传递可达性：
+
+- contracts、engine、input-client、ui-model 由编译器禁止 unsafe，不得到达任何平台包或平台组件。
+- backend 不依赖 input-client、UI、平台输入法或 IPC；只允许存储原语所需的系统绑定，不能到达界面/COM 框架。
+- input-method 不依赖 engine、backend、ui-model 或查字/设置 UI，平台输入法彼此不依赖。
+- UI 不依赖 engine、backend、input-client、IPC 或输入法组件；界面只发 contracts 请求，由组装层把回复送回。
+- Windows 与 macOS 产品组件不互相引用；仅开发工具为合成预览选择对应目标的组件。
+- app 不直接依赖 engine；共享业务不反向依赖 app。
+- 产品不得依赖 tools/dev，**包括 dev/build 依赖**。打包工具可使用产品的字体/图标入口，产品测试辅助留在所属组件，不能为复用测试辅助而回引工具。
+- 架构检查同时验证真实包名、目录归属、别名、条件/测试/构建依赖、传递禁止边与环；未知成员拒绝，并有对应反例。
+
+Windows UI 内部同样单向：events 组装 panels、window、tray；panels 依赖 window/controls；window 依赖 controls；controls 依赖 drawing/modal 及 seal；seal 只依赖绘制基础，tray 只依赖绘制/模态与 seal。test_support 是测试辅助叶子，窗口测试和托盘测试不互相引用。不把句柄藏进共享模型，不为拆文件增加全局业务状态。
+
+### 运行形态（消息流，不是 crate 依赖图）
+
+| 平台 | 输入法前端 | 引擎与设置 | 消息通道 |
+|---|---|---|---|
+| Windows | 宿主进程内的 TSF DLL；候选窗在宿主 TSF 线程 | 每登录会话一个独立后台，固定引擎/UI/工作线程 | 认证命名管道，只有此边界序列化和校验协议版本 |
+| macOS | 输入法进程主线程上的 IMK 控制器、候选面板与全部 AppKit 窗口 | 同进程固定引擎与工作线程 | 进程内有界类型化通道，不套 Windows IPC |
+
+两种形态的宿主逻辑都面对 `tigertype_input_client::Channel`：连接、编码与重试共享同一个绝对截止时间；传输失败作废连接且不重放，下一键重新开会话。取消未上屏组合、放行原键、拒收迟到提交的语义不能因平台变化而改变。
+
+字体名、系统路径、快捷键写法和系统坐标转换归平台；contracts 只保存语义值。词表只读共享，查字/设置窗口首次唤起才创建；不引入异步运行时、通用 UI 框架、轮询或逐键线程。资源开销先测量再优化，unsafe/SIMD/汇编仍受边界约束。
+
+### Linux 预留
+开工前另行批准框架：IBus 的输入法进程形态，或 Fcitx5 插件加独立后台形态（C++ 胶水须另批）。届时在 Linux 分组新增有实现的输入法、视图和组装组件；只有确需跨进程时增加传输，不把 Windows IPC 扩成预设的万能传输。Wayland 下候选定位优先服从框架面板能力，无蓝色主题限制另行确认。Unix 文件安全原语可复用 macOS 的实现，但当前不建空实现。
+
+## Windows 运行模型
+本节只描述 Windows 的进程、系统回调与传输；组件职责和允许依赖以上节为准。
 
 每登录会话一个后台，固定引擎线程，查字/设置另有固定 UI 线程；宿主内只有 TSF DLL，经认证 IPC 连接，候选窗由 DLL 在宿主 TSF 线程内绘制。后台主动/随登录启动，输入回调不拉起程序。严重故障取消组合、放行原键，由用户重启；不再要求双后台自动监督。
 
-tsf 的 COM 绑定使用锁定 `windows` / `windows-core`，不手写系统 vtable，这两个包只允许在 tsf。tsf 只做系统绑定：虚拟键换成 `PhysicalKey`、修饰键与布局字符读取、编辑会话、候选窗绘制与系统矩形换算；宿主侧会话 `Host`、逻辑键规则、单击 Shift 判定、候选行/页脚与摆放退路取自 frontend。核心不做文件/进程/窗口操作；UI 不直接调用 engine；contracts/engine/frontend 禁止 unsafe。
+Windows input-method 的 COM 绑定使用锁定 `windows` / `windows-core`，不手写系统 vtable，这两个包只允许在 Windows input-method。Windows input-method 只做系统绑定：虚拟键换成 `PhysicalKey`、修饰键与布局字符读取、编辑会话、候选窗绘制与系统矩形换算；宿主侧会话 `Host`、逻辑键规则、单击 Shift 判定、候选行/页脚与摆放退路取自 input-client。核心不做文件/进程/窗口操作；UI 不直接调用 engine；contracts/engine/input-client/ui-model 禁止 unsafe。
 
-tsf 同时产出 cdylib（TIP DLL）和 rlib（测试）。TIP 只含类工厂、`ITfTextInputProcessorEx`、`ITfKeyEventSink`、`ITfThreadMgrEventSink`、编辑组件、候选窗和任务栏输入法图标；图标是 `GUID_LBI_INPUTMODE` 语言栏按钮，激活时登记、停用时注销，图标每次现画（像微软拼音、小狼毫那样只画“中”或“英”一个字、底全透明，字色随任务栏深浅：激活时读一次系统“Windows 模式”，深色白字、浅色近黑字；按回复中的英文模式切换并通知系统重取图标与提示，不读盘；品牌印章另由输入法配置图标与通知区图标显示），按钮只声明普通按钮样式，系统右键只调用 `OnClick(右键)`、不调用 `InitMenu`，因此点击都在 `OnClick` 内处理：左键切换中英——不在按键事件内拿不到同步编辑会话，有自有组合时复用点击选字的异步编辑会话交换 `ToggleAscii`（后台把编码原样上屏），无组合时不碰文档直接交换并先让后台丢弃宿主已终止的残留组合；右键菜单由 TIP 以本线程临时隐藏窗口为所有者 `TrackPopupMenuEx` 自绘弹出（无蓝色，项保留文字供读屏器），弹出前在单次回调预算内确认后台可连接并取上次回复的中英、标点与全角状态，状态项写当前状态（分隔线为自绘分隔项，方向键跳过），选“查字/设置”经本宿主已有连接请后台唤起窗口，选中英项同左键，选全角或标点项则不碰文档直接交换 `ToggleFullShape`/`TogglePunctuation`；注册类别含 `GUID_TFCAT_TIP_KEYBOARD`、`GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT`、`GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT`；`DllCanUnloadNow` 恒为 `S_FALSE`。延迟只记固定区间计数，不记输入内容。
+Windows input-method 同时产出 cdylib（TIP DLL）和 rlib（测试）。TIP 只含类工厂、`ITfTextInputProcessorEx`、`ITfKeyEventSink`、`ITfThreadMgrEventSink`、编辑组件、候选窗和任务栏输入法图标；图标是 `GUID_LBI_INPUTMODE` 语言栏按钮，激活时登记、停用时注销，图标每次现画（像微软拼音、小狼毫那样只画“中”或“英”一个字、底全透明，字色随任务栏深浅：激活时读一次系统“Windows 模式”，深色白字、浅色近黑字；按回复中的英文模式切换并通知系统重取图标与提示，不读盘；品牌印章另由输入法配置图标与通知区图标显示），按钮只声明普通按钮样式，系统右键只调用 `OnClick(右键)`、不调用 `InitMenu`，因此点击都在 `OnClick` 内处理：左键切换中英——不在按键事件内拿不到同步编辑会话，有自有组合时复用点击选字的异步编辑会话交换 `ToggleAscii`（后台把编码原样上屏），无组合时不碰文档直接交换并先让后台丢弃宿主已终止的残留组合；右键菜单由 TIP 以本线程临时隐藏窗口为所有者 `TrackPopupMenuEx` 自绘弹出（无蓝色，项保留文字供读屏器），弹出前在单次回调预算内确认后台可连接并取上次回复的中英、标点与全角状态，状态项写当前状态（分隔线为自绘分隔项，方向键跳过），选“查字/设置”经本宿主已有连接请后台唤起窗口，选中英项同左键，选全角或标点项则不碰文档直接交换 `ToggleFullShape`/`TogglePunctuation`；注册类别含 `GUID_TFCAT_TIP_KEYBOARD`、`GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT`、`GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT`；`DllCanUnloadNow` 恒为 `S_FALSE`。延迟只记固定区间计数，不记输入内容。
 
 查字/设置窗采用 Win32 标准 EDIT/BUTTON/LISTBOX/STATIC 控件和系统可访问性基础，不启用系统控件主题（其悬停、焦点、勾选为蓝色），由父窗口与子类化按钮按主题自绘：查字窗默认 520×400，为查询框（回车查询）、横排字块（单行多列自绘列表）与详情卡（田字格字形、编码键帽、读音、拆分字块、复制当前字）；设置窗固定 720×520，左侧导航按单选组切换分区，各区为开关行、分段单选与卡片，只布局并显示当前分区的控件，滚动位置以整数存于窗口数据；色板为自绘弹出菜单（经同一模态等待）；图标字体用 Segoe Fluent Icons（回退 MDL2 Assets）；窗口只处理 contracts 进程内请求/回复，应用层固定工作线程独占词表和设置租约。请求/回复队列各容量一、一次仅一个在途动作；内核事件与 Windows 消息共同唤醒 UI，不定时轮询、不跨线程传递窗口句柄。关闭先断开通道，再实际 join；不把超时当作线程已退出。菜单（托盘右键、窗口系统菜单）与移动/缩放是系统模态循环，期间事件循环不运行：进入时由系统线程池代等唤起邮箱事件，有信号（唤起或后台停止）即投递消息让 UI 线程收起菜单、取消移动/缩放并重新置事件，退出模态时阻塞注销等待，停止因此不必等用户操作。查字/设置窗在后台进程的固定 UI 线程：该线程启动即挂通知区图标（前台程序正用本输入法、任务栏已显示输入法图标时隐藏：持有输入焦点的宿主线程以 `Indicator(取得|失去)`/`Noted` 报告，后到的取得覆盖先前持有者、失去只清除自己、断开等同失去，持有者不被槽位回收，有无持有者经只留最新值的交接槽交给 UI 线程；打开溢出区等操作把前台交给任务栏面板时任务栏仍显示先前程序的输入法图标，UI 线程以进程外前台切换 WinEvent 判断，前台是任务栏面板时维持隐藏，换到其他窗口再定；隐藏的顶层窗口接收图标回调与 TaskbarCreated 广播，资源管理器未就绪或重启后重新挂上；版本 4 回调，单击/Enter 打开设置页，右键或菜单键弹出自绘菜单，配色按主题、无系统蓝色高亮，菜单项保留文字供读屏器；图标为虎码印章（琥珀圆角方块、米白霞鹜文楷“虎”字，大尺寸带两侧虎纹，GDI 四倍超采样现画），与输入法配置图标、查字/设置窗图标一致；右键菜单为查字、设置（带图标），后台退出时删除），查字/设置窗首次唤起才建，关闭只隐藏（连同设置窗，未填完的色值丢弃），后台停止时唤起邮箱断开、窗口销毁，UI 与工作线程退出并实际 join 后才释放受管目录租约。工作线程与引擎线程共用只读词表，工作线程独占受管目录租约与设置事务。唤起消息 `Show(查字|设置)`/`Shown` 只投递信号、不改数据，已握手的宿主（图标菜单）与管理端都可发送，不核对映像；宿主上的唤起不占会话，成功后连接照常用于输入。唤起方先 `AllowSetForegroundWindow` 放行前台切换；设置页可在查字窗隐藏时单独显示，并有自己的任务栏按钮。管理端唤起时后台未运行，则唤起进程自身成为后台并立即显示查字窗。保存成功后，工作线程把设置放进只留最新一份的交接槽并以内核事件唤醒引擎线程；引擎线程每轮先取交接槽再处理请求，新会话随 `Prepare::Open` 使用新设置；已打开的会话在下一次请求时交给引擎，无组合即换上，组合中由引擎暂存、在本次组合结束时换上（含顶屏与退格删空，已显示的候选与编号不重算）。查字结果不受输入设置影响，字形字体与配色跟随设置。
 
 查字与设置各自保留状态提示，设置保存不重写查字资料或破坏选区；设置窗控件即草稿，重复唤起保留当前分区，隐藏后重开恢复为已确认设置。异步回复只能恢复本前台窗口丢失的控件焦点，不抢其他应用或用户已切换的焦点；输入框的 IME 组合、展开的字形下拉框优先处理确认/取消。内部消息错配视为故障退出，不继续消费不确定回复。
 
-显式唤起不得继承后台的隐藏启动策略：`ShowWindow` 后若仍不可见，以 `SetWindowPos(SWP_SHOWWINDOW)` 确保显示，再前置并恢复控件焦点。候选窗显示不用 `ShowWindow`，防止宿主启动显示标志改变首次显示行为；隐藏时以 `SetWindowPos` 原子隐藏并归零尺寸，清除旧圆角边框的合成面积，窗口/字体缓存保留，下次组合重新布局。首次显隐验收在限时子进程的私有桌面进行，不切换用户桌面；`ui` 仅在 dev-dependencies 为既有 `windows-sys` 启用 `Win32_System_StationsAndDesktops`，不新增包或正式依赖。
+显式唤起不得继承后台的隐藏启动策略：`ShowWindow` 后若仍不可见，以 `SetWindowPos(SWP_SHOWWINDOW)` 确保显示，再前置并恢复控件焦点。候选窗显示不用 `ShowWindow`，防止宿主启动显示标志改变首次显示行为；隐藏时以 `SetWindowPos` 原子隐藏并归零尺寸，清除旧圆角边框的合成面积，窗口/字体缓存保留，下次组合重新布局。首次显隐验收在限时子进程的私有桌面进行，不切换用户桌面；`windows-ui` 仅在 dev-dependencies 为既有 `windows-sys` 启用 `Win32_System_StationsAndDesktops`，不新增包或正式依赖。
 
 移除 Rime 方案和 X11 键码，使用逻辑按键、输入模式、输出字形和结构化学习信息；协议升版并拒绝旧版本。焦点、光标、选字和快照绑定会话/版本；上屏由 TSF 完成，查询不产生提交。
 
-协议 v5 删除 v4 的宿主通知、`TakeSelection` 和焦点光标矩形，直接拒绝 v4。按键/选字绑定焦点代次，焦点请求只报告取得/失去（`focused` 布尔值），光标与候选位置留在宿主进程。后台进程内候选窗失去光标与点击回送依据，随 A 批删除；进程内候选预览工具与 ui 候选窗已在 B2 随宿主内候选窗落地删除。应用调度为认证后的连接分配不复用宿主编号，正文不得自报宿主；请求序号、会话编号和焦点代次在各宿主内单调，同时在线最多 16 宿主、合计 64 会话。焦点切换取消旧的未上屏组合。协议 v6 在 `InputState` 增加 `ascii_punctuation`，使 TSF 能按上次状态精确判定未组合时的标点。协议 v7 在 `Options` 增加配色主题、自定义四基色与候选字体，随 `InputState` 交给宿主内候选窗，DLL 不读盘；并加入管理消息 `Show`/`Shown`。协议 v8 删除 `InputState.notice`，候选窗不再显示提示行。协议 v9 让 `Show` 携带目标窗口（查字/设置），并允许已握手的宿主发送。协议 v10 加入 `Indicator(bool)`/`Noted`：宿主线程取得/失去输入焦点（`ITfThreadFocusSink`，及在持有焦点的线程中激活）时报告，新连接补报仍持有的焦点；协议 v11 在配色主题中加入玫红，`Palette` 增加高亮候选字色 `chosen`；加入 `Key::ToggleFullShape` 与 `InputState.full_shape`；直接拒绝 v2–v10。协议 v13 在 `Options` 增加每页候选数 `page_size`（3–9），候选页大小随设置变化，IPC 选字索引上限为最多候选数 9，引擎按本页实际大小判越界；直接拒绝 v2–v12。
+当前跨进程协议为 v14，旧版本直接拒绝。后台为认证后的连接分配不复用宿主编号；正文不得自报宿主。请求序号、会话编号和焦点代次在各宿主内单调，同时在线最多 16 宿主、合计 64 会话。候选窗留在宿主，坐标不跨进程传输，点击绑定已展示快照；取得新焦点时取消旧的未上屏组合。Options、InputState 和主题均由回复传递，DLL 不读盘；Show/Shown 唤起查字或设置，Indicator/Noted 协调输入法图标和托盘显隐。
 
 协议 v14 为 `Command::Key` 增加必填互斥前置操作 `Prepare::Keep/Open/Focus/Clear`，直接拒绝 v2–v13。新会话的 Open 同时取得焦点，Focus 同时清空旧组合，Clear 只清空当前焦点会话；前置操作与本键在一次调度内执行，只回最终 KeyOutcome。复用同一准入、代次、焦点、快照及设置采用逻辑，先拒绝重复会话/过期代次再修改状态。同版删除单独的 Open/Focus/Clear 命令及 Opened/Focused/Cleared 回复，也不再有失焦报告，焦点只随按键取得。新会话被拒不重试；已有会话的键被明确拒为 NotFocused/StaleFocus 时，仅允许同一期限内用 Prepare::Focus 补发一次，传输失败仍不重放。
 
@@ -59,63 +122,17 @@ tsf 同时产出 cdylib（TIP DLL）和 rlib（测试）。TIP 只含类工厂�
 
 候选窗按微软 IME 要求在宿主进程内创建：TSF 线程惰性创建、停用时销毁，以 `ITfContextView::GetWnd`（失败时用 `GetFocus`）作 owner，与宿主处于同一 z-order 层级；窗口类用 DLL 模块句柄注册。不用标准按钮，改为自绘与命中测试，避免同线程控件取得焦点、激活弹窗并终止组合。显示、隐藏和移动时发 `EVENT_OBJECT_IME_SHOW/HIDE/CHANGE`；UIA 遵循 IME 约定：AutomationId 为 `IME_Candidate_Window`，显隐发 MenuOpened/MenuClosed，选中项发选中事件，Name 为候选字。候选窗创建时仅临时把 TSF 线程切到逐显示器 DPI 感知，随后恢复宿主上下文，防止系统按位图缩放候选文字；仍使用宿主同一上下文的 `GetTextExt` 坐标。候选数据取自按键回复的 `InputState`，不另走 IPC；快照更新时递增本地展示编号、取消旧鼠标捕获，并在显示后、发出 IME/UIA 通知前同步处理一次 `WM_PAINT`，避免慢监听者拖住首帧。同快照仅移动且 DPI 不变时复用测量结果。定位矩形须非全零且有界；已有有效本次/最近坐标就不查询 GetScreenExt，预算耗尽不追加查询（不能强行中断宿主正在执行的 COM）。每编辑器至多一个待执行只读定位，会话运行时读取最新组合，50ms 预算从开始执行时计算；它只读且读取执行时状态，因此不按排队期限作废，期间并入的布局通知不会丢。回调执行（含重复/失效拒绝）、被拒/丢弃或编辑器失效均解除令牌，旧回调不得解除新请求或复活失焦候选。
 
-候选窗生命周期不能由 Rust 对象或候选快照代替：Win32 会随 owner 销毁 owned popup，`WM_NCDESTROY` 注销本线程窗口登记；使用和释放前核对登记中的对象身份，而非仅用 `IsWindow`（句柄可能已被复用）。失效窗在下次展示时惰性重建，旧点击与 UIA 元素不可再用。内容/坐标相同也检查 owner 和实际可见性，恢复系统隐藏的窗口，刷新时以 `HWND_TOP` 提到原层前面，不使用全局 `HWND_TOPMOST`、不抢焦点；纯层级恢复不重新布局、重画或作废点击。线程焦点与 TIP 按键焦点分别记录，任一失去即隐藏；两者都允许时才接受布局显示，包含失焦前排队、失焦后执行的布局回调，恢复焦点时只读重取仍有效的组合。无需按应用名称分支、轮询、常驻钩子或新线程。显隐/遮挡验收在不切换的私有桌面线程内运行，`tsf` 仅在 dev-dependencies 为既有 `windows` 启用 `Win32_System_StationsAndDesktops`。
+候选窗生命周期不能由 Rust 对象或候选快照代替：Win32 会随 owner 销毁 owned popup，`WM_NCDESTROY` 注销本线程窗口登记；使用和释放前核对登记中的对象身份，而非仅用 `IsWindow`（句柄可能已被复用）。失效窗在下次展示时惰性重建，旧点击与 UIA 元素不可再用。内容/坐标相同也检查 owner 和实际可见性，恢复系统隐藏的窗口，刷新时以 `HWND_TOP` 提到原层前面，不使用全局 `HWND_TOPMOST`、不抢焦点；纯层级恢复不重新布局、重画或作废点击。线程焦点与 TIP 按键焦点分别记录，任一失去即隐藏；两者都允许时才接受布局显示，包含失焦前排队、失焦后执行的布局回调，恢复焦点时只读重取仍有效的组合。无需按应用名称分支、轮询、常驻钩子或新线程。显隐/遮挡验收在不切换的私有桌面线程内运行，`windows-input-method` 仅在 dev-dependencies 为既有 `windows` 启用 `Win32_System_StationsAndDesktops`。
 
 跨应用验收以提供系统输入接口的编辑区域为前提，须覆盖窗口切换/重建、子窗口与浮层、最小化恢复、普通/置顶窗口、边界与多屏，以及支持系统 IME 的游戏聊天框；无 TSF/系统 IME 输入接口、独占全屏绕过桌面合成或受保护桌面的区域不承诺输入，不通过注入、全局置顶或绕过游戏保护强行支持。合成宿主、真实应用与长期使用的证据分开记录，不能将自动测试通过表述为所有应用已通过。
 
-候选窗实现细节（B2）：组合矩形在按键/点击会话写入后以同一 cookie 的 `GetTextExt` 取得（全零矩形视为宿主不知道），位置逐级退：整段组合 → 组合起点（折叠范围，部分宿主只给得出插入点）→ 本线程 `GetGUIThreadInfo` 光标 → 候选窗正在显示时的原位置 → 本输入框（编辑器）上次取得的组合矩形 → 输入区域（`ITfContextView::GetScreenExt`，取不到则视图窗口或焦点窗口的屏幕矩形），区域作为整体矩形交给同一摆放规则，候选窗贴其外沿、不盖住输入区，区域高过屏幕时夹到工作区边角；全都没有才暂不显示。退路位置只用于按键会话，布局通知只按真实矩形移动；有候选且处于组合时显示，否则隐藏（空码时编码只留在组合下划线里）。Chromium 系宿主（Chrome、Electron、WebView2）的组合矩形由渲染进程异步回报，组合开始或改动后的同一会话里常返回 `TS_E_NOLAYOUT` 或旧光标位置，随后才以布局变化通知补来；因此每个编辑器在其上下文登记 `ITfTextLayoutSink`（随编辑器释放注销），组合中且有候选时收到 `TF_LC_CREATE/CHANGE` 即请求只读编辑会话（`TF_ES_READ | TF_ES_ASYNCDONTCARE`），核对自有组合未被改写后重取矩形，显示或移动候选窗；同一快照只移动位置，不递增展示编号、不作废待执行点击，位置未变则不重绘。窗口过程只按句柄在本线程登记表中以弱引用找回候选窗，不在窗口数据里存业务指针。按下与抬起落在同一行才投递私有点击消息（展示编号 + 页内序号）；同一展示最多受理一个待执行点击，展示更新或会话结束即解除。点击会话核对组合文本未被改写（不要求光标在末端），不结束旧组合、不请求清空；宿主已终止组合时拒绝并把清空留给下一按键。UIA 根元素与候选项以 COM 线程模型声明，候选项运行时编号含展示编号，展示更新后旧元素报告不可用；HelpText 为编码提示；UIA 的选择操作被拒绝，选字只经编辑会话。只有 UIA 客户端监听时才构造元素发事件。产品要求界面不得出现任何蓝色：候选窗取选项中的主题配色，不用系统强调色或选中色，仅在用户开启高对比度时改用其系统颜色。外观（10-23 重设计）：高亮行为圆角底色加左侧指示条，注释列对齐，页脚（仅可翻页或拼音反查时出现）以分隔线隔开；纯 GDI，内存位图双缓冲、库存 DC 画刷改色，字体按 DPI 与候选字体缓存并核对实际字体名回退；Win11 由 DWM 画圆角与主题色边框，Win10 退回直角自绘外框。宿主终止组合时立即收起候选窗；外观数据不经 DLL 读盘。
+候选窗实现细节：组合矩形在按键/点击会话写入后以同一 cookie 的 `GetTextExt` 取得（全零矩形视为宿主不知道），位置逐级退：整段组合 → 组合起点（折叠范围，部分宿主只给得出插入点）→ 本线程 `GetGUIThreadInfo` 光标 → 候选窗正在显示时的原位置 → 本输入框（编辑器）上次取得的组合矩形 → 输入区域（`ITfContextView::GetScreenExt`，取不到则视图窗口或焦点窗口的屏幕矩形），区域作为整体矩形交给同一摆放规则，候选窗贴其外沿、不盖住输入区，区域高过屏幕时夹到工作区边角；全都没有才暂不显示。退路位置只用于按键会话，布局通知只按真实矩形移动；有候选且处于组合时显示，否则隐藏（空码时编码只留在组合下划线里）。Chromium 系宿主（Chrome、Electron、WebView2）的组合矩形由渲染进程异步回报，组合开始或改动后的同一会话里常返回 `TS_E_NOLAYOUT` 或旧光标位置，随后才以布局变化通知补来；因此每个编辑器在其上下文登记 `ITfTextLayoutSink`（随编辑器释放注销），组合中且有候选时收到 `TF_LC_CREATE/CHANGE` 即请求只读编辑会话（`TF_ES_READ | TF_ES_ASYNCDONTCARE`），核对自有组合未被改写后重取矩形，显示或移动候选窗；同一快照只移动位置，不递增展示编号、不作废待执行点击，位置未变则不重绘。窗口过程只按句柄在本线程登记表中以弱引用找回候选窗，不在窗口数据里存业务指针。按下与抬起落在同一行才投递私有点击消息（展示编号 + 页内序号）；同一展示最多受理一个待执行点击，展示更新或会话结束即解除。点击会话核对组合文本未被改写（不要求光标在末端），不结束旧组合、不请求清空；宿主已终止组合时拒绝并把清空留给下一按键。UIA 根元素与候选项以 COM 线程模型声明，候选项运行时编号含展示编号，展示更新后旧元素报告不可用；HelpText 为编码提示；UIA 的选择操作被拒绝，选字只经编辑会话。只有 UIA 客户端监听时才构造元素发事件。产品要求界面不得出现任何蓝色：候选窗取选项中的主题配色，不用系统强调色或选中色，仅在用户开启高对比度时改用其系统颜色。外观：高亮行为圆角底色加左侧指示条，注释列对齐，页脚（仅可翻页或拼音反查时出现）以分隔线隔开；纯 GDI，内存位图双缓冲、库存 DC 画刷改色，字体按 DPI 与候选字体缓存并核对实际字体名回退；Win11 由 DWM 画圆角与主题色边框，Win10 退回直角自绘外框。宿主终止组合时立即收起候选窗；外观数据不经 DLL 读盘。
 
 会话交换结论分三种：未发出或后台明确未处理（旧快照、焦点被夺）为“跳过”，不写入、不作废；结果不确定为“丢失”，同一会话撤回仍一致的自有组合并放行原键；其余为“写入”。写入阶段失败同样在会话内撤回自有组合，下次按键携带 `Prepare::Clear`。停用时显式断开管道，不依赖其余引用何时释放。
 
 队列、查询和结果页有界；TSF 单次主动等待总预算 50ms，连接/编码/接收共享绝对截止时间。故障不重放、不交付迟到提交；不持锁阻塞、不逐键建线程或记录输入。
 
 DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::new` 仍拒绝 DLL，专用入口 `new_process_resident` 在激活阶段用系统 PIN 固定完成回调所在模块，不支持热卸载。停止先取消/释放管道和取消令牌，再以绝对期限调用 `shutdown` 关闭准入并等待资源所有权排空；超时保留关闭状态和仍存活的资源，可再次等待。排空不等于完成线程已返回，回调尾部仍由模块 PIN 保护；不得在 DllMain 或输入回调创建/排空运行时。未来 TSF 必须按此驻留策略报告不可热卸载；安装/升级不得将关闭成功当作 DLL 已从宿主卸载。每个宿主进程一个进程期驻留 `Runtime`，由首次激活创建，供各 TIP 线程的连接共用；它是传输基础设施而非业务状态，各线程的连接与会话状态仍归各自 TIP 实例。
-
-## 多平台架构
-目标：引擎、会话路由、设置、受管目录、宿主侧会话逻辑与界面模型只写一份；每个平台只实现输入法框架前端、查字/设置视图、进程组装与安装。分层单向、无环，由架构测试强制。Windows 与 macOS 共用全部平台无关层；Linux 接入时只新增其前端、视图、组装（必要时一个传输），不改平台无关层。
-
-两种宿主形态，平台无关层同时支持：
-
-| 形态 | 平台 | 前端所在 | 引擎所在 | 通道 |
-|---|---|---|---|---|
-| 宿主内前端 + 独立后台 | Windows TSF；Linux 若选 Fcitx5 插件 | 宿主进程（DLL/插件） | 每登录会话一个后台进程 | 跨进程：Windows 命名管道；Linux 届时为 Unix 套接字 |
-| 输入法进程一体 | macOS IMK；Linux 若选 IBus 引擎 | 输入法进程主线程 | 同进程固定引擎线程 | 进程内有界通道 |
-
-两种形态的前端都只面对 `frontend::Channel`：请求带绝对截止时间，传输失败即作废“连接”且不重放，下一键以 `Prepare::Open` 重开会话。取消未上屏组合、放行原键、拒收迟到提交等故障语义因此与通道无关，宿主侧会话代码各平台同一份。
-
-目标 crate（P0 起生效；只建立有实现的 crate，未开工的平台不建空 crate）：
-
-| crate | 职责 | 项目内依赖 | 外部依赖 |
-|---|---|---|---|
-| contracts | 数据、逻辑按键、输入状态与 `InputState::consumes`、会话命令（`Request`/`Command`/`Reply`/`Rejection`/`Route`）、`Panel`、主题配色 | 无 | serde |
-| engine | 状态机、索引、字形转换 | contracts | 无 |
-| frontend | 宿主侧会话 `Host<C>` 与 `Channel`；物理键到逻辑键的规则（各平台只把系统键码换成 `PhysicalKey`）；单击 Shift 判定；候选窗视图模型（行、注释、页脚、仅多页显示翻页、拼音标签）；候选窗摆放与位置退路选择（左上原点的可移植矩形） | contracts | 无 |
-| backend | 码表核对与加载、`settings.toml`、受管目录（所有权标记、会话租约、链接拒绝、事务替换）、类型化调度 `Dispatcher::handle(host, Request) -> Response`、宿主表与回收策略、查字/设置控制器、进程内引擎线程运行器（M1 随 macOS 组装加入）；公开其接口所用的词表类型（`Dictionary` 及构造合成词表的 `Data`/`Entry`） | contracts、engine | serde、serde_json（锁定清单与设置模板）、toml、sha2；文件原语：windows-sys（Windows）、libc（unix，macOS 与 Linux 共用） |
-| ipc | 跨进程线协议：帧、编解码与校验、握手/管理信封 `Message`（Hello/Welcome/Stop/Show/Indicator 等）与协议版本、Windows 命名管道传输；Linux 选插件形态时再加 Unix 套接字传输 | contracts | serde（信封派生）、serde_json、windows-sys |
-| tsf | Windows TIP DLL | contracts、frontend、ipc | windows、windows-core |
-| imk | macOS IMK 前端：控制器、NSEvent 到物理键、标记文本与上屏、候选面板、输入法菜单；按 10-29 调序先实现展示组件 | contracts、frontend | objc2 =0.6.5、objc2-foundation/objc2-app-kit =0.3.2；objc2-input-method-kit 待 M1 |
-| ui | 查字/设置：`model` 与纯 `layout` 共用，`win32` 与 `appkit` 两套原生视图；Mac `editor` 管即时保存草稿；Linux 视图预留 | contracts | windows-sys；macOS：objc2、objc2-foundation、objc2-app-kit、dispatch2 =0.3.1（仅主队列回复，不启动线程） |
-| app | 唯一组装点：`windows/`（后台进程：管道反应器、通知区、命令行、字体安装）、`macos/`（输入法进程：NSApplication + IMKServer、三线程、安装器）、`linux/` 预留 | contracts、backend、ui；Windows 另加 ipc；macOS 另加 frontend、imk | 各平台 |
-
-依赖规则（架构测试按真实解析图检查，含 dev/build/平台条件依赖与传递依赖，均有反例）：
-- contracts、engine、frontend 不得到达任何平台包（`windows*`、`objc2*`、`block2`、`dispatch2`、`core-foundation*`、`libc` 等），三者均由编译器禁止 unsafe。
-- backend 不得依赖 ipc、frontend、ui 与任何前端；平台包只许文件原语所需的 windows-sys（文件系统/安全特性）与 libc，不得到达界面框架。
-- 前端 crate（tsf、imk 及将来的 Linux 前端，架构测试以同一清单列出）只依赖 contracts、frontend 与跨进程形态所需的 ipc；不得依赖 engine、backend、ui，彼此不互相依赖。
-- ui 不得依赖 engine、backend、frontend、ipc 与任何前端。
-- 只有 app 依赖 backend 与前端；app 不直接依赖 engine（词表类型经 backend 公开）；app 内各平台模块只由 `cfg(target_os)` 选入，互不引用。
-
-由此形成分层有向无环图：contracts → {engine、frontend、ipc、ui} → {backend、tsf、imk} → app。
-
-跨平台约定：
-- 字体名、系统路径、快捷键写法（Windows `Ctrl+.`、macOS `⌃.`）属于平台层；contracts 只留语义枚举，删除 `CandidateFont::face()`。
-- 进程内通道直接传类型化消息，不序列化；只有跨进程经 ipc 编解码与校验，协议版本只约束跨进程。
-- 设置文件格式、受管目录结构与所有权标记各平台一致。数据位置：Windows `%APPDATA%\TigerType`，macOS `~/Library/Application Support/TigerType`，Linux 预留 `$XDG_CONFIG_HOME/tigertype`（未设置时 `~/.config/tigertype`）。
-- 资源占用从低：不引入异步运行时、通用界面框架或 WebView；每进程固定线程，空闲时只等内核事件或运行循环，零定时唤醒；词表只读共享、不复制；查字/设置窗首次唤起才建。性能先剖析再优化：安全 Rust → `core::arch` 内建函数 → `asm!`；后两者只放在允许 unsafe 的平台边界，带 `SAFETY:` 注释及与安全实现的对照测试，engine 若确需须先修订本方案。现测引擎加管道往返 P95 约 0.3ms，暂无需要。
-
-Linux 预留（开工前另行批准）：
-- 框架二选一：IBus（引擎为独立进程经 D-Bus 接入，属“输入法进程一体”，可纯 Rust）或 Fcitx5（插件为 C++ 共享库、在 fcitx5 进程内，属“宿主内前端”，需 C++ 胶水并经用户批准，经 Unix 套接字接后台）。
-- 候选窗：Wayland 下自绘窗口难以贴近光标，优先把 `frontend` 视图模型交给框架面板显示；无蓝色与主题受面板主题约束，届时另定。
-- 届时新增：一个前端 crate、`ui` 的 Linux 视图（须为 Rust 绑定、非 WebView，工具包待定）、`app/linux`，选插件形态时加 `ipc` 的 Unix 套接字传输；backend 的 unix 文件原语与 macOS 共用。架构测试的前端清单、平台包清单与统一入口的目标随之扩充。
 
 ## macOS 端
 范围：
@@ -133,26 +150,26 @@ Linux 预留（开工前另行批准）：
 - 退出：系统或安装器结束进程即可；租约由内核随进程释放，设置写入为临时文件加原子改名，中途结束不损坏旧文件，因此不处理信号。
 
 会话与焦点：
-- IMKServer 为每个客户端输入会话创建一个控制器；每个控制器持有一个 `frontend::Host`，相当于 Windows 的一个 TIP 线程实例，第一个需要引擎的按键才在引擎线程登记宿主。`activateServer` 使下一键携带 `Prepare::Focus` 取得焦点；`deactivateServer` 取消自有组合并在本地标记失焦（协议没有单独的失焦消息，其他控制器取得焦点时后台清掉旧组合）；控制器释放时通知引擎移除宿主。
+- IMKServer 为每个客户端输入会话创建一个控制器；每个控制器持有一个 `tigertype_input_client::Host`，相当于 Windows 的一个 TIP 线程实例，第一个需要引擎的按键才在引擎线程登记宿主。`activateServer` 使下一键携带 `Prepare::Focus` 取得焦点；`deactivateServer` 取消自有组合并在本地标记失焦（协议没有单独的失焦消息，其他控制器取得焦点时后台清掉旧组合）；控制器释放时通知引擎移除宿主。
 - 宿主与会话上限沿用 16/64 与 backend 统一的回收策略（最久未用、无焦点、无组合者先回收）；被回收的控制器下次请求发现断开即重连一次，同 Windows。
 - 进程内通道：主线程以 `try_send` 投递，通道满视为不可用、放行原键（不吞键）；以 `recv_timeout` 等到同一绝对截止时间（50ms，含排队）；超时即丢弃回复槽，迟到回复无处投递；Host 作废连接并通知引擎移除该宿主及其会话（超时请求可能已改动会话），下一键以新宿主 `Prepare::Open` 重开会话。不持锁等待、不忙轮询。
 
 按键：
 - `recognizedEvents` 只含 keyDown 与 flagsChanged。`handle(_:client:)` 是一次同步调用，没有 Windows 的预判/处理两段：先以上次状态 `InputState::consumes` 判定，不吃的键不发请求、返回 NO。
 - 物理键：按 keyCode 识别空格、Return 与小键盘 Enter、Delete（退格）、Escape、Tab、PageUp/PageDown 与方向键；其余取 `event.characters`（已按当前布局与 Shift 转换），单个非控制字符才算字符，死键与多字符放行。
-- 修饰键：⌘、⌥ 组合一律放行；⌃. 切中英标点；组合中 ⌃L 切学习信息；其余 ⌃ 组合放行。单击 Shift 由 flagsChanged 驱动 frontend 共用判定器（期间按下其他键或带 ⌃⌥⌘ 即作废），Shift 事件本身始终交还应用。Caps Lock 交给系统（不声明 `TICapsLockLanguageSwitchCapable`），大写字母按现有规则放行。
+- 修饰键：⌘、⌥ 组合一律放行；⌃. 切中英标点；组合中 ⌃L 切学习信息；其余 ⌃ 组合放行。单击 Shift 由 flagsChanged 驱动 input-client 共用判定器（期间按下其他键或带 ⌃⌥⌘ 即作废），Shift 事件本身始终交还应用。Caps Lock 交给系统（不声明 `TICapsLockLanguageSwitchCapable`），大写字母按现有规则放行。
 - 密码框等安全输入由系统自动切离输入法，不另行处理。
 
 文本：
-- 组合用 `setMarkedText` 写入（单下划线，选区为折叠光标，`replacementRange` 为 NSNotFound），用户选区随之被替换，同 Windows 语义；上屏用 `insertText`。contracts 的 UTF-8 位置在 imk 边界换算为 UTF-16。
+- 组合用 `setMarkedText` 写入（单下划线，选区为折叠光标，`replacementRange` 为 NSNotFound），用户选区随之被替换，同 Windows 语义；上屏用 `insertText`。contracts 的 UTF-8 位置在 macOS input-method 边界换算为 UTF-16。
 - 故障（不可用、超时、拒绝）时清空自有标记文本，返回 NO 放行原键；不改已上屏文字、不重放。
 - 系统调用 `commitComposition`（切换应用、点击别处等）时取消未上屏组合并清空引擎会话，不把编码上屏，同 Windows“焦点切换取消组合”。
 
 候选面板：
 - 每进程一个非激活 `NSPanel`：无边框、`nonactivatingPanel`、不成为 key/main 窗口，层级高于普通窗口，集合行为含 `canJoinAllSpaces` 与 `fullScreenAuxiliary`，以覆盖全屏应用；首次需要时创建。自绘 NSView、CoreText 排版，只在快照变化时重绘；`CTFont` 按字体与字号缓存；Retina 由系统按缩放倍数处理。
-- 外观：数据取自回复中的 `InputState`（选项随带，不读盘），竖排，由 frontend 视图模型决定行、页脚与“仅多页显示翻页”，圆角与阴影由图层实现。只用主题色；“增强对比度”开启时改用系统颜色（同 Windows 高对比度例外）。
+- 外观：数据取自回复中的 `InputState`（选项随带，不读盘），竖排，由 input-client 视图模型决定行、页脚与“仅多页显示翻页”，圆角与阴影由图层实现。只用主题色；“增强对比度”开启时改用系统颜色（同 Windows 高对比度例外）。
 - 字体：霞鹜文楷（默认）、Cascadia Mono、TumanPUA 随包放 `Contents/Resources/Fonts`，经 Info.plist `ATSApplicationFontsPath` 只在本进程生效，不全机安装；楷体对应 Kaiti SC（回退 STKaiti），界面文字用 PingFang SC，等宽回退 Menlo。
-- 位置：以 `attributes(forCharacterIndex:lineHeightRectangle:)` 取组合起点（索引 0）的行矩形（屏幕全局坐标、左下原点），全零视为宿主不知道；退路依次为光标处索引、面板正在显示时的原位置、本控制器上次的位置，都没有则不显示。macOS 没有布局变化通知，也不读系统光标或其他进程界面。imk 把左下原点坐标换算后交给 frontend 的同一摆放规则，限制在锚点所在屏幕的 `visibleFrame` 内。
+- 位置：以 `attributes(forCharacterIndex:lineHeightRectangle:)` 取组合起点（索引 0）的行矩形（屏幕全局坐标、左下原点），全零视为宿主不知道；退路依次为光标处索引、面板正在显示时的原位置、本控制器上次的位置，都没有则不显示。macOS 没有布局变化通知，也不读系统光标或其他进程界面。macOS input-method 把左下原点坐标换算后交给 input-client 的同一摆放规则，限制在锚点所在屏幕的 `visibleFrame` 内。
 - 点击：面板不取焦点；按下与抬起落在同一行才选字，直接经进程内通道发 `Select`（绑定展示编号与快照，过期即拒绝），回复在主线程写入宿主，无需 Windows 的异步编辑会话。
 - 无障碍：面板视图实现 NSAccessibility 列表，候选项为子元素（标签为候选字与注释）；高亮变化时发送 `selectedChildrenChanged`，VoiceOver 运行时另发朗读请求；只在 VoiceOver 开启时构造子元素。
 
@@ -162,7 +179,7 @@ Linux 预留（开工前另行批准）：
 - 输入法菜单由系统绘制，悬停高亮随系统强调色，无法自绘：这是“界面不得出现蓝色”的平台例外，可把系统强调色设为石墨等非蓝色消除。查字/设置窗只经此菜单打开，不另设菜单栏状态项。
 
 查字/设置窗（ui 的 appkit 视图）：
-- 信息结构与交互同 Windows（查字窗为查询框、字块行与详情卡；设置窗为输入/外观/快捷键/高级四区、即时保存、重新载入、自定义四色与无蓝色板），共用 `ui::model`；尺寸与字体按 macOS 习惯调整，快捷键以 ⌃ 写法显示。
+- 信息结构与交互同 Windows（查字窗为查询框、字块行与详情卡；设置窗为输入/外观/快捷键/高级四区、即时保存、重新载入、自定义四色与无蓝色板），共用 `tigertype_ui_model::model`；尺寸与字体按 macOS 习惯调整，快捷键以 ⌃ 写法显示。
 - 不出现蓝色：用户选了“多色”以外的系统强调色时，系统开关、分段控件、复选框、默认按钮与焦点环都改用用户强调色（默认蓝），应用的 `NSAccentColorName` 不生效。因此这些控件全部自绘；`focusRingType` 设为 none 后自画主题色焦点环，保留键盘可见焦点；字段编辑器显式设置选中文字背景与插入光标颜色（macOS 14 起光标随强调色）；滚动条用覆盖样式。
 - 窗口不用模态会话（`runModal`、模态表单），色板为自绘浮层而非同步弹出菜单，避免主线程进入跟踪循环时延迟其他应用的按键处理；M1 探针确认运行循环模式后再决定能否放宽。
 - 关闭窗口即释放视图与绘制缓存，只保留模型状态，再次打开时重建；“打开配置文件”经 `NSWorkspace` 交给默认编辑器。
@@ -186,27 +203,27 @@ Linux 预留（开工前另行批准）：
 - 升级与开发验证走同一安装命令；在真实系统上安装须经用户授权。
 
 开发与检查：
-- 工具链：M1 起 `rust-toolchain.toml` 加入本机 Apple 目标；首次在线准备缓存后离线检查。
+- 工具链：M1 使用 `rust-toolchain.toml` 锁定的本机 Apple 目标；首次在线准备缓存后离线检查。
 - 统一入口按宿主选目标：Windows 上照旧运行全部检查，另加 Apple 目标的 Clippy（只做类型检查、不链接）；Mac 上运行架构/文档、fmt、本机 Clippy、本机 lib/bin/集成与文档测试，另加两个 Windows 目标的 Clippy。
-- 测试：平台无关层（含 backend 的进程内通道、截止时间、迟到回复丢弃与热重载）在两种宿主上都运行；imk 用合成客户端对象（实现 `IMKTextInput` 所需方法）验证标记文本、上屏、故障撤回与位置退路，不安装或激活输入法；候选面板与查字/设置窗做离屏渲染和隐藏窗口事件测试；安装器测试只操作新建临时目录、不触碰 `/Library`，覆盖链接拒绝、冲突副本与失败恢复。
+- 测试：平台无关层（含 backend 的进程内通道、截止时间、迟到回复丢弃与热重载）在两种宿主上都运行；macOS input-method 用合成客户端对象（实现 `IMKTextInput` 所需方法）验证标记文本、上屏、故障撤回与位置退路，不安装或激活输入法；候选面板与查字/设置窗做离屏渲染和隐藏窗口事件测试；安装器测试只操作新建临时目录、不触碰 `/Library`，覆盖链接拒绝、冲突副本与失败恢复。
 
 分阶段（每阶段统一入口通过并更新状态后再进入下一阶段）：
 
 2026-10-29 用户调整顺序：M1 暂缓，先开发 M2/M3 的完整展示组件；不创建假 IMK 控制器或绕过受管目录安全。M2/M3 的原生组件与真实输入法验收分别记录：M1 接线、Mac 原生执行与视觉/VoiceOver 验收未通过前，不宣称 Mac 输入法或阶段验收完成。
 
-- UI 以现有 Windows 版为基准：候选窗共用 frontend 的逻辑尺寸；查字窗 520×400（最小 440×340）、设置窗 720×520、184 侧栏、卡片/分段/分组/键帽/主题色板的位置与内容共用 `ui::layout`。不另维护一份 Mac 设计；系统窗口边框、字体、⌃ 快捷键写法与系统菜单保留平台差异。
-- `imk::CandidatePanel` 每进程一份，`Location` 每控制器一份；输入展示只接收拥有所有权的快照与坐标，点击输出控制器/展示/快照/索引，不上屏。组装方须在焦点/连接改变时作废旧身份，并经 `accepts` 和 `frontend::Host::select` 再验证。`Menu` 只返回带身份的语义动作，不依赖 ui；真正菜单创建与模式提示由 M1 回调驱动。
-- `ui::appkit::Views` 通过非阻塞的请求闭包和不可克隆 `Completion` 接工作线程。回复由主队列一次唤醒；不读盘、查询引擎、创建工作线程或轮询。工作线程必须在事务保存并提交热重载之后才返回 Saved；保存中后续编辑合并，失败回退，错配永久禁用。关闭释放原生视图，模型和在途操作继续存活。
-- M1 前 app 的 backend 依赖保持 Windows 条件；Mac 合成预览只有开发依赖 imk/objc2/基础绑定，无真实后台。统一 Windows 入口额外检查两种 Apple 架构的 ui/imk 全目标与合成预览；Mac 原生隐藏窗口测试由各组件的主线程测试入口单独运行，不把交叉编译算作执行。
+- UI 以现有 Windows 版为基准：候选窗共用 input-client 的逻辑尺寸；查字窗 520×400（最小 440×340）、设置窗 720×520、184 侧栏、卡片/分段/分组/键帽/主题色板的位置与内容共用 `tigertype_ui_model::layout`。不另维护一份 Mac 设计；系统窗口边框、字体、⌃ 快捷键写法与系统菜单保留平台差异。
+- `tigertype_macos_input_method::appkit::CandidatePanel` 每进程一份，`Location` 每控制器一份；输入展示只接收拥有所有权的快照与坐标，点击输出控制器/展示/快照/索引，不上屏。组装方须在焦点/连接改变时作废旧身份，并经 `accepts` 和 `tigertype_input_client::Host::select` 再验证。`Menu` 只返回带身份的语义动作，不依赖 ui；真正菜单创建与模式提示由 M1 回调驱动。
+- `tigertype_macos_ui::appkit::Views` 通过非阻塞的请求闭包和不可克隆 `Completion` 接工作线程。回复由主队列一次唤醒；不读盘、查询引擎、创建工作线程或轮询。工作线程必须在事务保存并提交热重载之后才返回 Saved；保存中后续编辑合并，失败回退，错配永久禁用。关闭释放原生视图，模型和在途操作继续存活。
+- M1 前 Windows app 与 backend 不进入 Mac 合成预览；预览位于 tools/dev，仅按 Apple 目标引入 macOS 展示组件。统一 Windows 入口检查两种 Apple 架构的 macos-ui/input-method 全目标与预览；原生隐藏窗口测试由组件主线程入口单独运行，不把交叉编译算作执行。
 
-1. P0 Windows 侧重构，行为不变：建立 frontend、backend；`Dispatcher` 类型化；回收策略移入 backend；`Message` 与协议版本移入 ipc；删除 `CandidateFont::face()`；app 分出 `windows/`；架构测试与统一入口改为本方案规则。验收：统一入口通过，Windows 真机回归（记事本、Typora 首键候选窗、点击选字、热重载、安装升级）。
-2. M1 macOS 骨架与探针：引入并锁定 objc2 系列与 libc；imk 控制器、按键映射、标记文本与上屏、进程内通道、三线程组装、纯文字候选面板、最小 Info.plist、安装命令。探针三项：只有链接器签名的输入法能否从 `/Library/Input Methods` 被系统列出并加载；objc2 能否子类化 `IMKInputController`（类须在创建 IMKServer 前注册，全部回调 `catch_unwind`）；主线程进入菜单或窗口拖动跟踪循环时 IMK 消息是否被延迟。验收：TextEdit 中打字、选重、翻页、退格、单击 Shift、⌃.。
+1. P0 共享基础：类型化 Dispatcher、统一回收策略、input-client、backend 和 UI 模型按上表分层；Windows 运行行为不变。验收包含统一入口与 Windows 真机核心回归，不以目录整理替代运行验收。
+2. M1 macOS 骨架与探针：引入并锁定 objc2 系列与 libc；macOS input-method 控制器、按键映射、标记文本与上屏、进程内通道、三线程组装、纯文字候选面板、最小 Info.plist、安装命令。探针三项：只有链接器签名的输入法能否从 `/Library/Input Methods` 被系统列出并加载；objc2 能否子类化 `IMKInputController`（类须在创建 IMKServer 前注册，全部回调 `catch_unwind`）；主线程进入菜单或窗口拖动跟踪循环时 IMK 消息是否被延迟。验收：TextEdit 中打字、选重、翻页、退格、单击 Shift、⌃.。
 3. M2 候选面板完整：主题、字体、视图模型、点击、位置退路、多显示器、全屏 Space、增强对比度、VoiceOver。
 4. M3 输入法菜单与查字/设置窗（appkit 视图、自绘控件、热重载、重新载入）。
 5. M4 打包与安装：图标现画、完整 Info.plist、安装/升级/卸载与冲突检测。
 6. M5 验收：TextEdit、备忘录、Safari、Chrome、VS Code（Electron）、终端、iTerm2、微信、Pages、Microsoft Office、JetBrains、Spotlight、密码框、全屏与多显示器、VoiceOver；按键处理预热 P95≤10ms、P99≤25ms、主动等待≤50ms；空闲 CPU 为零，常驻内存以 M1 实测为基线、长期使用不增长；两小时压力与八小时使用。
 
-待确认（不阻塞 P0）：Mac 的芯片与系统版本（决定构建目标与最低版本）；Kaiti SC 是否须在“字体册”中下载；只带链接器签名的输入法是否触发权限提示（M1 探针）。
+M1 前待确认：Mac 的芯片与系统版本（决定构建目标与最低版本）；Kaiti SC 是否须在“字体册”中下载；只带链接器签名的输入法是否触发权限提示（M1 探针）。
 
 ## 数据与配置
 - Rust 工具只解析锁定单字表、tigress 词码、常用字集、拼音单字/读音、拆分和简繁映射；不导入小狼毫外观配置（候选窗配色与字体由设置给出）。复用数据不是兼容运行时。
@@ -221,10 +238,10 @@ Linux 预留（开工前另行批准）：
 ## 工程治理
 仅四份主文档：README 入口，AGENTS 约束，本文范围/架构，状态实际进度。重要决策改本文，最近结果改状态。旧文档删除，不再维护多个“下一步”；原始测试报告留在 artifacts，不把报告扩写为重复文档。
 
-Rust 架构测试检查 metadata 中 normal/build/dev/平台依赖、别名与传递边界；未知成员不自动放行。文档检查主链接、主文档清单和禁止产物入 Git。检查器有正反例。
+tools/dev 的 Rust 架构测试检查组件目录归属及 metadata 中 normal/build/dev/平台依赖、别名与传递边界；未知成员不自动放行。文档检查主链接、主文档清单和禁止产物入 Git。检查器有正反例。
 
 ```powershell
-cargo run --locked --offline -p tigertype-app --example check
+cargo run --locked --offline -p tigertype-dev --example check
 ```
 统一运行架构/文档、fmt、Clippy、x64/x86；架构/文档也在普通 cargo test 中运行。macOS 代码加入后按宿主选目标，另一平台至少做 Clippy 类型检查，见“macOS 端”的开发与检查。完整资源、真实应用、长时验收单列。无远程 CI、自动提交、后台监控；本地检查不等于不可绕过的提交保护。
 
@@ -233,12 +250,11 @@ cargo run --locked --offline -p tigertype-app --example check
 依赖检查不能证明业务职责；每批审查输入路径文件操作/阻塞、所有权、生命周期、调用方、配置及文档。
 
 ## 迁移与验收
-1. 更新四份主文档，按用户明确授权删除旧路线源码、测试、文档和归档；不清理锁定资源或测试报告，不整仓重置。
-2. 数据/纯 Rust 核心、协议及调用方/测试同步迁移，架构门禁同批生效；无宽泛豁免。
-3. 独立查字/设置先验证数据与字形，再接候选窗和单后台，不提前注册。
-4. 先完成 IPC DLL 回调驻留/关闭，再接 TSF/混合位数/多宿主；不得直接移除 EXE 限制。按三批推进：A 传输与认证（安全描述符、双侧认证、删除通知通道与后台候选窗、懒连接与槽位回收、协议 v5）；B 最小 TIP 与宿主内候选窗，分两步：B1 类工厂、按键/焦点 sink、按键映射与本地判定、统一按键编辑会话（协议 v6）；B2 宿主内候选窗、UIA/WinEvent、点击异步会话，删除候选预览与 ui 候选窗；C 先实现注册/注销入口，再经授权在暂存目录注册后做真实宿主验收，验收后注销。
-5. 安装包已实现；各电脑上的安装由用户执行，与旧输入法并存，卸载保留数据并长期验收。
-6. 多平台：先做 P0 Windows 侧重构（行为不变），再按 M1–M5 推进 macOS 端，见“macOS 端”的分阶段；Linux 开工前先定框架并修订本方案。
+1. 目录迁移：更新成员/包名、调用方、导出、样例、测试、资源编译路径和安装映射；旧包直接移除。
+2. 边界拆分：共享 UI 模型与两平台视图独立；工具只单向依赖产品；backend 平台文件原语集中，安全和异常路径不降级。
+3. 可读性整理：大文件按真实职责拆分，保留生命周期、键盘导航和无障碍行为；四份文档各司其职，不复制进度和历史流水。
+4. 每批运行完整统一入口；打包映射、锁定资源、真实宿主与长时验收按风险单列。输入法安装、注册、切换另须授权。
+5. 后续 macOS 按 M1–M5 接线和验收；Linux 开工前先定框架并修订方案。
 
 验收覆盖：简/全码、稳定顺序、两种四码模式、空码/翻页/退格/清屏、非 BMP；多音字、ü/v、多编码、缺资料、简繁一对多与去重、实际字形与码对应；查询不改变会话；超时/卡死/断连/迟到/旧快照不重复上屏；坏包/配置失败/路径攻击保留旧数据；故意架构违规失败。
 

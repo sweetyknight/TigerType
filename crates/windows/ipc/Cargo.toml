@@ -1,0 +1,27 @@
+[package]
+name = "tigertype-windows-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[example]]
+name = "resident_probe"
+crate-type = ["cdylib"]
+test = false
+
+[dependencies]
+tigertype-contracts.workspace = true
+# 跨进程信封 Message 的序列化派生。
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Globalization", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_SystemServices"] }
+
+# 仅沙箱前提测试派生 AppContainer SID；不进入正式产物。
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Security_Isolation"] }
+
+[lints]
+workspace = true

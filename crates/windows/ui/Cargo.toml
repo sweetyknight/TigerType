@@ -1,0 +1,20 @@
+[package]
+name = "tigertype-windows-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tigertype-contracts.workspace = true
+tigertype-ui-model.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_UI_Accessibility", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Ime", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# 首次显示测试使用未切换的私有桌面，不抢用户焦点。
+windows-sys = { workspace = true, features = ["Win32_System_StationsAndDesktops"] }
+
+[lints]
+workspace = true

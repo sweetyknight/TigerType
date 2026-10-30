@@ -265,23 +265,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tigertype-app"
-version = "0.1.0"
-dependencies = [
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "serde",
- "serde_json",
- "tigertype-backend",
- "tigertype-contracts",
- "tigertype-imk",
- "tigertype-ipc",
- "tigertype-ui",
- "windows-sys",
-]
-
-[[package]]
 name = "tigertype-backend"
 version = "0.1.0"
 dependencies = [
@@ -302,6 +285,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tigertype-dev"
+version = "0.1.0"
+dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "serde_json",
+ "tigertype-backend",
+ "tigertype-contracts",
+ "tigertype-macos-input-method",
+ "tigertype-macos-ui",
+ "tigertype-windows-app",
+ "tigertype-windows-ui",
+ "windows-sys",
+]
+
+[[package]]
 name = "tigertype-engine"
 version = "0.1.0"
 dependencies = [
@@ -309,25 +309,68 @@ dependencies = [
 ]
 
 [[package]]
-name = "tigertype-frontend"
+name = "tigertype-input-client"
 version = "0.1.0"
 dependencies = [
  "tigertype-contracts",
 ]
 
 [[package]]
-name = "tigertype-imk"
+name = "tigertype-macos-input-method"
 version = "0.1.0"
 dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "tigertype-contracts",
- "tigertype-frontend",
+ "tigertype-input-client",
 ]
 
 [[package]]
-name = "tigertype-ipc"
+name = "tigertype-macos-ui"
+version = "0.1.0"
+dependencies = [
+ "dispatch2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "tigertype-contracts",
+ "tigertype-ui-model",
+]
+
+[[package]]
+name = "tigertype-ui-model"
+version = "0.1.0"
+dependencies = [
+ "tigertype-contracts",
+]
+
+[[package]]
+name = "tigertype-windows-app"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tigertype-backend",
+ "tigertype-contracts",
+ "tigertype-windows-ipc",
+ "tigertype-windows-ui",
+ "windows-sys",
+]
+
+[[package]]
+name = "tigertype-windows-input-method"
+version = "0.1.0"
+dependencies = [
+ "tigertype-contracts",
+ "tigertype-input-client",
+ "tigertype-windows-ipc",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
+name = "tigertype-windows-ipc"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -337,25 +380,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "tigertype-tsf"
+name = "tigertype-windows-ui"
 version = "0.1.0"
 dependencies = [
  "tigertype-contracts",
- "tigertype-frontend",
- "tigertype-ipc",
- "windows",
- "windows-core",
-]
-
-[[package]]
-name = "tigertype-ui"
-version = "0.1.0"
-dependencies = [
- "dispatch2",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "tigertype-contracts",
+ "tigertype-ui-model",
  "windows-sys",
 ]
 

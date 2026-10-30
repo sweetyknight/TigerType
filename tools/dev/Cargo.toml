@@ -1,0 +1,32 @@
+[package]
+name = "tigertype-dev"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# 检查器为示例，避免 Windows 测试重链接正在运行的检查程序。
+[[example]]
+name = "package"
+test = true
+
+[dependencies]
+serde_json.workspace = true
+tigertype-contracts.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tigertype-backend.workspace = true
+tigertype-windows-app.workspace = true
+tigertype-windows-ui.workspace = true
+windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# 合成预览只依赖 Mac 展示组件，不链接 Windows 产品或尚未实现的 Mac 后台。
+tigertype-macos-input-method.workspace = true
+tigertype-macos-ui.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit = { workspace = true, features = ["NSRunningApplication"] }
+
+[lints]
+workspace = true
