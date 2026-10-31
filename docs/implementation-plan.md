@@ -14,7 +14,7 @@
 - 独立查字窗输入拼音/虎码/粘贴汉字或词，显示可用编码、完整编码、读音、拆分；词查询保留词码，复制由用户点击，不监视剪贴板。
 - 缺资料明确标注，不猜编码或拆分；学习信息对应实际显示汉字，转换字形标注来源。
 - 原字/简体/繁体三档，默认原字；一对多列候选，不猜语境，不改已上屏内容，不做地区词汇替换。
-- 竖排候选、15pt，每页 3–9 个（默认 5），候选多于一页时才在页脚显示翻页指示，拼音反查时页脚另有“拼音”标签。候选字体可选霞鹜文楷（默认）或楷体，未安装时回退微软雅黑 UI；编码与序号用 Cascadia Mono（回退 Consolas），窗口文字用微软雅黑 UI。配色主题可选琥珀（默认）、墨、竹、玫红与自定义；自定义四基色在设置页点色块从无蓝色板选取或直接输入色值，即时校验并热加载。玫红取自小狼毫配色 MacRoseo（白底黑字，高亮候选无底色、只把字染成玫红，原色 #FA114F 等比压暗为 #E8114E 以达 4.5:1）；保存与载入均校验无蓝且文字对比度不低于 4.5:1。为保证换电脑可用，霞鹜文楷（虎码融合字根版）、Cascadia Mono 与 TumanPUA 随包：取自官方渠道，按 `resources/fonts.lock.json` 锁定大小与 SHA256，由安装包全机安装。原生 UI，所有界面不得出现任何蓝色（高对比度除外）。
+- 竖排候选、15pt，每页 3–9 个（默认 5），候选多于一页时才在页脚显示翻页指示，拼音反查时页脚另有“拼音”标签。候选字体可选霞鹜文楷（默认）或楷体，未安装时回退微软雅黑 UI；独立编码与序号用 Cascadia Mono（回退 Consolas），窗口文字用微软雅黑 UI。候选注释（拆分及内嵌编码）、设置预览注释与查字拆分只使用经锁定校验并私有加载的 LXGW WenKai GB Screen，不受候选字楷体选项影响；禁止系统回退，私有字体初始化失败立即返回错误。绘制与测量使用同一字体和排版 API。配色主题可选琥珀（默认）、墨、竹、玫红与自定义；自定义四基色在设置页点色块从无蓝色板选取或直接输入色值，即时校验并热加载。玫红取自小狼毫配色 MacRoseo（白底黑字，高亮候选无底色、只把字染成玫红，原色 #FA114F 等比压暗为 #E8114E 以达 4.5:1）；保存与载入均校验无蓝且文字对比度不低于 4.5:1。为保证换电脑可用，霞鹜文楷（虎码融合字根版）、Cascadia Mono 与 TumanPUA 随包：取自官方渠道，按 `resources/fonts.lock.json` 锁定大小与 SHA256，由安装包全机安装。原生 UI，所有界面不得出现任何蓝色（高对比度除外）。
 - 设置窗分“输入、外观、快捷键、高级”四区（左侧导航，内容超出窗口时纵向滚动），修改即时保存并热加载，不设保存/取消按钮；保存在途时的新改动不排队，回复后按最新草稿与已确认设置比较再存一次，保存失败时控件撤回已确认设置并说明原因。输入区：单字/词输入模式（默认单字）、仅常用字、四码唯一自动上屏、输出字形；外观区：按草稿现画的候选窗预览、候选字体、每页候选数、显示拆分与编码（开启后候选注释为小狼毫虎码方案同款〔拆分 · 编码〕，缺拆分时只列编码；默认关闭）、配色主题卡片与自定义四色（色块点开 8×4 无蓝色板或输入 `#RRGGBB`，提示最低对比度或不可用原因）；快捷键区只读列出现有快捷键（数字键范围随每页候选数）；高级区用系统默认编辑器打开受管 `config/settings.toml`，手工修改后点“重新载入”生效（格式错误时保留当前设置并指出行号），另有版本信息。`settings.toml` 按带中文注释的固定模板写出（`[input]`、`[candidate]`、`[theme]`、`[theme.custom]` 四节，颜色写作 `"#RRGGBB"`），读回时缺键、多键、类型或范围不符都拒绝；首次运行写出默认文件；界面保存按模板重写，用户自加的注释不保留；文件被外部修改后界面保存被拒，须先重新载入。旧 `settings.json` 不再读取（开发期不兼容）。当前程序任务栏输入法图标右键菜单前三项写当前状态（中文/英文、半角/全角、中文标点/英文标点），点击即翻转，其下为查字、设置；全角与标点开关仍为会话状态。保存成功即热重载到后台，新会话与无组合的会话立即使用；组合中的会话在本次组合结束时换上，无需重启后台。
 - 不做 librime、Lua、OpenCC 运行库、数据库、英文补全、计算器、日期、Emoji、网址启动或通用 YAML 配置兼容。
 
@@ -32,7 +32,7 @@
 源码路径与部署名相互独立。重组不改变 `tigertype.exe`、`tigertype_tsf.dll`、`tigertype_tsf_x86.dll`、COM 标识、协议或用户目录；打包驱动校验新构建 DLL 到部署名的映射。这不是兼容层：旧 crate、转发入口和混合目录直接删除。
 
 ### 目录与职责
-仅下表 13 个有实现的叶子目录是工作区成员；macOS app 承载进程组装与安装，Linux 不建占位目录。下表同时是架构门禁的明确白名单，新增依赖须同步修改，不能使用通配放行。
+仅下表 14 个有实现的叶子目录是工作区成员；macOS app 承载进程组装与安装，Linux 不建占位目录。下表同时是架构门禁的明确白名单，新增依赖须同步修改，不能使用通配放行。
 
 | 目录（相对仓库根） | 职责 | 项目内直接依赖（省略 tigertype 前缀） | 外部直接依赖 |
 |---|---|---|---|
@@ -42,17 +42,20 @@
 | crates/shared/ui-model | 查字/设置 Model、文案、控件标识与纯布局 | contracts | 无 |
 | crates/shared/backend | 锁定资源加载、settings.toml、受管目录、Dispatcher、宿主回收和查字控制器 | contracts、engine | serde、serde_json、sha2、toml；Windows 文件原语 windows-sys、Mac 文件原语 libc |
 | crates/windows/ipc | Windows 跨进程信封、帧校验、认证管道、取消和驻留保护 | contracts | serde、serde_json、windows-sys |
-| crates/windows/input-method | TSF DLL、编辑会话、候选窗、UIA、输入法菜单与注册 | contracts、input-client、windows-ipc | windows、windows-core |
-| crates/windows/ui | Win32 查字/设置窗、托盘、事件邮箱 | contracts、ui-model | windows-sys |
-| crates/windows/app | Windows 后台/命令行/字体管理，组装固定线程 | contracts、backend、windows-ipc、windows-ui | serde、serde_json、windows-sys |
+| crates/windows/fonts | 文楷锁定清单、只读校验、进程私有加载及配对注销；不访问用户数据 | 无 | serde_json、sha2、windows-sys |
+| crates/windows/input-method | TSF DLL、编辑会话、候选窗、UIA、输入法菜单与注册 | contracts、input-client、windows-ipc、windows-fonts | windows、windows-core |
+| crates/windows/ui | Win32 查字/设置窗、托盘、事件邮箱 | contracts、ui-model、windows-fonts | windows-sys |
+| crates/windows/app | Windows 后台/命令行/字体管理，组装固定线程 | contracts、backend、windows-ipc、windows-ui、windows-fonts | serde、serde_json、windows-sys |
 | crates/macos/input-method | IMKServer/控制器、按键/文本边界、候选面板、菜单；由组装层注入通道与窗口动作 | contracts、input-client | objc2、objc2-foundation、objc2-app-kit、objc2-input-method-kit |
 | crates/macos/ui | AppKit 查字/设置视图、Mac 草稿交互和主线程回复 | contracts、ui-model | objc2、objc2-foundation、objc2-app-kit、dispatch2 |
 | crates/macos/app | Mac 主程序、进程内有界通道、固定线程组装、包清单/图标及安装 | contracts、input-client、backend；Mac：macos-input-method、macos-ui | serde、serde_json；Mac：objc2、objc2-foundation、objc2-app-kit、libc |
-| tools/dev | 检查、打包、合成预览和跨组件治理测试，不进入产品 | contracts、backend；Windows：windows-app、windows-ui；Mac：macos-input-method、macos-ui、macos-app | serde_json；Windows：windows-sys；Mac：objc2、objc2-foundation、objc2-app-kit、libc |
+| tools/dev | 检查、打包、合成预览和跨组件治理测试，不进入产品 | contracts、backend；Windows：windows-app、windows-ui、windows-fonts；Mac：macos-input-method、macos-ui、macos-app | serde_json；Windows：windows-sys；Mac：objc2、objc2-foundation、objc2-app-kit、libc |
 
 backend 的 `storage/windows.rs` 与 `storage/macos.rs` 集中各平台目录固定、链接/硬链接拒绝、租约和原子替换；其余后台模块不直接调用平台 API。不得用普通文件读取占位绕过校验。词表类型通过 backend 公开，组装层不直接依赖 engine；产品组件不得反向依赖平台 app。
 
 原始资源在 `resources`，安装定义在 `installer/windows`；构建产物、缓存与证据不作为源码。测试跟随组件：纯模型测试在 shared，原生测试在对应平台，架构/文档与安装脚本校验归 tools/dev。
+
+Windows 字体只在 COM CreateInstance（早于 ActivateEx/按键 sink）或后台接请求/UI 启动前加载，DllMain、按键、布局与绘制不读字体文件。windows-fonts 固定目录与只读文件对象、拒绝链接/硬链接、流式验证大小/SHA256，再以 FR_PRIVATE | FR_NOT_ENUM 私有注册；窗口/HFONT 先销毁，再注销和释放句柄。安装副本按摘要命名，升级不覆盖旧宿主占用的版本，卸载占用文件延至重启删除。debug 只用编译时仓库原件，release 只用自身目录副本；固定 64KiB 校验缓冲，不在每个宿主嵌入或保留 26MB Rust 字节数组。
 
 ### 依赖方向与禁止边
 **A → B 表示 A 依赖 B**；返回消息不构成反向代码依赖。直接依赖以上表为准，另检查传递可达性：
@@ -127,7 +130,7 @@ Windows input-method 同时产出 cdylib（TIP DLL）和 rlib（测试）。TIP 
 
 跨应用验收以提供系统输入接口的编辑区域为前提，须覆盖窗口切换/重建、子窗口与浮层、最小化恢复、普通/置顶窗口、边界与多屏，以及支持系统 IME 的游戏聊天框；无 TSF/系统 IME 输入接口、独占全屏绕过桌面合成或受保护桌面的区域不承诺输入，不通过注入、全局置顶或绕过游戏保护强行支持。合成宿主、真实应用与长期使用的证据分开记录，不能将自动测试通过表述为所有应用已通过。
 
-候选窗实现细节：组合矩形在按键/点击会话写入后以同一 cookie 的 `GetTextExt` 取得（全零矩形视为宿主不知道），位置逐级退：整段组合 → 组合起点（折叠范围，部分宿主只给得出插入点）→ 本线程 `GetGUIThreadInfo` 光标 → 候选窗正在显示时的原位置 → 本输入框（编辑器）上次取得的组合矩形 → 输入区域（`ITfContextView::GetScreenExt`，取不到则视图窗口或焦点窗口的屏幕矩形），区域作为整体矩形交给同一摆放规则，候选窗贴其外沿、不盖住输入区，区域高过屏幕时夹到工作区边角；全都没有才暂不显示。退路位置只用于按键会话，布局通知只按真实矩形移动；有候选且处于组合时显示，否则隐藏（空码时编码只留在组合下划线里）。Chromium 系宿主（Chrome、Electron、WebView2）的组合矩形由渲染进程异步回报，组合开始或改动后的同一会话里常返回 `TS_E_NOLAYOUT` 或旧光标位置，随后才以布局变化通知补来；因此每个编辑器在其上下文登记 `ITfTextLayoutSink`（随编辑器释放注销），组合中且有候选时收到 `TF_LC_CREATE/CHANGE` 即请求只读编辑会话（`TF_ES_READ | TF_ES_ASYNCDONTCARE`），核对自有组合未被改写后重取矩形，显示或移动候选窗；同一快照只移动位置，不递增展示编号、不作废待执行点击，位置未变则不重绘。窗口过程只按句柄在本线程登记表中以弱引用找回候选窗，不在窗口数据里存业务指针。按下与抬起落在同一行才投递私有点击消息（展示编号 + 页内序号）；同一展示最多受理一个待执行点击，展示更新或会话结束即解除。点击会话核对组合文本未被改写（不要求光标在末端），不结束旧组合、不请求清空；宿主已终止组合时拒绝并把清空留给下一按键。UIA 根元素与候选项以 COM 线程模型声明，候选项运行时编号含展示编号，展示更新后旧元素报告不可用；HelpText 为编码提示；UIA 的选择操作被拒绝，选字只经编辑会话。只有 UIA 客户端监听时才构造元素发事件。产品要求界面不得出现任何蓝色：候选窗取选项中的主题配色，不用系统强调色或选中色，仅在用户开启高对比度时改用其系统颜色。外观：高亮行为圆角底色加左侧指示条，注释列对齐，页脚（仅可翻页或拼音反查时出现）以分隔线隔开；纯 GDI，内存位图双缓冲、库存 DC 画刷改色，字体按 DPI 与候选字体缓存并核对实际字体名回退；Win11 由 DWM 画圆角与主题色边框，Win10 退回直角自绘外框。宿主终止组合时立即收起候选窗；外观数据不经 DLL 读盘。
+候选窗实现细节：组合矩形在按键/点击会话写入后以同一 cookie 的 `GetTextExt` 取得（全零矩形视为宿主不知道），位置逐级退：整段组合 → 组合起点（折叠范围，部分宿主只给得出插入点）→ 本线程 `GetGUIThreadInfo` 光标 → 候选窗正在显示时的原位置 → 本输入框（编辑器）上次取得的组合矩形 → 输入区域（`ITfContextView::GetScreenExt`，取不到则视图窗口或焦点窗口的屏幕矩形），区域作为整体矩形交给同一摆放规则，候选窗贴其外沿、不盖住输入区，区域高过屏幕时夹到工作区边角；全都没有才暂不显示。退路位置只用于按键会话，布局通知只按真实矩形移动；有候选且处于组合时显示，否则隐藏（空码时编码只留在组合下划线里）。Chromium 系宿主（Chrome、Electron、WebView2）的组合矩形由渲染进程异步回报，组合开始或改动后的同一会话里常返回 `TS_E_NOLAYOUT` 或旧光标位置，随后才以布局变化通知补来；因此每个编辑器在其上下文登记 `ITfTextLayoutSink`（随编辑器释放注销），组合中且有候选时收到 `TF_LC_CREATE/CHANGE` 即请求只读编辑会话（`TF_ES_READ | TF_ES_ASYNCDONTCARE`），核对自有组合未被改写后重取矩形，显示或移动候选窗；同一快照只移动位置，不递增展示编号、不作废待执行点击，位置未变则不重绘。窗口过程只按句柄在本线程登记表中以弱引用找回候选窗，不在窗口数据里存业务指针。按下与抬起落在同一行才投递私有点击消息（展示编号 + 页内序号）；同一展示最多受理一个待执行点击，展示更新或会话结束即解除。点击会话核对组合文本未被改写（不要求光标在末端），不结束旧组合、不请求清空；宿主已终止组合时拒绝并把清空留给下一按键。UIA 根元素与候选项以 COM 线程模型声明，候选项运行时编号含展示编号，展示更新后旧元素报告不可用；HelpText 为编码提示；UIA 的选择操作被拒绝，选字只经编辑会话。只有 UIA 客户端监听时才构造元素发事件。产品要求界面不得出现任何蓝色：候选窗取选项中的主题配色，不用系统强调色或选中色，仅在用户开启高对比度时改用其系统颜色。外观：高亮行为圆角底色加左侧指示条，注释列对齐，页脚（仅可翻页或拼音反查时出现）以分隔线隔开；纯 GDI，内存位图双缓冲、库存 DC 画刷改色，字体按 DPI 与候选字体缓存并核对实际字体名；拆分使用独立私有文楷字体、拒绝替代，宽度以 DrawTextW 同源排版测量，全部字体配对释放；Win11 由 DWM 画圆角与主题色边框，Win10 退回直角自绘外框。宿主终止组合时立即收起候选窗；外观数据不经 DLL 读盘。
 
 会话交换结论分三种：未发出或后台明确未处理（旧快照、焦点被夺）为“跳过”，不写入、不作废；结果不确定为“丢失”，同一会话撤回仍一致的自有组合并放行原键；其余为“写入”。写入阶段失败同样在会话内撤回自有组合，下次按键携带 `Prepare::Clear`。停用时显式断开管道，不依赖其余引用何时释放。
 
@@ -170,7 +173,7 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 候选面板：
 - 每进程一个非激活 `NSPanel`：无边框、`nonactivatingPanel`、不成为 key/main 窗口，层级高于普通窗口，集合行为含 `canJoinAllSpaces` 与 `fullScreenAuxiliary`，以覆盖全屏应用；首次需要时创建。自绘 NSView、CoreText 排版，只在快照变化时重绘；`CTFont` 按字体与字号缓存；Retina 由系统按缩放倍数处理。
 - 外观：数据取自回复中的 `InputState`（选项随带，不读盘），竖排，由 input-client 视图模型决定行、页脚与“仅多页显示翻页”，圆角与阴影由图层实现。只用主题色；“增强对比度”开启时改用系统颜色（同 Windows 高对比度例外）。
-- 字体：霞鹜文楷（默认）、Cascadia Mono、TumanPUA 随包放 `Contents/Resources/Fonts`，经 Info.plist `ATSApplicationFontsPath` 只在本进程生效，不全机安装；楷体对应 Kaiti SC（回退 STKaiti），界面文字用 PingFang SC，等宽回退 Menlo。
+- 字体：三个原件仍随包放在 `Contents/Resources/Fonts`。Mac 组装层在 IMK 启动前逐个安全读取并核对大小/SHA256，从同一份字节创建 CGFont，以 CTFontManagerRegisterGraphicsFont 注册到当前进程；删除 ATSApplicationFontsPath 隐式加载，避免绕过字节校验或重复注册。加载失败/名称不可用立即报错；所有显示对象销毁后注销。拆分仅用私有文楷，不采用系统回退；候选汉字楷体选项、界面 PingFang SC 和独立编码 Cascadia Mono/Menlo 不变。
 - 位置：以 `attributes(forCharacterIndex:lineHeightRectangle:)` 取组合起点（索引 0）的行矩形（屏幕全局坐标、左下原点），全零视为宿主不知道；退路依次为光标处索引、面板正在显示时的原位置、本控制器上次的位置，都没有则不显示。macOS 没有布局变化通知，也不读系统光标或其他进程界面。macOS input-method 把左下原点坐标换算后交给 input-client 的同一摆放规则，限制在锚点所在屏幕的 `visibleFrame` 内。
 - 点击：面板不取焦点；按下与抬起落在同一行才选字，直接经进程内通道发 `Select`（绑定展示编号与快照，过期即拒绝），回复在主线程写入宿主，无需 Windows 的异步编辑会话。
 - 无障碍：面板视图实现 NSAccessibility 列表，候选项为子元素（标签为候选字与注释）；高亮变化时发送 `selectedChildrenChanged`，VoiceOver 运行时另发朗读请求；只在 VoiceOver 开启时构造子元素。
@@ -193,7 +196,7 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 
 打包与安装（全部由 Rust 完成，不用 pkgbuild、productbuild、codesign、lipo、iconutil）：
 - 打包驱动 `--example package` 的 macOS 分支：本机架构 release 构建；组装 `target/package/TigerType.app`（Rust 按模板写出 `Contents/Info.plist`，另含 `MacOS/tigertype`、`Resources/tiger`、`Resources/Fonts`、应用图标与菜单栏模板图）；按锁定清单核对码表与字体；打印各文件 SHA256。
-- Info.plist 关键项：`CFBundleIdentifier`（本地标识，如 `local.tigertype.inputmethod`）、`InputMethodConnectionName`、`InputMethodServerControllerClass`、`TISInputSourceID`、`TISIntendedLanguage = zh-Hans`、`tsInputMethodCharacterRepertoireKey`、菜单栏图标与 `TISIconIsTemplate`、`LSUIElement = true`、`LSBackgroundOnly = false`、`ATSApplicationFontsPath = Fonts`、`LSMinimumSystemVersion`。
+- Info.plist 关键项：`CFBundleIdentifier`（本地标识，如 `local.tigertype.inputmethod`）、`InputMethodConnectionName`、`InputMethodServerControllerClass`、`TISInputSourceID`、`TISIntendedLanguage = zh-Hans`、`tsInputMethodCharacterRepertoireKey`、菜单栏图标与 `TISIconIsTemplate`、`LSUIElement = true`、`LSBackgroundOnly = false`、`LSMinimumSystemVersion`。
 - 图标：印章在打包时以 CoreText/CoreGraphics 现画（设计同 Windows），由 Rust 写出 `.icns` 容器与菜单栏模板 PNG。
 - 安装：`sudo target/package/TigerType.app/Contents/MacOS/tigertype install`。
   1. 校验源包：标识、可执行文件、码表与字体清单。

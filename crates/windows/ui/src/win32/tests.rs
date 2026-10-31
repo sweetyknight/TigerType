@@ -399,10 +399,57 @@ fn menu_closes_when_the_backend_stops(
 fn command(window: &Window, id: usize, notification: u32) {
     post(window.handle, ACTION, (notification as usize) << 16 | id);
 }
+/// 同一隐藏窗口内复核查字拆分与预览；不另注册窗口类，以免并行测试冲突。
+fn assert_learning_fonts(main: &mut Window) {
+    let canvas = Canvas::new(600, 100);
+    let probe = units("亻\u{e4e4}小文辶日\u{e46a}页缶\u{e432}人〔 · jxyx / 123〕");
+    let preview = TempFont::new(canvas.0, &LEARNING_FACES, 12, 400);
+    for face in CandidateFont::ALL {
+        main.ensure_fonts(face).unwrap();
+        for font in [font_of(main.control(PARTS)), preview.0] {
+            // SAFETY: 字体与内存 DC 存活；选中对象在查询后还原。
+            unsafe {
+                let old = SelectObject(canvas.0, font);
+                let mut glyphs = vec![0; probe.len()];
+                assert_ne!(
+                    GetGlyphIndicesW(
+                        canvas.0,
+                        probe.as_ptr(),
+                        probe.len() as i32,
+                        glyphs.as_mut_ptr(),
+                        GGI_MARK_NONEXISTING_GLYPHS
+                    ),
+                    u32::MAX
+                );
+                assert!(
+                    glyphs.iter().all(|g| *g != 0 && *g != 0xffff),
+                    "{face:?} 拆分缺字"
+                );
+                assert!(face_is(canvas.0, font, LEARNING_FACES[0]));
+                let mut rect = RECT::default();
+                DrawTextW(
+                    canvas.0,
+                    probe.as_ptr(),
+                    probe.len() as i32,
+                    &mut rect,
+                    DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+                );
+                assert_eq!(extent(canvas.0, font, &probe), rect.right);
+                SelectObject(canvas.0, old);
+            }
+        }
+    }
+    assert_eq!(extent(canvas.0, preview.0, &[]), 0);
+    main.ensure_fonts(CandidateFont::default()).unwrap();
+}
 #[test]
 fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
     // 合成控件测试不显示窗口、不碰剪贴板、不加载个人资源。
     let _dpi = DpiContext::enter().unwrap();
+    // 使用生产加载器；不依赖系统预装，所有窗口先于字体守卫释放。
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf");
+    let _font = tigertype_windows_fonts::PrivateFont::load(&path).unwrap();
     for _ in 0..2 {
         let class = Class::register().unwrap();
         let defaults = Options::default();
@@ -418,6 +465,7 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
             assert_eq!(ids.len(), count, "控件编号重复");
         }
         set_options(&settings, defaults);
+        assert_learning_fonts(&mut main);
         assert_themed_drawing(&main, &settings);
         // 隐藏窗收到迟到回复也不能从用户桌面抢走焦点。
         // SAFETY: 仅观察本测试线程焦点，测试不激活或显示窗口。

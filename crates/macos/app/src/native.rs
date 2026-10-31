@@ -38,6 +38,8 @@ fn run() -> tigertype_backend::Result<()> {
         .parent()
         .and_then(|p| p.parent())
         .ok_or("程序不在应用包内")?;
+    // 先完成字体校验与私有注册，再启动 IMK；守卫覆盖所有候选/查字窗口使用期。
+    let _fonts = crate::fonts::load(&contents.join("Resources/Fonts"))?;
     let root = PathBuf::from(std::env::var_os("HOME").ok_or("缺少 HOME")?)
         .join("Library/Application Support/TigerType");
     let config = root.join("config/settings.toml");

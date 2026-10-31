@@ -739,6 +739,8 @@ pub(super) fn draw_preview(item: &DRAWITEMSTRUCT, c: &Colors) {
     round(dc, &rect, s(8), None, c.line);
     let body = TempFont::new(dc, &[UI_FACE], 15, 400);
     let mono = TempFont::new(dc, &MONO_FACES, 12, 400);
+    // 注释的拆分与内嵌编码同用文楷；序号和其他独立编码保留原等宽字体。
+    let hint_font = TempFont::new(dc, &LEARNING_FACES, 12, 400);
     let glyphs = TempFont::new(dc, &[font_face(face), UI_FACE], 19, 400);
     let lead = units("明天我们一起去");
     let line = RECT {
@@ -783,7 +785,7 @@ pub(super) fn draw_preview(item: &DRAWITEMSTRUCT, c: &Colors) {
     let text_w = extent(dc, glyphs.0, &units("隹"));
     let comment_w = if learning {
         rows.iter()
-            .map(|(.., comment)| extent(dc, mono.0, &units(comment)))
+            .map(|(.., comment)| extent(dc, hint_font.0, &units(comment)))
             .max()
             .unwrap_or(0)
             + s(8)
@@ -836,7 +838,7 @@ pub(super) fn draw_preview(item: &DRAWITEMSTRUCT, c: &Colors) {
         for (font, ink, words) in [
             (mono.0, label_ink, label),
             (glyphs.0, text_ink, text),
-            (mono.0, hint_ink, if learning { comment } else { "" }),
+            (hint_font.0, hint_ink, if learning { comment } else { "" }),
         ] {
             let words = units(words);
             let cell = RECT { left, ..band };

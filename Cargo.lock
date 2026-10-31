@@ -311,6 +311,7 @@ dependencies = [
  "tigertype-macos-input-method",
  "tigertype-macos-ui",
  "tigertype-windows-app",
+ "tigertype-windows-fonts",
  "tigertype-windows-ui",
  "windows-sys",
 ]
@@ -385,8 +386,18 @@ dependencies = [
  "serde_json",
  "tigertype-backend",
  "tigertype-contracts",
+ "tigertype-windows-fonts",
  "tigertype-windows-ipc",
  "tigertype-windows-ui",
+ "windows-sys",
+]
+
+[[package]]
+name = "tigertype-windows-fonts"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha2",
  "windows-sys",
 ]
 
@@ -396,6 +407,7 @@ version = "0.1.0"
 dependencies = [
  "tigertype-contracts",
  "tigertype-input-client",
+ "tigertype-windows-fonts",
  "tigertype-windows-ipc",
  "windows",
  "windows-core",
@@ -417,6 +429,7 @@ version = "0.1.0"
 dependencies = [
  "tigertype-contracts",
  "tigertype-ui-model",
+ "tigertype-windows-fonts",
  "windows-sys",
 ]
 

@@ -23,13 +23,15 @@ enum Role {
     List,
     Glyph,
     Title,
+    Parts,
 }
-const ROLES: usize = 7;
+const ROLES: usize = 8;
 fn role(id: usize) -> Role {
     match id {
         HEADING => Role::Heading,
         CODES | FULL | PAGE | CODEPOINT | FILE_PATH | CUSTOM..=253 => Role::Mono,
-        LIST | PARTS => Role::List,
+        LIST => Role::List,
+        PARTS => Role::Parts,
         GLYPH => Role::Glyph,
         FILE_NAME | ABOUT_TITLE => Role::Title,
         _ if (GROUP..GROUP + GROUPS.len()).contains(&id) => Role::Title,
@@ -213,6 +215,7 @@ impl Window {
             (&[font_face(face), UI_FACE], 20, 400),
             (&[font_face(face), UI_FACE], 76, 400),
             (&[UI_FACE], 13, 600),
+            (&LEARNING_FACES, 20, 400),
         ];
         let mut result = Ok(());
         for (slot, (faces, pixels, weight)) in fonts.iter_mut().zip(specs) {

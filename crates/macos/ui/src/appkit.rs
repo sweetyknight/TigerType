@@ -556,7 +556,50 @@ pub mod tests {
         assert!(png.len() > 100);
         std::fs::write(path, png.to_vec()).unwrap();
     }
+    // 原生组件测试不启动产品进程；显式私有注册仓库字体，不要求用户安装系统字体。
+    fn test_font() -> impl Drop {
+        use objc2_foundation::NSURL;
+        #[link(name = "CoreText", kind = "framework")]
+        unsafe extern "C" {
+            fn CTFontManagerRegisterFontsForURL(
+                url: *const std::ffi::c_void,
+                scope: u32,
+                error: *mut *const std::ffi::c_void,
+            ) -> bool;
+            fn CTFontManagerUnregisterFontsForURL(
+                url: *const std::ffi::c_void,
+                scope: u32,
+                error: *mut *const std::ffi::c_void,
+            ) -> bool;
+        }
+        struct Font(Retained<NSURL>);
+        impl Drop for Font {
+            fn drop(&mut self) {
+                // SAFETY: 与测试进程范围的注册配对，窗口已先释放。
+                unsafe {
+                    CTFontManagerUnregisterFontsForURL(
+                        (&*self.0 as *const NSURL).cast(),
+                        1,
+                        std::ptr::null_mut(),
+                    );
+                }
+            }
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf");
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+        // SAFETY: NSURL 与 CFURL 桥接，scope=1 只对本测试进程生效。
+        assert!(unsafe {
+            CTFontManagerRegisterFontsForURL(
+                (&*url as *const NSURL).cast(),
+                1,
+                std::ptr::null_mut(),
+            )
+        });
+        Font(url)
+    }
     pub fn run() {
+        let _font = test_font();
         let mtm = MainThreadMarker::new().expect("AppKit 检查必须在主线程");
         let _app = NSApplication::sharedApplication(mtm);
         let stamp = std::time::SystemTime::now()
@@ -590,6 +633,8 @@ pub mod tests {
                     let mut s = views.0.borrow_mut();
                     s.page = page;
                     s.editor.draft.theme = theme;
+                    // 外观预览同时覆盖空注释和实际文楷注释的测量/绘制分支。
+                    s.editor.draft.show_learning = matches!(theme, Theme::Amber | Theme::Rose);
                 }
                 refresh(&views.0);
                 let s = views.0.borrow();
@@ -611,6 +656,7 @@ pub mod tests {
                 text: "𠀀".into(),
                 learning: tigertype_contracts::LearningInfo {
                     codes: vec!["aaaa".into(), "bbbb".into()],
+                    decomposition: Some("亻\u{e4e4}小 文辶 日\u{e46a}页 缶\u{e432}人".into()),
                     ..Default::default()
                 },
             }],

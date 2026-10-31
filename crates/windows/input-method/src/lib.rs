@@ -1,5 +1,5 @@
 //! TSF TIP DLL：类工厂、按键/焦点 sink、组合编辑组件、宿主内候选窗、任务栏输入法图标与注册入口；
-//! 只依赖 contracts/input-client/windows-ipc，不加载词表或引擎；会话、按键规则与候选窗视图模型取自 input-client。
+//! 不加载词表或引擎；字体只在 COM 构造阶段经 windows-fonts 校验并私有加载，按键不读盘。
 #![cfg(windows)]
 mod candidate;
 mod edit;

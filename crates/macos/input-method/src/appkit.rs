@@ -218,10 +218,12 @@ impl Fonts {
                 &["Cascadia Mono", "Menlo"],
                 m::SMALL_POINT as f64 * 4.0 / 3.0,
             ),
-            comment: font(
-                &["TumanPUA", "PingFang SC"],
+            // 组装层已从校验后的字节私有加载；拆分不能静默退到系统字形。
+            comment: NSFont::fontWithName_size(
+                &NSString::from_str("LXGW WenKai GB Screen"),
                 m::SMALL_POINT as f64 * 4.0 / 3.0,
-            ),
+            )
+            .expect("随包字根字体尚未私有加载"),
         }
     }
 }
@@ -622,7 +624,50 @@ impl Drop for CandidatePanel {
 pub mod tests {
     //! 本机隐藏窗口验证渲染、非激活属性和原生鼠标路径；不使用真实宿主。
     use super::*;
+    // 原生组件测试不启动产品进程；显式私有注册仓库字体，不要求用户安装系统字体。
+    fn test_font() -> impl Drop {
+        use objc2_foundation::NSURL;
+        #[link(name = "CoreText", kind = "framework")]
+        unsafe extern "C" {
+            fn CTFontManagerRegisterFontsForURL(
+                url: *const std::ffi::c_void,
+                scope: u32,
+                error: *mut *const std::ffi::c_void,
+            ) -> bool;
+            fn CTFontManagerUnregisterFontsForURL(
+                url: *const std::ffi::c_void,
+                scope: u32,
+                error: *mut *const std::ffi::c_void,
+            ) -> bool;
+        }
+        struct Font(Retained<NSURL>);
+        impl Drop for Font {
+            fn drop(&mut self) {
+                // SAFETY: 与测试进程范围的注册配对，窗口已先释放。
+                unsafe {
+                    CTFontManagerUnregisterFontsForURL(
+                        (&*self.0 as *const NSURL).cast(),
+                        1,
+                        std::ptr::null_mut(),
+                    );
+                }
+            }
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf");
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+        // SAFETY: NSURL 与 CFURL 桥接，scope=1 只对本测试进程生效。
+        assert!(unsafe {
+            CTFontManagerRegisterFontsForURL(
+                (&*url as *const NSURL).cast(),
+                1,
+                std::ptr::null_mut(),
+            )
+        });
+        Font(url)
+    }
     pub fn run() {
+        let _font = test_font();
         let mtm = MainThreadMarker::new().expect("面板检查必须在主线程");
         let _app = NSApplication::sharedApplication(mtm);
         input::tests::run();
@@ -637,7 +682,8 @@ pub mod tests {
             candidates: vec![tigertype_contracts::Candidate {
                 text: "𠀀".into(),
                 label: "1".into(),
-                comment: "〔测试〕".into(),
+                // 合成资料覆盖三个私用区字根及辶；保存离屏图供 Mac 验收字形与列宽。
+                comment: "〔亻\u{e4e4}小 文辶 日\u{e46a}页 缶\u{e432}人 · jxyx〕".into(),
                 ..Default::default()
             }],
             ..Default::default()

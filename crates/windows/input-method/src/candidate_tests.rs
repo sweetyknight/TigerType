@@ -409,6 +409,83 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
 }
 
 #[test]
+fn learning_font_keeps_private_roots_when_candidate_font_changes() {
+    // 测试走正式校验/私有加载路径，窗口和 HFONT 先于注册引用释放。
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf");
+    let private = tigertype_windows_fonts::PrivateFont::load(&path).unwrap();
+    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let mut shown = state(4, 0);
+    shown.is_last_page = true;
+    for (candidate, (word, parts)) in shown.candidates.iter_mut().zip([
+        ("你", "亻\u{e4e4}小 · jx / jxyx"),
+        ("这", "文辶 · vu / vuc"),
+        ("题", "日\u{e46a}页 · ot / otw / otwy"),
+        ("缺", "缶\u{e432}人 · an / anj / anjr"),
+    ]) {
+        candidate.text = word.into();
+        candidate.comment = format!("〔{parts}〕");
+    }
+    let probe = wide("亻\u{e4e4}小文辶日\u{e46a}页缶\u{e432}人〔 · jxyx / 123〕");
+    for face in CandidateFont::ALL {
+        for dpi in [96, 144, 192] {
+            popup.ensure_fonts(dpi, face).unwrap();
+            let fonts = popup.fonts.get();
+            let layout = popup.measure(&shown).unwrap();
+            // SAFETY: 本地内存 DC 只读字体覆盖和排版；归还选中对象后删除 DC。
+            unsafe {
+                let dc = CreateCompatibleDC(None);
+                assert!(!dc.is_invalid());
+                let old = SelectObject(dc, fonts.comment.into());
+                let mut glyphs = vec![0; probe.len()];
+                assert_ne!(
+                    GetGlyphIndicesW(
+                        dc,
+                        PCWSTR(probe.as_ptr()),
+                        probe.len() as i32,
+                        glyphs.as_mut_ptr(),
+                        GGI_MARK_NONEXISTING_GLYPHS
+                    ),
+                    u32::MAX
+                );
+                assert!(
+                    glyphs.iter().all(|g| *g != 0xffff && *g != 0),
+                    "{face:?} / {dpi} DPI 拆分缺字"
+                );
+                assert!(face_is(dc, fonts.comment, LEARNING_FACES[0]));
+                let mut widest = 0;
+                for candidate in &shown.candidates {
+                    let mut rect = RECT::default();
+                    DrawTextW(
+                        dc,
+                        &mut wide(&candidate.comment),
+                        &mut rect,
+                        DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+                    );
+                    assert_eq!(
+                        popup.extent(dc, fonts.comment, &candidate.comment),
+                        rect.right
+                    );
+                    widest = widest.max(rect.right);
+                }
+                assert_eq!(
+                    layout.size.cx,
+                    (layout.comment_x + widest + popup.scale(ROW_RIGHT + PAD))
+                        .clamp(popup.scale(MIN_WIDTH), popup.scale(MAX_WIDTH))
+                );
+                assert_eq!(popup.extent(dc, fonts.comment, ""), 0);
+                SelectObject(dc, old);
+                let _ = DeleteDC(dc);
+            }
+        }
+    }
+    popup.show(&shown, CARET, HWND::default()).unwrap();
+    let _ = render(&popup, popup.view.borrow().layout.size);
+    drop(popup);
+    drop(private);
+}
+
+#[test]
 fn missing_font_falls_back_to_the_next_face_in_priority_order() {
     // SAFETY: 屏幕 DC 只用于核对字体名，结束前归还；字体用后删除。
     unsafe {

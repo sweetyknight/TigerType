@@ -9,6 +9,9 @@
 #ifndef Icon
   #error 请用打包驱动编译（缺少 /DIcon）
 #endif
+#ifndef PrivateFont
+  #error 请用打包驱动编译（缺少 /DPrivateFont）
+#endif
 #define Root AddBackslash(SourcePath) + "..\.."
 
 [Setup]
@@ -48,6 +51,8 @@ ApplicationsFound2=以下程序仍在使用旧版 TigerType，不重新打开就
 FinishedLabel=TigerType 已安装，输入后台已启动并会随登录自动启动。%n%n请在“设置 → 时间和语言 → 语言和区域 → 中文(简体) → 语言选项 → 键盘”中添加“TigerType 虎码”。查字与设置可从开始菜单打开。%n%n升级时未关闭的程序须重新打开才会用上新版本。
 
 [Files]
+; 进程私有字体独立于系统 Fonts；摘要文件名避免覆盖仍被旧宿主使用的版本。
+Source: "{#Root}\resources\fonts\LXGWWenKaiGBScreen.ttf"; DestDir: "{app}"; DestName: "{#PrivateFont}"; Flags: onlyifdoesntexist uninsrestartdelete
 ; 程序与配置图标在前：注册 DLL 时要求同目录已有后台程序与 tigertype.ico（任务栏据此显示虎码图标）。
 ; 改名在关闭程序之后（BeforeInstall），改早了重启管理器就找不到占用者。
 Source: "{#Root}\target\release\tigertype.exe"; DestDir: "{app}"; Flags: ignoreversion uninsrestartdelete; BeforeInstall: Retire('tigertype.exe')

@@ -92,6 +92,8 @@ const fn font_face(font: CandidateFont) -> &'static str {
     }
 }
 const MONO_FACES: [&str; 2] = ["Cascadia Mono", "Consolas"];
+/// 拆分只用启动时私有加载的锁定文楷，不跟随候选字体选项或系统回退。
+const LEARNING_FACES: [&str; 1] = [tigertype_windows_fonts::FAMILY];
 /// 图标字体：Win11 为 Fluent，Win10 为 MDL2，常用码位相同。
 const ICON_FACES: [&str; 2] = ["Segoe Fluent Icons", "Segoe MDL2 Assets"];
 /// 字块列表的行高与最小列宽（96 DPI）。

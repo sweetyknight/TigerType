@@ -47,6 +47,8 @@ use windows::{
 const CLICK: u32 = WM_APP + 0x54;
 const CLASS: PCWSTR = w!("TigerType.Candidate");
 pub(crate) const UI_FACE: &str = "Microsoft YaHei UI";
+/// 初始化已私有加载锁定文楷；拆分不再接受系统字体替代。
+const LEARNING_FACES: [&str; 1] = [tigertype_windows_fonts::FAMILY];
 /// 候选字体的 Windows 字体名；未安装时由 create_font 回退到界面字体。
 pub(crate) const fn font_face(font: CandidateFont) -> &'static str {
     match font {
@@ -266,7 +268,7 @@ pub(crate) fn create_font(
         if font.is_invalid() {
             continue;
         }
-        if index + 1 == faces.len() || face_is(dc, font, face) {
+        if (index + 1 == faces.len() && faces != LEARNING_FACES) || face_is(dc, font, face) {
             last = font;
             break;
         }
@@ -404,18 +406,19 @@ pub(crate) struct View {
     pending: bool,
 }
 
-/// 按 DPI 与候选字体缓存的三种字体：候选字、序号/编码（等宽）、提示文字。
+/// 按 DPI 与候选字体缓存：候选字、序号（等宽）、界面文字及独立的拆分注释字体。
 #[derive(Clone, Copy, Default)]
 struct Fonts {
     text: HFONT,
     small: HFONT,
     ui: HFONT,
+    comment: HFONT,
     dpi: u32,
     face: CandidateFont,
 }
 impl Fonts {
     fn release(self) {
-        for font in [self.text, self.small, self.ui] {
+        for font in [self.text, self.small, self.ui, self.comment] {
             if !font.is_invalid() {
                 // SAFETY: 字体只在绘制/测量期间临时选入并已还原，不再被任何 DC 使用。
                 unsafe {
@@ -711,7 +714,7 @@ impl Popup {
             if !row.comment.is_empty() {
                 draw_text(
                     dc,
-                    fonts.small,
+                    fonts.comment,
                     hint,
                     row.comment,
                     span(layout.comment_x),
@@ -769,13 +772,21 @@ impl Popup {
         }
     }
     fn extent(&self, dc: HDC, font: HFONT, text: &str) -> i32 {
-        let mut size = SIZE::default();
-        // SAFETY: 字体临时选入后由调用方统一还原；字符串在同步调用内有效。
+        if text.is_empty() {
+            return 0;
+        }
+        let mut rect = RECT::default();
+        // SAFETY: 与绘制同用 DrawTextW，系统缺字回退后的宽度也一致；调用方统一还原字体。
         unsafe {
             SelectObject(dc, font.into());
-            let _ = GetTextExtentPoint32W(dc, &wide(text), &mut size);
+            DrawTextW(
+                dc,
+                &mut wide(text),
+                &mut rect,
+                DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+            );
         }
-        size.cx
+        rect.right - rect.left
     }
     /// 字号随窗口 DPI、候选字体随选项；全部新字体建好后才释放旧字体。
     fn ensure_fonts(&self, dpi: u32, face: CandidateFont) -> Result<()> {
@@ -810,6 +821,8 @@ impl Popup {
             )
             .inspect_err(|_| fonts.release())?;
             fonts.ui = create_font(dc, &[UI_FACE], SMALL_POINT, dpi, FW_NORMAL.0 as i32)
+                .inspect_err(|_| fonts.release())?;
+            fonts.comment = create_font(dc, &LEARNING_FACES, SMALL_POINT, dpi, FW_NORMAL.0 as i32)
                 .inspect_err(|_| fonts.release())?;
             Ok::<_, Error>(fonts)
         })();
@@ -848,7 +861,7 @@ impl Popup {
         );
         let text = widest(fonts.text, &mut candidates.iter().map(|c| c.text.as_str()));
         let comment = widest(
-            fonts.small,
+            fonts.comment,
             &mut candidates.iter().map(|c| c.comment.as_str()),
         );
         let text_x = s(PAD + ROW_LEFT) + label + s(GAP);

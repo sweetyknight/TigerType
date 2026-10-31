@@ -323,6 +323,14 @@ fn service() -> ComObject<TextService> {
         ),
         image: Some(std::env::current_exe().unwrap()),
         quiet: true,
+        // 与正式 COM 构造一致，在激活前加载；测试直接构造对象不能依赖机器预装字体。
+        font: Some(Rc::new(
+            tigertype_windows_fonts::PrivateFont::load(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf"),
+            )
+            .unwrap(),
+        )),
         ..TextService::new()
     })
 }

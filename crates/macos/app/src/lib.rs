@@ -2,6 +2,8 @@
 pub mod bundle;
 pub mod channel;
 #[cfg(target_os = "macos")]
+pub mod fonts;
+#[cfg(target_os = "macos")]
 pub mod icons;
 #[cfg(target_os = "macos")]
 pub mod install;

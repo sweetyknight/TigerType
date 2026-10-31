@@ -210,16 +210,25 @@ pub(super) fn draw_text(
         SelectObject(dc, old);
     }
 }
-/// 按字体测量单行文字宽度。
+/// 与绘制同用 DrawTextW，避免字体回退时测量与显示宽度不一致。
 pub(super) fn extent(dc: HDC, font: HFONT, text: &[u16]) -> i32 {
-    let mut size = SIZE::default();
+    if text.is_empty() {
+        return 0;
+    }
+    let mut rect = RECT::default();
     // SAFETY: 字体临时选入后还原；文字缓冲在调用期间有效。
     unsafe {
         let old = SelectObject(dc, font);
-        GetTextExtentPoint32W(dc, text.as_ptr(), text.len() as i32, &mut size);
+        DrawTextW(
+            dc,
+            text.as_ptr(),
+            text.len() as i32,
+            &mut rect,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        );
         SelectObject(dc, old);
     }
-    size.cx
+    rect.right - rect.left
 }
 /// 临时字体：按 96 DPI 像素与设备 DPI 新建，用完由 Drop 删除；建不出时为空，绘制跳过。
 pub(super) struct TempFont(pub(super) HFONT);
@@ -313,7 +322,7 @@ pub(super) fn create_font(
         if font.is_null() {
             continue;
         }
-        if index + 1 == faces.len() || face_is(dc, font, face) {
+        if (index + 1 == faces.len() && faces != LEARNING_FACES) || face_is(dc, font, face) {
             return Ok(font);
         }
         // SAFETY: 字体只在 face_is 内临时选入并已还原。
@@ -321,7 +330,11 @@ pub(super) fn create_font(
             DeleteObject(font);
         }
     }
-    Err(error())
+    Err(if faces == LEARNING_FACES {
+        "无法选择已私有加载的虎码文楷".into()
+    } else {
+        error()
+    })
 }
 pub(super) fn face_is(dc: HDC, font: HFONT, face: &str) -> bool {
     let mut buffer = [0u16; 64];

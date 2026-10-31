@@ -141,12 +141,12 @@ cargo run --locked --offline -p tigertype-windows-app -- lookup-window
 
 ## 随包字体
 
-候选窗与查字字形默认用霞鹜文楷屏幕阅读版（虎码融合字根版），编码与序号用 Cascadia Mono，字根用 TumanPUA；三者按 `resources/fonts.lock.json` 锁定大小与 SHA256，文件随仓库放在 `resources/fonts`（仅限个人本地使用），来源如下，更换版本时才需重新取得。楷体与微软雅黑 UI 是 Windows 自带的微软字体，不随包分发；缺楷体时回退微软雅黑 UI。
+候选窗与查字字形默认用霞鹜文楷屏幕阅读版（虎码融合字根版），独立编码与序号用 Cascadia Mono；候选注释（拆分及其内嵌编码）、设置预览的注释与查字拆分只使用经校验并进程私有加载的 LXGW WenKai GB Screen，不跟随候选字体选择，不依赖系统安装；三者按 `resources/fonts.lock.json` 锁定大小与 SHA256，文件随仓库放在 `resources/fonts`（仅限个人本地使用），来源如下，更换版本时才需重新取得。楷体与微软雅黑 UI 是 Windows 自带的微软字体，不随包分发；缺楷体时回退微软雅黑 UI。拆分按实际绘制的字体与排版 API 测量宽度；私有字体副本缺失、被篡改或加载失败时初始化报错，不用系统字体替代。字体只在 COM 对象创建/后台启动或 IMK 启动前加载，按键与绘制不读文件。
 
 - 霞鹜文楷、TumanPUA：虎码官网盘 <https://huma.ysepan.com/> 的“06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z”，取其中 `LXGWWenKaiGBScreen.ttf` 与 `TumanPUA.ttf`。
 - Cascadia Mono：<https://github.com/microsoft/cascadia-code/releases/download/v2407.24/CascadiaCode-2407.24.zip> 中的 `ttf/CascadiaMono.ttf`。
 
-安装包把三个字体装到全机字体目录（见下文“安装包”）。不走安装包时，可以普通权限只为当前用户安装（无需管理员）：
+安装包保留三个全机字体安装项，另把按 SHA256 命名的文楷原件放到 Windows DLL/EXE 旁供私有加载。debug 构建使用编译时确定的仓库原件；release 构建必须带上私有副本，不能只复制 EXE/DLL。同摘要副本不覆盖；若它被破坏，须移除损坏副本再修复安装。下列用户级安装命令仍可供其他程序使用，但输入法拆分不依赖此操作：
 
 ```powershell
 cargo run --locked --offline -p tigertype-windows-app -- install-fonts 'D:\Projects\TigerType\resources\fonts'

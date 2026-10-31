@@ -141,6 +141,7 @@ pub fn run(
     settings_path: &Path,
     options: Options,
 ) -> Result<(), String> {
+    // 组装层在启动本线程前已校验并私有加载字体，注册引用覆盖所有窗口使用期。
     let _dpi = DpiContext::enter()?;
     PALETTE.with(|palette| palette.set(options.palette()));
     watch(Some(&show));

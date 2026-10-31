@@ -1,0 +1,93 @@
+//! 启动前校验随包字体并从同一份字节注册；不安装全机字体，不让 CoreText 再按可变路径读取。
+use std::{ffi::c_void, path::Path, ptr};
+use tigertype_backend::{Result, resources, storage};
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFDataCreate(allocator: *const c_void, bytes: *const u8, length: isize) -> *const c_void;
+    fn CFRelease(value: *const c_void);
+    fn CFErrorGetCode(error: *const c_void) -> isize;
+}
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGDataProviderCreateWithCFData(data: *const c_void) -> *const c_void;
+    fn CGDataProviderRelease(provider: *const c_void);
+    fn CGFontCreateWithDataProvider(provider: *const c_void) -> *const c_void;
+    fn CGFontRelease(font: *const c_void);
+}
+#[link(name = "CoreText", kind = "framework")]
+unsafe extern "C" {
+    fn CTFontManagerRegisterGraphicsFont(font: *const c_void, error: *mut *const c_void) -> bool;
+    fn CTFontManagerUnregisterGraphicsFont(font: *const c_void, error: *mut *const c_void) -> bool;
+}
+pub struct PrivateFont(*const c_void);
+impl PrivateFont {
+    fn new(bytes: &[u8]) -> Result<Self> {
+        // SAFETY: CFData 复制已校验字节；provider/font 逐层持有引用，各失败路径释放已创建对象。
+        unsafe {
+            let data = CFDataCreate(ptr::null(), bytes.as_ptr(), bytes.len().try_into()?);
+            if data.is_null() {
+                return Err("无法创建字体数据".into());
+            }
+            let provider = CGDataProviderCreateWithCFData(data);
+            CFRelease(data);
+            if provider.is_null() {
+                return Err("无法创建字体数据源".into());
+            }
+            let font = CGFontCreateWithDataProvider(provider);
+            CGDataProviderRelease(provider);
+            if font.is_null() {
+                return Err("无效的随包字体".into());
+            }
+            let mut error = ptr::null();
+            if !CTFontManagerRegisterGraphicsFont(font, &mut error) {
+                let code = if error.is_null() {
+                    0
+                } else {
+                    let code = CFErrorGetCode(error);
+                    CFRelease(error);
+                    code
+                };
+                CGFontRelease(font);
+                return Err(format!(
+                    "进程私有字体注册失败（CoreText {code}），不使用同名系统字体替代"
+                )
+                .into());
+            }
+            Ok(Self(font))
+        }
+    }
+}
+impl Drop for PrivateFont {
+    fn drop(&mut self) {
+        // SAFETY: 成功注册的字体仅注销一次；显示组件先销毁，随后释放自有 CGFont 引用。
+        unsafe {
+            CTFontManagerUnregisterGraphicsFont(self.0, ptr::null_mut());
+            CGFontRelease(self.0);
+        }
+    }
+}
+pub fn load(directory: &Path) -> Result<Vec<PrivateFont>> {
+    let mut fonts = Vec::new();
+    for entry in crate::bundle::locked()?
+        .into_iter()
+        .filter(|e| e.path.starts_with("Contents/Resources/Fonts/"))
+    {
+        let name = Path::new(&entry.path).file_name().ok_or("字体名称缺失")?;
+        let bytes = storage::read_file(&directory.join(name), entry.size)?;
+        if bytes.len() as u64 != entry.size || resources::sha256_bytes(&bytes) != entry.sha256 {
+            return Err(format!("随包字体校验失败：{}", entry.path).into());
+        }
+        fonts.push(PrivateFont::new(&bytes)?);
+    }
+    // 在接收 IMK/UI 回调前确认 AppKit 能选择它，不把注册成功等同于名称可用。
+    if objc2_app_kit::NSFont::fontWithName_size(
+        &objc2_foundation::NSString::from_str("LXGW WenKai GB Screen"),
+        20.0,
+    )
+    .is_none()
+    {
+        return Err("私有文楷已注册但 AppKit 无法选择".into());
+    }
+    Ok(fonts)
+}

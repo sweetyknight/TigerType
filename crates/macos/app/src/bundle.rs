@@ -19,7 +19,6 @@ pub const INFO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <key>CFBundleIconFile</key><string>TigerType.icns</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/><key>LSBackgroundOnly</key><false/>
-<key>ATSApplicationFontsPath</key><string>Fonts</string>
 <key>InputMethodConnectionName</key><string>TigerType_Connection</string>
 <key>InputMethodServerControllerClass</key><string>TigerTypeInputController</string>
 <key>TISInputSourceID</key><string>local.tigertype.inputmethod</string>

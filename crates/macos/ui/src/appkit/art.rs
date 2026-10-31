@@ -36,6 +36,11 @@ pub(super) fn candidate_font(o: Options, size: f64) -> Retained<NSFont> {
         .find_map(|n| NSFont::fontWithName_size(&NSString::from_str(n), size))
         .unwrap_or_else(|| NSFont::systemFontOfSize(size))
 }
+/// 组装层先私有加载经校验的文楷，拆分禁止静默采用不确定的系统字体。
+fn learning_font(size: f64) -> Retained<NSFont> {
+    NSFont::fontWithName_size(&NSString::from_str("LXGW WenKai GB Screen"), size)
+        .expect("随包字根字体尚未私有加载")
+}
 pub(super) struct CanvasState {
     palette: Cell<Palette>,
     cards: RefCell<Vec<Box4>>,
@@ -192,15 +197,23 @@ impl Art {
                         .fill();
                 }
                 NSBezierPath::bezierPathWithRect(rect(x + 19.0, 16.0, 1.0, 18.0)).fill();
-                let width = if o.show_learning { 282.0 } else { 132.0 };
-                round(rect(x, 42.0, width, 69.0), p.window, p.border, 8.0);
-                for (i, (label, value, hint)) in [
+                let rows = [
                     ("1", "拉", "〔扌立 · uil〕"),
                     ("2", "隹", "〔隹 · ui / uii〕"),
-                ]
-                .into_iter()
-                .enumerate()
-                {
+                ];
+                let hint_font = learning_font(12.0);
+                // 注释列沿用原位置，宽度按实际绘制的属性字符串测量，不沿用旧字体固定值。
+                let width = if o.show_learning {
+                    58.0 + rows
+                        .iter()
+                        .map(|(.., hint)| string(hint, &hint_font, p.text).size().width)
+                        .fold(0.0_f64, f64::max)
+                        + 14.0
+                } else {
+                    132.0
+                };
+                round(rect(x, 42.0, width, 69.0), p.window, p.border, 8.0);
+                for (i, (label, value, hint)) in rows.into_iter().enumerate() {
                     let y = 46.0 + i as f64 * 31.0;
                     if i == 0 {
                         round(
@@ -224,13 +237,12 @@ impl Art {
                     );
                     glyph.drawAtPoint(NSPoint::new(x + 30.0, y + 3.0));
                     if o.show_learning {
-                        words(
+                        string(
                             hint,
-                            12.0,
+                            &hint_font,
                             if i == 0 { p.highlight_text } else { p.muted },
-                            x + 58.0,
-                            y + 7.0,
-                        );
+                        )
+                        .drawAtPoint(NSPoint::new(x + 58.0, y + 7.0));
                     }
                 }
             }
@@ -255,8 +267,7 @@ impl Art {
                 let mut x = 0.0;
                 let mut y = 2.0;
                 let font = if s.id == PARTS {
-                    NSFont::fontWithName_size(&NSString::from_str("TumanPUA"), 18.0)
-                        .unwrap_or_else(|| candidate_font(o, 18.0))
+                    learning_font(18.0)
                 } else {
                     NSFont::fontWithName_size(&NSString::from_str("Cascadia Mono"), 13.0)
                         .unwrap_or_else(|| NSFont::systemFontOfSize(13.0))
