@@ -1,5 +1,46 @@
 //! Win32 与 AppKit 共用的控件标识、内容与逻辑尺寸；平台层仅创建原生控件和绘制。
-use tigertype_contracts::{OutputForm, Theme};
+use tigertype_contracts::{OutputForm, Palette, Theme, mix};
+
+/// 两端共用的派生绘制色：主题只给基色，侧栏、轨道与选中底在此统一推导，避免两端各算一份走样。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shades {
+    /// 侧栏、设置窗标题栏与预览台面：窗口色向文字色靠 4%。
+    pub sidebar: u32,
+    /// 分段单选轨道、编码键帽与按下底：靠 6%。
+    pub track: u32,
+    /// 侧栏选中项与字块选中底：有高亮底用高亮底，玫红这类无高亮底的主题用选区色。
+    pub nav: u32,
+}
+pub const fn shades(p: Palette) -> Shades {
+    Shades {
+        sidebar: mix(p.window, p.text, 4),
+        track: mix(p.window, p.text, 6),
+        nav: if p.highlight != p.window {
+            p.highlight
+        } else {
+            p.selection
+        },
+    }
+}
+
+/// 两端同源的窗口标题与界面文案；括号助记键只在 Windows 显示，AppKit 绘制前去掉。
+pub const LOOKUP_TITLE: &str = "虎码 查字";
+pub const SETTINGS_TITLE: &str = "虎码 设置";
+pub const QUERY_HINT: &str = "汉字或拼音，按 Enter 查询";
+pub const KEYS_NOTE_TEXT: &str = "暂不支持自定义";
+pub const OPEN_TEXT: &str = "打开(&O)";
+pub const RELOAD_TEXT: &str = "重新载入(&R)";
+pub const RELOAD_TITLE: &str = "载入手工修改";
+pub const RELOAD_DESC: &str =
+    "编辑并保存文件后点“重新载入”；格式有误时保留当前设置，并指出出错的行";
+pub const RESET_TEXT: &str = "从琥珀重新开始";
+pub const ABOUT_NAME: &str = "虎码 TigerType";
+pub fn about_description() -> String {
+    format!(
+        "版本 {} · 本地运行，不联网、不收集数据",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 // 查字窗控件。
 pub const QUERY: usize = 101;
@@ -138,7 +179,7 @@ pub const KEYMAP: [(&str, &str); 12] = [
     ("切换中英文", "[Shift] 单击"),
     ("切换中英文标点", "[Ctrl] + [.]"),
     ("拼音反查", "[`] 后输入拼音"),
-    ("全角与半角", "任务栏图标菜单"),
+    ("全角与半角", "[Shift] + [Space]"),
     ("选择候选", "[1] – [N]"),
     ("第二、三候选", "[;] [']"),
     ("移动高亮", "[↑] [↓] [←] [→]"),
@@ -419,5 +460,32 @@ mod tests {
             }
         }
         assert!(SWATCHES.into_iter().all(tigertype_contracts::without_blue));
+    }
+
+    #[test]
+    fn derived_shades_follow_theme_and_fall_back_when_highlight_is_invisible() {
+        use super::*;
+        let amber = Theme::Amber.preset().unwrap();
+        let rose = Theme::Rose.preset().unwrap();
+        // 琥珀有高亮底，选中项沿用高亮；玫红高亮与窗口同色，必须改用选区色，否则选中不可见。
+        assert_eq!(shades(amber).nav, amber.highlight);
+        assert_eq!(rose.highlight, rose.window);
+        assert_eq!(shades(rose).nav, rose.selection);
+        assert_ne!(shades(rose).nav, rose.window);
+        for theme in Theme::ALL {
+            let p = tigertype_contracts::Options {
+                theme,
+                ..Default::default()
+            }
+            .palette();
+            let s = shades(p);
+            // 侧栏与轨道都必须和窗口底色可分（白底主题尤其容易融成一片）。
+            assert_ne!(s.sidebar, p.window, "{theme:?}");
+            assert_ne!(s.track, s.sidebar, "{theme:?}");
+            assert!(
+                tigertype_contracts::without_blue(s.sidebar)
+                    && tigertype_contracts::without_blue(s.track)
+            );
+        }
     }
 }

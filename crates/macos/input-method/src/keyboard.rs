@@ -16,6 +16,9 @@ pub enum KeyAction {
 pub struct Keyboard {
     tap: ShiftTap,
     shift_down: bool,
+    /// 上一个修饰键事件的键码。真机上 IMK 把每个修饰键事件投递两次，同一 Shift 再报一次按下
+    /// 不能当作“期间有其他键”而作废单击；另一个 Shift 的按下仍作废。
+    last: u16,
 }
 impl Keyboard {
     pub fn reset(&mut self) {
@@ -54,12 +57,16 @@ impl Keyboard {
             } else {
                 KeyAction::Pass
             };
-        self.tap = if shift && modifiers.shift && !self.shift_down {
+        let repeat = shift && modifiers.shift && self.shift_down && code == self.last;
+        self.tap = if repeat {
+            self.tap
+        } else if shift && modifiers.shift && !self.shift_down {
             ShiftTap::default().press(true, modifiers)
         } else {
             ShiftTap::default()
         };
         self.shift_down = modifiers.shift;
+        self.last = code;
         action
     }
 }
@@ -233,6 +240,10 @@ mod tests {
             assert_eq!(keyboard.flags_changed(code, PLAIN), KeyAction::Pass);
             assert_eq!(keyboard.flags_changed(code, SHIFT), KeyAction::Pass);
             assert_eq!(keyboard.flags_changed(code, PLAIN), KeyAction::ShiftTap);
+            // 同一 Shift 的按下被重复报告时仍是一次单击。
+            keyboard.flags_changed(code, SHIFT);
+            keyboard.flags_changed(code, SHIFT);
+            assert_eq!(keyboard.flags_changed(code, PLAIN), KeyAction::ShiftTap);
             assert_eq!(keyboard.flags_changed(code, PLAIN), KeyAction::Pass);
             keyboard.flags_changed(code, SHIFT);
             keyboard.reset();
@@ -268,6 +279,19 @@ mod tests {
         for text in [Some("a"), None, Some("ab")] {
             keyboard.flags_changed(56, SHIFT);
             keyboard.key_down(0, SHIFT, text, &composing());
+            assert_eq!(keyboard.flags_changed(56, PLAIN), KeyAction::Pass);
+        }
+        // Shift+空格在任何状态都切全角/半角，并作废同一次 Shift 的单击判定。
+        let ascii = InputState {
+            ascii_mode: true,
+            ..Default::default()
+        };
+        for state in [InputState::default(), composing(), ascii] {
+            keyboard.flags_changed(56, SHIFT);
+            assert_eq!(
+                keyboard.key_down(49, SHIFT, Some(" "), &state),
+                KeyAction::Input(Key::ToggleFullShape)
+            );
             assert_eq!(keyboard.flags_changed(56, PLAIN), KeyAction::Pass);
         }
         keyboard.flags_changed(

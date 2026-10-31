@@ -51,6 +51,8 @@ pub fn map(
         };
     }
     Some(match key {
+        // Shift+空格切换全角/半角（同微软拼音），任何状态都不当作空格上屏或选字。
+        PhysicalKey::Space if modifiers.shift => Key::ToggleFullShape,
         PhysicalKey::Space => Key::Space,
         PhysicalKey::Enter => Key::Enter,
         PhysicalKey::Backspace => Key::Backspace,
@@ -116,13 +118,20 @@ mod tests {
             (PhysicalKey::Down, Key::Next),
             (PhysicalKey::Right, Key::Next),
         ] {
-            // 命名键不受布局字符影响，Shift 不改变其含义。
+            // 命名键不受布局字符影响；除空格外 Shift 不改变其含义。
             assert_eq!(map(physical, PLAIN, Some('x'), false), Some(key));
             let shifted = Modifiers {
                 shift: true,
                 ..PLAIN
             };
-            assert_eq!(map(physical, shifted, None, true), Some(key));
+            let expected = if physical == PhysicalKey::Space {
+                Key::ToggleFullShape
+            } else {
+                key
+            };
+            for composing in [false, true] {
+                assert_eq!(map(physical, shifted, None, composing), Some(expected));
+            }
         }
         assert_eq!(
             map(PhysicalKey::Other, PLAIN, Some('a'), false),

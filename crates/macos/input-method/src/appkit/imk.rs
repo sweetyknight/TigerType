@@ -227,11 +227,20 @@ impl Session {
                 false
             }
         };
-        if handled && key == Key::ToggleAscii {
-            let state = self.host.borrow().state().clone();
+        // 中英与全半角切换都在光标旁短暂提示，状态取自后台回复；组合中切全角时候选窗仍在，不用提示顶掉它。
+        let state = (handled && matches!(key, Key::ToggleAscii | Key::ToggleFullShape))
+            .then(|| self.host.borrow().state().clone())
+            .filter(|state| !state.composing);
+        if let Some(state) = state {
+            let label = match key {
+                Key::ToggleAscii if state.ascii_mode => "英",
+                Key::ToggleAscii => "中",
+                _ if state.full_shape => "全",
+                _ => "半",
+            };
             let anchor = self.anchor(0, deadline);
             let _ = self.environment.panel.status(
-                state.ascii_mode,
+                label,
                 state.options,
                 &mut self.location.borrow_mut(),
                 anchor,
@@ -537,6 +546,29 @@ pub(super) mod tests {
             let handled: bool = msg_send![&*controller, handleEvent: &*event, client: &*client];
             assert!(!handled, "后台离线必须放行原键");
             assert_eq!(attempts.get(), 1, "激活后的文本包装对象不能被错误拒绝");
+            // 真机诊断：IMK 把每个修饰键事件投递两次（按下、按下、抬起、抬起）；重复的按下不能作废单击，
+            // 单击 Shift 只切换一次，原事件始终交还应用、不写入文档。
+            let empty = NSString::from_str("");
+            let shift = |flags| {
+                NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                    objc2_app_kit::NSEventType::FlagsChanged, objc2_foundation::NSPoint::ZERO,
+                    flags, 0.0, 0, None, &empty, &empty, false, 56,
+                ).unwrap()
+            };
+            let down = shift(objc2_app_kit::NSEventModifierFlags::Shift);
+            let up = shift(objc2_app_kit::NSEventModifierFlags::empty());
+            for event in [&down, &down] {
+                let handled: bool =
+                    msg_send![&*controller, handleEvent: &**event, client: &*client];
+                assert!(!handled);
+            }
+            assert_eq!(attempts.get(), 1, "按下 Shift 尚不构成单击");
+            for event in [&up, &up] {
+                let handled: bool =
+                    msg_send![&*controller, handleEvent: &**event, client: &*client];
+                assert!(!handled, "Shift 原事件必须交还应用");
+            }
+            assert_eq!(attempts.get(), 2, "重复投递的单击 Shift 须切换且只切换一次");
             assert!(client.ivars().committed.borrow().is_empty());
             let _: () = msg_send![&*controller, deactivateServer: &*client];
             assert!(!controller.ivars().active.get());

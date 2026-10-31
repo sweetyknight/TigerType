@@ -14,7 +14,7 @@ use std::{
 #[cfg(test)]
 use tigertype_contracts::OutputForm;
 use tigertype_contracts::{
-    CandidateFont, CustomColors, Options, Palette, Theme, TypingMode, mix,
+    CandidateFont, CustomColors, Options, Palette, Theme, TypingMode,
     protocol::Panel,
     ui::{Reply, Request},
 };

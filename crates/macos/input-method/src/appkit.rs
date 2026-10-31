@@ -557,10 +557,10 @@ impl CandidatePanel {
             );
         }
     }
-    /// 中英切换提示使用同一非激活面板；新快照/失焦立即取消一次性隐藏，空闲没有周期唤醒。
+    /// 中英、全半角切换提示使用同一非激活面板；新快照/失焦立即取消一次性隐藏，空闲没有周期唤醒。
     pub fn status(
         &self,
-        ascii: bool,
+        label: &str,
         options: Options,
         location: &mut Location,
         anchor: Option<NativeRect>,
@@ -571,11 +571,7 @@ impl CandidatePanel {
         let p = options.palette();
         *self.view.ivars().drawing.borrow_mut() = Some(Drawing {
             lines: vec![],
-            footer: Some(text(
-                if ascii { "英" } else { "中" },
-                &fonts.candidate,
-                &color(p.text),
-            )),
+            footer: Some(text(label, &fonts.candidate, &color(p.text))),
             width: 48.0,
             height: 40.0,
             background: color(p.window),

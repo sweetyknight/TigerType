@@ -447,7 +447,7 @@ pub enum Key {
     ToggleAscii,
     ToggleLearning,
     TogglePunctuation,
-    /// 全角/半角：只由任务栏输入法图标菜单发出。
+    /// 全角/半角：Shift+空格或输入法图标菜单发出。
     ToggleFullShape,
 }
 impl Key {

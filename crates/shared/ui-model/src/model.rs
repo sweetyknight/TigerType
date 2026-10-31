@@ -5,9 +5,6 @@ use tigertype_contracts::{
     ui::{Reply, Request},
 };
 
-/// 设置窗空闲时的提示。
-pub const SETTINGS_IDLE: &str = "✓ 修改后立即生效";
-
 /// 回复对界面的影响。
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -38,7 +35,8 @@ impl Model {
             page: 0,
             result: None,
             notice: "查字使用全字集与原字形，不受输入设置影响".into(),
-            settings_notice: SETTINGS_IDLE.into(),
+            // 设置侧栏只在出错时说话：空闲、保存成功与重新载入成功都不显示确认文字。
+            settings_notice: String::new(),
             pending: None,
         }
     }
@@ -80,7 +78,6 @@ impl Model {
         }
         self.pending = Some(Request::ReloadSettings);
         self.busy = true;
-        self.settings_notice = "正在重新载入…".into();
         Ok(Request::ReloadSettings)
     }
     /// Mac 草稿在重新载入期间只读；保存期间仍允许合并后续编辑。
@@ -119,12 +116,12 @@ impl Model {
                 if expected == options =>
             {
                 self.options = options;
-                self.settings_notice = "✓ 已保存，新输入立即生效".into();
+                self.settings_notice.clear();
                 Effect::Nothing
             }
             (Some(Request::ReloadSettings), Reply::Saved(Ok(options))) => {
                 self.options = options;
-                self.settings_notice = "✓ 已重新载入 settings.toml".into();
+                self.settings_notice.clear();
                 Effect::Controls
             }
             (Some(Request::Lookup { .. }), Reply::Lookup(Err(error))) => {
@@ -259,7 +256,7 @@ mod tests {
             Effect::Controls
         );
         assert_eq!(model.options, edited);
-        assert!(model.settings_notice.contains("重新载入"));
+        assert!(model.settings_notice.is_empty(), "成功不显示确认文字");
         model.reload().unwrap();
         model
             .receive(Reply::Saved(Err("settings.toml 第 3 行：bad".into())))
@@ -282,6 +279,8 @@ mod tests {
         model.save(model.options).unwrap();
         model.receive(Reply::Saved(Ok(model.options))).unwrap();
         assert_eq!(model.notice, "查询失败");
+        // 保存成功清掉此前的错误，且不换成确认文字。
+        assert!(model.settings_notice.is_empty());
     }
     #[test]
     fn unexpected_or_wrong_kind_reply_is_a_fatal_contract_error() {

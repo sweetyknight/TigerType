@@ -1,5 +1,5 @@
 //! AppKit 直接消费 Win32 共用布局，不另维护控件位置；只有字体、窗口外框和快捷键写法按平台调整。
-use super::art::{Art, Canvas, box_rect, caption};
+use super::art::{Art, Canvas, Scene, box_rect, caption, key_parts, mac_keys};
 use super::*;
 use tigertype_ui_model::layout::*;
 
@@ -9,6 +9,77 @@ enum Control {
     Label(Retained<NSTextField>),
     Art(Retained<Art>),
 }
+/// 静态文字的颜色角色，对应 Windows WM_CTLCOLORSTATIC 的正文、分组名与次要色。
+#[derive(Clone, Copy)]
+enum Tone {
+    Text,
+    Label,
+    Muted,
+}
+/// 静态文字样式：字体角色、颜色、是否垂直居中（SS_CENTERIMAGE）与水平居中（SS_CENTER）、能否折行。
+struct Role {
+    font: Retained<NSFont>,
+    tone: Tone,
+    middle: bool,
+    center: bool,
+    wrap: bool,
+}
+fn role(id: usize) -> Role {
+    let (font, tone, middle) = match id {
+        HEADING => (strong(20.0), Tone::Text, false),
+        _ if (GROUP..GROUP + GROUPS.len()).contains(&id) => (strong(13.0), Tone::Label, false),
+        FILE_NAME | ABOUT_TITLE => (strong(13.0), Tone::Text, false),
+        FILE_PATH | CODEPOINT => (mono(13.0), Tone::Muted, false),
+        PAGE => (mono(13.0), Tone::Muted, true),
+        READING => (ui(14.0), Tone::Text, true),
+        CUSTOM_STATUS => (ui(12.0), Tone::Muted, true),
+        _ if (ROW_TITLE..ROW_TITLE + 5).contains(&id) => (ui(14.0), Tone::Text, true),
+        _ if (FIELD_LABEL..FIELD_LABEL + 4).contains(&id) => (ui(12.0), Tone::Muted, true),
+        _ if (ROW_DESC..ROW_DESC + 5).contains(&id)
+            || matches!(id, NOTICE | KEYS_NOTE | ABOUT_DESC | STATUS) =>
+        {
+            (ui(12.0), Tone::Muted, false)
+        }
+        _ => (ui(14.0), Tone::Text, false),
+    };
+    Role {
+        font,
+        tone,
+        middle,
+        center: matches!(id, CODEPOINT | PAGE | STATUS),
+        wrap: matches!(id, NOTICE | STATUS | CUSTOM_STATUS) || id == ROW_DESC + 4,
+    }
+}
+fn text(mtm: MainThreadMarker, id: usize, value: &str) -> Retained<NSTextField> {
+    let r = role(id);
+    let value = NSString::from_str(value);
+    let label = if r.wrap {
+        NSTextField::wrappingLabelWithString(&value, mtm)
+    } else {
+        NSTextField::labelWithString(&value, mtm)
+    };
+    label.setFont(Some(&r.font));
+    if r.center {
+        label.setAlignment(NSTextAlignment::Center);
+    }
+    if id == FILE_PATH {
+        // 同 SS_PATHELLIPSIS：路径过长时省略中段，保留文件名。
+        label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+    }
+    label.setToolTip(Some(&value));
+    label
+}
+/// 焦点进出输入框时重画外框；状态正被借用（本次更新途中）则跳过，随后的更新会画出正确外框。
+fn redraw(weak: &WeakState) -> impl Fn() + 'static {
+    let weak = weak.clone();
+    move || {
+        if let Some(shared) = weak.upgrade()
+            && shared.try_borrow_mut().is_ok()
+        {
+            refresh(&shared);
+        }
+    }
+}
 impl Control {
     fn view(&self) -> &NSView {
         match self {
@@ -17,6 +88,29 @@ impl Control {
             Self::Label(v) => v,
             Self::Art(v) => v,
         }
+    }
+    /// 垂直居中的单行标签按实际行高放到框中线，其余控件直接用共用布局的框。
+    fn place(&self, id: usize, frame: NSRect) {
+        let Self::Label(label) = self else {
+            self.view().setFrame(frame);
+            return;
+        };
+        if !role(id).middle {
+            label.setFrame(frame);
+            return;
+        }
+        let natural = label
+            .sizeThatFits(NSSize::new(frame.size.width, frame.size.height))
+            .height;
+        label.setFrame(rect(
+            frame.origin.x,
+            frame.origin.y + ((frame.size.height - natural) / 2.0).floor(),
+            frame.size.width,
+            natural,
+        ));
+    }
+    fn editing(&self) -> bool {
+        matches!(self, Self::Field(f) if f.editing())
     }
     fn title(&self, value: &str) {
         match self {
@@ -30,7 +124,11 @@ impl Control {
                     v.setStringValue(&value);
                 }
             }
-            Self::Label(v) => v.setStringValue(&NSString::from_str(value)),
+            Self::Label(v) => {
+                let value = NSString::from_str(value);
+                v.setStringValue(&value);
+                v.setToolTip(Some(&value));
+            }
             Self::Art(_) => {}
         }
     }
@@ -60,13 +158,11 @@ impl Control {
                 f.setEnabled(!e.fatal && !e.model.reloading());
             }
             Self::Label(v) => {
-                v.setTextColor(Some(&color(
-                    if (ROW_DESC..ROW_DESC + 5).contains(&id) || id == FILE_PATH || id == NOTICE {
-                        p.muted
-                    } else {
-                        p.text
-                    },
-                )));
+                v.setTextColor(Some(&color(match role(id).tone {
+                    Tone::Text => p.text,
+                    Tone::Label => p.label,
+                    Tone::Muted => p.muted,
+                })));
             }
             Self::Art(v) => {
                 v.update(
@@ -74,11 +170,12 @@ impl Control {
                     if id == PREVIEW {
                         "候选窗预览：明天我们一起去 ui，拉，隹".into()
                     } else if (KEYS..KEYS + KEYMAP.len()).contains(&id) {
-                        format!(
-                            "{} {}",
-                            KEYMAP[id - KEYS].0,
-                            caption(KEYMAP[id - KEYS].1).replace("[Ctrl]", "⌃")
-                        )
+                        // 读屏朗读去掉键帽括号的文字，画面仍由 KEYMAP 自绘。
+                        let (name, keys) = KEYMAP[id - KEYS];
+                        let keys = mac_keys(keys, e.appearance().page_size);
+                        let spoken: Vec<&str> =
+                            key_parts(&keys).into_iter().map(|(_, part)| part).collect();
+                        format!("{name}：{}", spoken.join(" "))
                     } else {
                         String::new()
                     },
@@ -92,11 +189,11 @@ impl Control {
             self.title(&e.model.settings_notice);
         }
         if id == CUSTOM_STATUS {
-            self.title(
-                &e.invalid
-                    .clone()
-                    .unwrap_or_else(|| format!("最低对比度 {:.2}:1", p.min_contrast())),
-            );
+            // 与 Windows custom_status 同一措辞：可读时报最低对比度，否则说明原因。
+            self.title(&match &e.invalid {
+                Some(error) => format!("✗ {error}；修正后自动保存"),
+                None => format!("✓ 全部文字可读，最低对比度 {:.1} : 1", p.min_contrast()),
+            });
         }
     }
 }
@@ -107,11 +204,7 @@ fn setting(id: usize) -> Option<Setting> {
         LEARNING => Setting::Learning,
         id if (MODE..MODE + 2).contains(&id) => Setting::Mode(TypingMode::ALL[id - MODE]),
         id if (FORM..FORM + 3).contains(&id) => Setting::Form(FORMS[id - FORM].0),
-        id if (FONT..FONT + 2).contains(&id) => Setting::Font(if id == FONT {
-            CandidateFont::WenKai
-        } else {
-            CandidateFont::KaiTi
-        }),
+        id if (FONT..FONT + 2).contains(&id) => Setting::Font(CandidateFont::ALL[id - FONT]),
         id if (SIZE_CHOICE..SIZE_CHOICE + 7).contains(&id) => {
             Setting::Size((id - SIZE_CHOICE + 3) as u8)
         }
@@ -131,7 +224,7 @@ fn button(
 ) -> Control {
     let b = Button::new(
         mtm,
-        title,
+        &caption(title),
         frame,
         p,
         None,
@@ -157,9 +250,9 @@ fn tool_control(s: &State, weak: &WeakState, page: usize, id: usize, frame: NSRe
     }
     if (CUSTOM..CUSTOM + 4).contains(&id) {
         let w = weak.clone();
-        return Control::Field(Field::new(
+        let field = Field::new(
             s.mtm,
-            COLORS[id - CUSTOM].0,
+            &format!("{}色", COLORS[id - CUSTOM].0),
             frame,
             p,
             |_| {},
@@ -168,7 +261,10 @@ fn tool_control(s: &State, weak: &WeakState, page: usize, id: usize, frame: NSRe
                     act(&s, UiAction::Color(id - CUSTOM, v));
                 }
             },
-        ));
+        );
+        field.setFont(Some(&mono(13.0)));
+        field.on_focus(redraw(weak));
+        return Control::Field(field);
     }
     let title = if let Some((_, name, _)) = TOGGLES.iter().find(|(key, ..)| *key == id) {
         caption(name)
@@ -177,29 +273,29 @@ fn tool_control(s: &State, weak: &WeakState, page: usize, id: usize, frame: NSRe
     } else if (FORM..FORM + 3).contains(&id) {
         FORMS[id - FORM].1.into()
     } else if (FONT..FONT + 2).contains(&id) {
-        if id == FONT { "霞鹜文楷" } else { "楷体" }.into()
+        CandidateFont::ALL[id - FONT].name().into()
     } else if (SIZE_CHOICE..SIZE_CHOICE + 7).contains(&id) {
         (id - SIZE_CHOICE + 3).to_string()
     } else if (THEME..THEME + Theme::ALL.len()).contains(&id) {
         Theme::ALL[id - THEME].name().into()
     } else if (SWATCH..SWATCH + 4).contains(&id) {
-        format!("{} · {}", COLORS[id - SWATCH].0, COLORS[id - SWATCH].1)
+        format!("{}色", COLORS[id - SWATCH].0)
     } else {
         match id {
             HEADING => PAGES[page].0.into(),
             id if (GROUP..GROUP + GROUPS.len()).contains(&id) => GROUPS[id - GROUP].into(),
             id if (ROW_TITLE..ROW_TITLE + 4).contains(&id) => caption(CHOICES[id - ROW_TITLE].0),
             id if (ROW_DESC..ROW_DESC + 4).contains(&id) => caption(CHOICES[id - ROW_DESC].1),
-            id if id == ROW_TITLE + 4 => "重新载入设置".into(),
-            id if id == ROW_DESC + 4 => "手工修改文件后点此载入；失败保留当前设置".into(),
-            OPEN_CONFIG => "打开".into(),
-            RELOAD => "重新载入".into(),
-            RESET => "恢复默认四色".into(),
+            id if id == ROW_TITLE + 4 => RELOAD_TITLE.into(),
+            id if id == ROW_DESC + 4 => RELOAD_DESC.into(),
+            OPEN_CONFIG => OPEN_TEXT.into(),
+            RELOAD => RELOAD_TEXT.into(),
+            RESET => RESET_TEXT.into(),
             FILE_NAME => "settings.toml".into(),
             FILE_PATH => s.config.display().to_string(),
-            ABOUT_TITLE => format!("TigerType {}", env!("CARGO_PKG_VERSION")),
-            ABOUT_DESC => "虎码输入法".into(),
-            KEYS_NOTE => "按当前输入状态生效".into(),
+            ABOUT_TITLE => ABOUT_NAME.into(),
+            ABOUT_DESC => about_description(),
+            KEYS_NOTE => KEYS_NOTE_TEXT.into(),
             _ => String::new(),
         }
     };
@@ -209,18 +305,7 @@ fn tool_control(s: &State, weak: &WeakState, page: usize, id: usize, frame: NSRe
     {
         return button(s.mtm, weak, id, &title, frame, p);
     }
-    let value = NSTextField::labelWithString(&NSString::from_str(&title), s.mtm);
-    value.setFrame(frame);
-    value.setMaximumNumberOfLines(0);
-    value.setFont(Some(&NSFont::systemFontOfSize(if id == HEADING {
-        22.0
-    } else if (ROW_DESC..ROW_DESC + 5).contains(&id) || id == FILE_PATH {
-        11.0
-    } else {
-        13.0
-    })));
-    value.setToolTip(Some(&NSString::from_str(&title)));
-    Control::Label(value)
+    Control::Label(text(s.mtm, id, &title))
 }
 
 struct Page {
@@ -233,7 +318,7 @@ pub(super) struct SettingsWidgets {
     scroll: Retained<NSScrollView>,
     pages: Vec<Page>,
     nav: Vec<Retained<Button>>,
-    notice: Retained<NSTextField>,
+    notice: Control,
     swatches: Retained<Canvas>,
     swatch_buttons: Vec<Retained<Button>>,
 }
@@ -248,11 +333,16 @@ impl SettingsWidgets {
             token,
             (width as f64, height as f64),
         );
-        let root = Canvas::new(s.mtm, rect(0.0, 0.0, width as f64, height as f64), p, true);
+        let root = Canvas::new(s.mtm, rect(0.0, 0.0, width as f64, height as f64), p);
         native.window.setContentView(Some(&root));
         let mut nav = Vec::new();
+        let mut notice = None;
         for (id, b) in settings_spec(0, false).fixed {
             if id == NOTICE {
+                let label = Control::Label(text(s.mtm, NOTICE, &s.editor.model.settings_notice));
+                label.place(NOTICE, box_rect(b));
+                add(&root, label.view());
+                notice = Some(label);
                 continue;
             }
             let i = id - NAV;
@@ -268,26 +358,13 @@ impl SettingsWidgets {
             add(&root, &control);
             nav.push(control);
         }
-        let notice = label(
-            s.mtm,
-            &root,
-            "",
-            box_rect(
-                settings_spec(0, false)
-                    .fixed
-                    .into_iter()
-                    .find(|(id, _)| *id == NOTICE)
-                    .unwrap()
-                    .1,
-            ),
-            p,
-        );
         let scroll = NSScrollView::initWithFrame(
             NSScrollView::alloc(s.mtm),
             rect(SIDEBAR as f64, 0.0, (width - SIDEBAR) as f64, height as f64),
         );
         scroll.setHasVerticalScroller(true);
         scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+        scroll.setDrawsBackground(false);
         add(&root, &scroll);
         let mut pages = Vec::new();
         for page in 0..4 {
@@ -296,7 +373,6 @@ impl SettingsWidgets {
                 s.mtm,
                 rect(0.0, 0.0, (width - SIDEBAR) as f64, spec.height as f64),
                 p,
-                false,
             );
             let controls = spec
                 .controls
@@ -311,14 +387,19 @@ impl SettingsWidgets {
             pages.push(Page { canvas, controls });
         }
         // 色板覆盖在设置窗内；不使用同步菜单，避免 M1 的主线程消息被嵌套循环阻塞。
-        let swatches = Canvas::new(s.mtm, rect(230.0, 340.0, 448.0, 128.0), p, false);
+        let swatches = Canvas::new(s.mtm, rect(230.0, 340.0, 448.0, 128.0), p);
         add(&root, &swatches);
         let mut swatch_buttons = Vec::new();
         for (i, c) in SWATCHES.into_iter().enumerate() {
             let b = Button::new(
                 s.mtm,
                 &format!("#{c:06X}"),
-                rect((i % 8) as f64 * 56.0, (i / 8) as f64 * 32.0, 54.0, 30.0),
+                rect(
+                    8.0 + (i % 8) as f64 * 54.0,
+                    8.0 + (i / 8) as f64 * 28.0,
+                    54.0,
+                    28.0,
+                ),
                 p,
                 Some(c),
                 handler(weak, move || UiAction::Swatch(c)),
@@ -332,7 +413,7 @@ impl SettingsWidgets {
             scroll,
             pages,
             nav,
-            notice,
+            notice: notice.expect("共用布局含侧栏状态"),
             swatches,
             swatch_buttons,
         }
@@ -340,13 +421,16 @@ impl SettingsWidgets {
     pub fn update(&self, s: &State) {
         let e = &s.editor;
         let p = e.appearance().palette();
-        self.native
-            .window
-            .setBackgroundColor(Some(&color(p.window)));
-        self.root.update(p, vec![], vec![], vec![], vec![], None);
-        self.notice
-            .setStringValue(&NSString::from_str(&e.model.settings_notice));
-        self.notice.setTextColor(Some(&color(p.muted)));
+        // 标题栏同 Windows 设置窗：侧栏色。
+        self.native.decorate(p, shades(p).sidebar);
+        self.root.update(
+            p,
+            Scene {
+                sidebar: true,
+                ..Scene::default()
+            },
+        );
+        self.notice.update(NOTICE, s);
         for (i, b) in self.nav.iter().enumerate() {
             b.update(p, i == s.page);
         }
@@ -358,7 +442,6 @@ impl SettingsWidgets {
         {
             self.scroll.setDocumentView(Some(view));
         }
-        self.scroll.setBackgroundColor(&color(p.window));
         for (index, page) in self.pages.iter().enumerate() {
             let spec = settings_spec(index, e.draft.theme == Theme::Custom);
             let shift = |mut b: Box4| {
@@ -373,8 +456,8 @@ impl SettingsWidgets {
                 let place = spec.controls.iter().find(|(key, _)| key == id);
                 control.view().setHidden(place.is_none());
                 if let Some((_, b)) = place {
-                    control.view().setFrame(box_rect(shift(*b)));
                     control.update(*id, s);
+                    control.place(*id, box_rect(shift(*b)));
                     if let Control::Button(b) = control
                         && (SWATCH..SWATCH + 4).contains(id)
                     {
@@ -383,15 +466,36 @@ impl SettingsWidgets {
                     }
                 }
             }
+            let editing = |k: usize| {
+                page.controls
+                    .iter()
+                    .any(|(id, c)| *id == CUSTOM + k && c.editing())
+            };
             page.canvas.update(
                 p,
-                spec.cards.into_iter().map(shift).collect(),
-                spec.lines.into_iter().map(shift).collect(),
-                spec.tracks.into_iter().map(shift).collect(),
-                spec.frames.into_iter().map(shift).collect(),
-                spec.seal.map(shift),
+                Scene {
+                    cards: spec.cards.into_iter().map(shift).collect(),
+                    lines: spec.lines.into_iter().map(shift).collect(),
+                    tracks: spec.tracks.into_iter().map(shift).collect(),
+                    frames: spec
+                        .frames
+                        .into_iter()
+                        .enumerate()
+                        .map(|(k, b)| (shift(b), editing(k)))
+                        .collect(),
+                    tile: spec.tile.map(shift),
+                    seal: spec.seal.map(shift),
+                    ..Scene::default()
+                },
             );
         }
+        self.swatches.update(
+            p,
+            Scene {
+                cards: vec![[0, 0, 448, 128]],
+                ..Scene::default()
+            },
+        );
         self.swatches.setHidden(
             s.swatch.is_none()
                 || s.page != 1
@@ -429,7 +533,7 @@ impl LookupWidgets {
         native
             .window
             .setContentMinSize(NSSize::new(LOOKUP_MIN.0 as f64, LOOKUP_MIN.1 as f64));
-        let root = Canvas::new(s.mtm, rect(0.0, 0.0, width as f64, height as f64), p, false);
+        let root = Canvas::new(s.mtm, rect(0.0, 0.0, width as f64, height as f64), p);
         native.window.setContentView(Some(&root));
         let mut controls = Vec::new();
         for (id, b) in lookup_spec(width, height).controls {
@@ -443,7 +547,7 @@ impl LookupWidgets {
                     let changed = weak.clone();
                     let f = Field::new(
                         s.mtm,
-                        "拼音、虎码、汉字或词",
+                        "汉字或拼音",
                         frame,
                         p,
                         move |q| {
@@ -457,9 +561,9 @@ impl LookupWidgets {
                             }
                         },
                     );
-                    f.setBordered(false);
-                    f.setPlaceholderString(Some(&NSString::from_str("输入拼音、虎码、汉字或词")));
+                    f.setPlaceholderString(Some(&NSString::from_str(QUERY_HINT)));
                     f.setStringValue(&NSString::from_str(&s.query));
+                    f.on_focus(redraw(weak));
                     Control::Field(f)
                 }
                 GLYPH | CODES | FULL | PARTS => {
@@ -471,8 +575,8 @@ impl LookupWidgets {
                     id,
                     match id {
                         SETTINGS => "设置",
-                        PREVIOUS => "‹",
-                        NEXT => "›",
+                        PREVIOUS => "上一页",
+                        NEXT => "下一页",
                         _ => "复制",
                     },
                     frame,
@@ -484,7 +588,7 @@ impl LookupWidgets {
                     } else {
                         ""
                     };
-                    Control::Label(label(s.mtm, &root, title, frame, p))
+                    Control::Label(text(s.mtm, id, title))
                 }
             };
             add(&root, control.view());
@@ -493,6 +597,7 @@ impl LookupWidgets {
         let list = NSScrollView::initWithFrame(NSScrollView::alloc(s.mtm), NSRect::ZERO);
         list.setHasHorizontalScroller(true);
         list.setScrollerStyle(NSScrollerStyle::Overlay);
+        list.setDrawsBackground(false);
         let strip = Flipped::new(s.mtm, NSRect::ZERO);
         list.setDocumentView(Some(&strip));
         add(&root, &list);
@@ -528,59 +633,84 @@ impl LookupWidgets {
     pub fn update(&self, s: &State) {
         let e = &s.editor;
         let p = e.appearance().palette();
+        self.native.decorate(p, p.window);
         let size = self.root.bounds().size;
         let spec = lookup_spec(size.width as i32, size.height as i32);
-        self.root
-            .update(p, vec![spec.card], vec![], vec![], vec![spec.field], None);
+        let editing = self
+            .controls
+            .iter()
+            .any(|(id, c)| *id == QUERY && c.editing());
+        self.root.update(
+            p,
+            Scene {
+                cards: vec![spec.card],
+                frames: vec![(spec.field, editing)],
+                search: Some(spec.field),
+                ..Scene::default()
+            },
+        );
         let item = e
             .model
             .result
             .as_ref()
             .and_then(|r| r.items.get(e.selected));
         for (id, control) in &self.controls {
-            if let Some((_, b)) = spec.controls.iter().find(|(key, _)| key == id) {
-                control.view().setFrame(box_rect(*b));
-            }
             control.update(*id, s);
             let detail = [GLYPH, CODEPOINT, COPY, CODES, FULL, READING, PARTS].contains(id)
                 || (FIELD_LABEL..FIELD_LABEL + 4).contains(id);
             control
                 .view()
                 .setHidden((detail && item.is_none()) || (*id == STATUS && item.is_some()));
-            let join = |items: &[String]| {
+            let join = |items: &[String], separator: &str| {
                 if items.is_empty() {
                     "缺资料".into()
                 } else {
-                    items.join(" ")
+                    items.join(separator)
                 }
             };
             let value = match *id {
-                STATUS => e.model.notice.clone(),
-                PAGE => e
-                    .model
-                    .result
-                    .as_ref()
-                    .map(|_| (e.model.page + 1).to_string())
-                    .unwrap_or_default(),
-                GLYPH => item.map(|i| i.text.clone()).unwrap_or_default(),
-                CODEPOINT => item
-                    .filter(|i| i.text.chars().count() == 1)
-                    .map(|i| format!("U+{:04X}", i.text.chars().next().unwrap() as u32))
-                    .unwrap_or_default(),
-                CODES => item.map(|i| join(&i.learning.codes)).unwrap_or_default(),
-                FULL => item
-                    .map(|i| join(&i.learning.full_codes))
-                    .unwrap_or_default(),
-                READING => item.map(|i| join(&i.learning.readings)).unwrap_or_default(),
-                PARTS => item
-                    .and_then(|i| i.learning.decomposition.clone())
-                    .unwrap_or_else(|| "缺资料".into()),
-                _ => continue,
+                STATUS => Some(e.model.notice.clone()),
+                PAGE => Some(
+                    e.model
+                        .result
+                        .as_ref()
+                        .map(|_| (e.model.page + 1).to_string())
+                        .unwrap_or_default(),
+                ),
+                GLYPH => Some(item.map(|i| i.text.clone()).unwrap_or_default()),
+                CODEPOINT => Some(
+                    item.filter(|i| i.text.chars().count() == 1)
+                        .map(|i| format!("U+{:04X}", i.text.chars().next().unwrap() as u32))
+                        .unwrap_or_default(),
+                ),
+                CODES => Some(
+                    item.map(|i| join(&i.learning.codes, " "))
+                        .unwrap_or_default(),
+                ),
+                FULL => Some(
+                    item.map(|i| join(&i.learning.full_codes, " "))
+                        .unwrap_or_default(),
+                ),
+                READING => Some(
+                    item.map(|i| join(&i.learning.readings, "、"))
+                        .unwrap_or_default(),
+                ),
+                PARTS => Some(
+                    item.and_then(|i| i.learning.decomposition.clone())
+                        .unwrap_or_else(|| "缺资料".into()),
+                ),
+                _ => None,
             };
-            if let Control::Art(a) = control {
-                a.update(e.appearance(), value);
-            } else {
-                control.title(&value);
+            if let Some(value) = value {
+                if let Control::Art(a) = control {
+                    a.update(e.appearance(), value);
+                } else {
+                    control.title(&value);
+                }
+            }
+            // 文字先更新再定位，垂直居中按新内容的行高计算。
+            if let Some((_, b)) = spec.controls.iter().find(|(key, _)| key == id) {
+                control.place(*id, box_rect(*b));
             }
         }
         for (id, c) in &self.controls {
@@ -602,25 +732,30 @@ impl LookupWidgets {
         }
         let list = spec.controls.iter().find(|(id, _)| *id == LIST).unwrap().1;
         self.list.setFrame(box_rect(list));
-        self.list.setBackgroundColor(&color(p.window));
-        let mut x = 0.0;
+        // 同 Windows 多列列表：各字块等宽，取最宽字加 18 点与 42 点中的较大者，高 40 点。
+        let font = art::candidate_font(e.draft, 20.0);
+        let items = e.model.result.as_ref().map_or(&[][..], |r| &r.items[..]);
+        let column = items
+            .iter()
+            .map(|item| string(&item.text, &font, p.text).size().width + 18.0)
+            .fold(42.0_f64, f64::max)
+            .ceil();
         for (index, b) in self.items.iter().enumerate() {
-            let item = e.model.result.as_ref().and_then(|r| r.items.get(index));
+            let item = items.get(index);
             b.setHidden(item.is_none());
             if let Some(item) = item {
                 b.setTitle(&NSString::from_str(&item.text));
                 b.setAccessibilityLabel(Some(&NSString::from_str(&item.text)));
-                let font = art::candidate_font(e.draft, 26.0);
-                let w = string(&item.text, &font, p.text).size().width + 18.0;
                 b.setFont(Some(&font));
-                b.setFrame(rect(x, 0.0, w.max(42.0), 40.0));
-                x += w.max(42.0);
+                b.setFrame(rect(index as f64 * column, 0.0, column, 40.0));
                 b.update(p, index == e.selected);
                 b.setEnabled(!e.fatal);
             }
         }
-        self.strip
-            .setFrameSize(NSSize::new(x.max(list[2] as f64), 40.0));
+        self.strip.setFrameSize(NSSize::new(
+            (items.len() as f64 * column).max(list[2] as f64),
+            40.0,
+        ));
         if let Some(button) = self.items.get(e.selected) {
             button.scrollRectToVisible(button.bounds());
         }

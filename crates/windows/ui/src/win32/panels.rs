@@ -6,7 +6,7 @@ use super::*;
 
 pub(super) fn lookup_window(class: &Class, options: &Options) -> Result<Window, String> {
     let style = WS_OVERLAPPEDWINDOW & !WS_MAXIMIZEBOX;
-    let mut window = Window::create(&class.0, "虎码 查字", null_mut(), style)?;
+    let mut window = Window::create(&class.0, LOOKUP_TITLE, null_mut(), style)?;
     // 零尺寸标签只为读屏名称与 Alt+Q；查询框里另画占位提示。
     window.add(QUERY_LABEL, "STATIC", "汉字或拼音(&Q)", 0)?;
     window.add(QUERY, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL as u32)?;
@@ -63,9 +63,6 @@ pub(super) fn lookup_window(class: &Class, options: &Options) -> Result<Window, 
     initialize_cues(window.handle);
     Ok(window)
 }
-pub(super) fn caption(palette: Palette) -> u32 {
-    mix(palette.window, palette.text, 4)
-}
 pub(super) fn settings_window(
     class: &Class,
     owner: HWND,
@@ -73,17 +70,13 @@ pub(super) fn settings_window(
     settings_path: &Path,
 ) -> Result<Window, String> {
     let style = WS_CAPTION | WS_SYSMENU | WS_VSCROLL;
-    let mut window = Window::create(&class.0, "虎码 设置", owner, style)?;
+    let mut window = Window::create(&class.0, SETTINGS_TITLE, owner, style)?;
     for (k, (name, _)) in PAGES.iter().enumerate() {
         let group = if k == 0 { WS_GROUP | WS_TABSTOP } else { 0 };
         window.add(NAV + k, "BUTTON", name, group | BS_AUTORADIOBUTTON as u32)?;
     }
-    window.add(
-        NOTICE,
-        "STATIC",
-        tigertype_ui_model::model::SETTINGS_IDLE,
-        SS_NOPREFIX,
-    )?;
+    // 侧栏底部只在出错时显示原因，平时留空。
+    window.add(NOTICE, "STATIC", "", SS_NOPREFIX)?;
     window.add(HEADING, "STATIC", PAGES[0].0, SS_NOPREFIX)?;
     for (k, name) in GROUPS.iter().enumerate() {
         window.add(GROUP + k, "STATIC", name, SS_NOPREFIX)?;
@@ -153,9 +146,9 @@ pub(super) fn settings_window(
         window.send(CUSTOM + k, EM_SETLIMITTEXT, 7, 0);
     }
     window.add(CUSTOM_STATUS, "STATIC", "", SS_CENTERIMAGE | SS_NOPREFIX)?;
-    window.add(RESET, "BUTTON", "从琥珀重新开始", WS_GROUP | WS_TABSTOP)?;
+    window.add(RESET, "BUTTON", RESET_TEXT, WS_GROUP | WS_TABSTOP)?;
     // 快捷键
-    window.add(KEYS_NOTE, "STATIC", "暂不支持自定义", SS_NOPREFIX)?;
+    window.add(KEYS_NOTE, "STATIC", KEYS_NOTE_TEXT, SS_NOPREFIX)?;
     for (k, (label, spec)) in KEYMAP.iter().enumerate() {
         // 读屏朗读去掉键帽括号的文字，画面由自绘给出。
         let spoken = format!("{label}：{}", spec.replace(['[', ']'], ""));
@@ -169,27 +162,14 @@ pub(super) fn settings_window(
         &settings_path.display().to_string(),
         SS_NOPREFIX | SS_PATHELLIPSIS,
     )?;
-    window.add(OPEN_CONFIG, "BUTTON", "打开(&O)", WS_GROUP | WS_TABSTOP)?;
-    window.add(ROW_TITLE + 4, "STATIC", "载入手工修改", SS_NOPREFIX)?;
-    window.add(
-        ROW_DESC + 4,
-        "STATIC",
-        "编辑并保存文件后点“重新载入”；格式有误时保留当前设置，并指出出错的行",
-        SS_NOPREFIX,
-    )?;
-    window.add(RELOAD, "BUTTON", "重新载入(&R)", WS_GROUP | WS_TABSTOP)?;
-    window.add(ABOUT_TITLE, "STATIC", "虎码 TigerType", SS_NOPREFIX)?;
-    window.add(
-        ABOUT_DESC,
-        "STATIC",
-        &format!(
-            "版本 {} · 本地运行，不联网、不收集数据",
-            env!("CARGO_PKG_VERSION")
-        ),
-        SS_NOPREFIX,
-    )?;
+    window.add(OPEN_CONFIG, "BUTTON", OPEN_TEXT, WS_GROUP | WS_TABSTOP)?;
+    window.add(ROW_TITLE + 4, "STATIC", RELOAD_TITLE, SS_NOPREFIX)?;
+    window.add(ROW_DESC + 4, "STATIC", RELOAD_DESC, SS_NOPREFIX)?;
+    window.add(RELOAD, "BUTTON", RELOAD_TEXT, WS_GROUP | WS_TABSTOP)?;
+    window.add(ABOUT_TITLE, "STATIC", ABOUT_NAME, SS_NOPREFIX)?;
+    window.add(ABOUT_DESC, "STATIC", &about_description(), SS_NOPREFIX)?;
     check(&window, NAV, true);
-    window.decorate(options.palette(), caption(options.palette()));
+    window.decorate(options.palette(), shades(options.palette()).sidebar);
     window.layout(options.candidate_font)?;
     window.set_icons();
     size_client(&window, SETTINGS_SIZE, style & !WS_VSCROLL);
@@ -366,7 +346,7 @@ pub(super) fn apply_look(
     let palette = options.palette();
     PALETTE.with(|current| current.set(palette));
     main.decorate(palette, palette.window);
-    settings.decorate(palette, caption(palette));
+    settings.decorate(palette, shades(palette).sidebar);
     main.layout(options.candidate_font)?;
     settings.layout(options.candidate_font)
 }
@@ -465,7 +445,7 @@ pub(super) fn commit(settings: &Window, model: &mut Model) -> Option<Request> {
     match read_options(settings.handle) {
         Ok(options) if options == model.options => {
             if model.settings_notice.starts_with('✗') {
-                model.settings_notice = tigertype_ui_model::model::SETTINGS_IDLE.into();
+                model.settings_notice.clear();
             }
             None
         }

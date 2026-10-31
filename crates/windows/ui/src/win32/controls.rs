@@ -83,7 +83,7 @@ fn paint_cue(hwnd: HWND) {
             dc,
             font_of(hwnd),
             colors().muted,
-            &units("汉字或拼音，按 Enter 查询"),
+            &units(QUERY_HINT),
             format,
             DT_NOPREFIX,
         );

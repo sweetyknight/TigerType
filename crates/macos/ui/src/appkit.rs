@@ -508,9 +508,11 @@ impl NativeWindow {
             (window, delegate)
         };
         window.setTitle(&NSString::from_str(match panel {
-            Panel::Lookup => "TigerType 查字",
-            Panel::Settings => "TigerType 设置",
+            Panel::Lookup => tigertype_ui_model::layout::LOOKUP_TITLE,
+            Panel::Settings => tigertype_ui_model::layout::SETTINGS_TITLE,
         }));
+        // 标题栏透明后露出窗口底色，由 decorate 按主题着色（同 Windows 11 标题栏着色）。
+        window.setTitlebarAppearsTransparent(true);
         window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         window.center();
         Self {
@@ -518,6 +520,22 @@ impl NativeWindow {
             _delegate: delegate,
             token,
         }
+    }
+}
+impl NativeWindow {
+    /// 标题栏用主题色：设置窗为侧栏色、查字窗为窗口色；系统外观随主题深浅，使标题文字与按钮可读。
+    fn decorate(&self, p: Palette, caption: u32) {
+        self.window.setBackgroundColor(Some(&color(caption)));
+        // SAFETY: 读取 AppKit 导出的只读外观名常量。
+        let name = unsafe {
+            if p.dark() {
+                NSAppearanceNameDarkAqua
+            } else {
+                NSAppearanceNameAqua
+            }
+        };
+        self.window
+            .setAppearance(NSAppearance::appearanceNamed(name).as_deref());
     }
 }
 impl Drop for NativeWindow {
@@ -602,7 +620,7 @@ pub mod tests {
         let _font = test_font();
         let mtm = MainThreadMarker::new().expect("AppKit 检查必须在主线程");
         let _app = NSApplication::sharedApplication(mtm);
-        // 深浅主题都使用自己的占位文字颜色，不依赖当前系统外观。
+        // 深浅主题都使用自己的次要色作占位文字，不依赖当前系统外观。
         let field = Field::new(
             mtm,
             "合成查询框",
@@ -629,7 +647,7 @@ pub mod tests {
                 )
             }
             .unwrap();
-            assert_eq!(ink.downcast_ref::<NSColor>().unwrap(), &*color(p.text));
+            assert_eq!(ink.downcast_ref::<NSColor>().unwrap(), &*color(p.muted));
         }
         let pressed = Rc::new(Cell::new(0));
         let clicks = pressed.clone();
@@ -687,10 +705,28 @@ pub mod tests {
                 let s = views.0.borrow();
                 let window = &s.settings.as_ref().unwrap().native.window;
                 assert!(!window.isVisible());
+                let content = window.contentView().unwrap();
                 render(
-                    &window.contentView().unwrap(),
+                    &content,
                     &root.join(format!("settings-{theme:?}-{page}.png")),
                 );
+                // 超出 520 点的分区（外观页、自定义四色）另存滚动区全长，供人工核对视口外部分。
+                let document = content
+                    .subviews()
+                    .iter()
+                    .find_map(|v| v.downcast::<NSScrollView>().ok())
+                    .and_then(|s| s.documentView())
+                    .expect("设置窗内容在滚动区中");
+                render(
+                    &document,
+                    &root.join(format!("settings-{theme:?}-{page}-full.png")),
+                );
+                if page == 0 {
+                    // 含系统标题栏的整窗：核对标题栏随主题着色、外观随深浅切换。
+                    // SAFETY: 只读取本测试窗口内容视图的父视图（系统窗口框架），不保存或改动它。
+                    let frame = unsafe { content.superview() }.expect("内容视图位于窗口框架中");
+                    render(&frame, &root.join(format!("settings-{theme:?}-frame.png")));
+                }
             }
         }
         views.0.borrow_mut().editor = Editor::new(Options::default());

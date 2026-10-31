@@ -73,6 +73,7 @@ pub(super) const fn rgb(value: u32) -> COLORREF {
     (value & 0xFF) << 16 | (value & 0xFF00) | (value >> 16 & 0xFF)
 }
 pub(super) const fn themed(p: Palette) -> Colors {
+    let shade = shades(p);
     Colors {
         window: rgb(p.window),
         surface: rgb(p.surface),
@@ -87,13 +88,9 @@ pub(super) const fn themed(p: Palette) -> Colors {
         accent: rgb(p.accent),
         on_accent: rgb(p.on_accent),
         selection: rgb(p.selection),
-        sidebar: rgb(mix(p.window, p.text, 4)),
-        track: rgb(mix(p.window, p.text, 6)),
-        nav: rgb(if p.highlight != p.window {
-            p.highlight
-        } else {
-            p.selection
-        }),
+        sidebar: rgb(shade.sidebar),
+        track: rgb(shade.track),
+        nav: rgb(shade.nav),
     }
 }
 pub(super) fn colors() -> Colors {

@@ -1,4 +1,6 @@
-//! 原生控件保留文本编辑和无障碍；按钮不进入同步跟踪循环，焦点环与配色由主题绘制。
+//! 原生控件保留文本编辑和无障碍；按钮不进入同步跟踪循环。外观按 Windows draw_button 逐项还原：
+//! 开关行、侧栏分区、主题卡、分段单选、色块行、字块与普通按钮；键盘焦点才画焦点环，鼠标点击不抢焦点。
+use super::art::{caption, draw_text, fill_round, inset, ring, symbol};
 use super::*;
 use objc2::{AnyThread, runtime::AnyObject, sel};
 use objc2_foundation::{NSAttributedString, NSDictionary};
@@ -29,24 +31,27 @@ pub(super) fn string(text: &str, font: &NSFont, ink: u32) -> Retained<NSAttribut
         )
     }
 }
+/// 字号与 Windows 字体角色相同（96 DPI 像素约等于 AppKit 点）；系统字体遇中文自动回退苹方。
+pub(super) fn ui(size: f64) -> Retained<NSFont> {
+    NSFont::systemFontOfSize(size)
+}
+pub(super) fn regular() -> NSFontWeight {
+    // SAFETY: AppKit 导出的只读字重常量。
+    unsafe { NSFontWeightRegular }
+}
+/// 标题与分组名的半粗体。
+pub(super) fn strong(size: f64) -> Retained<NSFont> {
+    // SAFETY: AppKit 导出的只读字重常量。
+    NSFont::systemFontOfSize_weight(size, unsafe { NSFontWeightSemibold })
+}
+/// 编码、色值与键帽的等宽字体：同 Windows 用随包 Cascadia Mono（产品启动时已私有加载），缺失时用系统等宽。
+pub(super) fn mono(size: f64) -> Retained<NSFont> {
+    NSFont::fontWithName_size(&NSString::from_str("Cascadia Mono"), size)
+        .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size, regular()))
+}
 pub(super) fn add(parent: &NSView, child: &NSView) {
     // 两者均在主线程创建，父视图持有子视图，无环。
     parent.addSubview(child);
-}
-pub(super) fn label(
-    mtm: MainThreadMarker,
-    parent: &NSView,
-    value: &str,
-    frame: NSRect,
-    p: Palette,
-) -> Retained<NSTextField> {
-    let label = NSTextField::labelWithString(&NSString::from_str(value), mtm);
-    label.setFrame(frame);
-    label.setTextColor(Some(&color(p.text)));
-    label.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-    label.setMaximumNumberOfLines(0);
-    add(parent, &label);
-    label
 }
 define_class!(
     // SAFETY: 只更改坐标方向，不改变 NSView 的持有规则。
@@ -96,9 +101,10 @@ define_class!(
         fn focus(&self)->bool { callback(||NSView::setNeedsDisplay(self,true)); true }
         #[unsafe(method(resignFirstResponder))]
         fn blur(&self)->bool { callback(||NSView::setNeedsDisplay(self,true)); true }
+        // 鼠标按下只画按下底色，不夺键盘焦点；焦点环与 Windows 一样只在键盘操作时出现。
         #[unsafe(method(mouseDown:))]
         fn down(&self,_:&NSEvent) { callback(|| {
-            if self.isEnabled() { self.ivars().pressed.set(true); if let Some(w)=self.window() { w.makeFirstResponder(Some(self)); } NSView::setNeedsDisplay(self,true); }
+            if self.isEnabled() { self.ivars().pressed.set(true); NSView::setNeedsDisplay(self,true); }
         }); }
         #[unsafe(method(mouseUp:))]
         fn up(&self,event:&NSEvent) { callback(|| {
@@ -196,128 +202,222 @@ impl Button {
     }
     fn paint(&self) {
         use tigertype_ui_model::layout::*;
-        let p = self.ivars().palette.get();
-        let chosen = self.ivars().selected.get();
+        let state = self.ivars();
+        let p = state.palette.get();
+        let s = shades(p);
         let r = self.bounds();
-        let style = self.ivars().style.get();
-        // NSButton 以左上为原点；标题在上、说明在下，与共用布局保持一致。
-        if let Some((_, title, description)) = TOGGLES.iter().find(|(id, ..)| *id == style) {
-            let title = art::caption(title);
-            let description = art::caption(description);
-            string(&title, &NSFont::systemFontOfSize(13.0), p.text)
-                .drawAtPoint(NSPoint::new(16.0, 8.0));
-            string(&description, &NSFont::systemFontOfSize(11.0), p.muted).drawInRect(rect(
-                16.0,
-                30.0,
-                r.size.width - 84.0,
-                18.0,
-            ));
-            color(if chosen { p.accent } else { p.border }).setFill();
-            let x = r.size.width - 54.0;
-            NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                rect(x, 20.0, 36.0, 20.0),
-                10.0,
-                10.0,
-            )
-            .fill();
-            color(if chosen { p.on_accent } else { p.surface }).setFill();
-            NSBezierPath::bezierPathWithOvalInRect(rect(
-                x + if chosen { 18.0 } else { 2.0 },
-                22.0,
-                16.0,
-                16.0,
-            ))
-            .fill();
-        }
-        let outline = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-            rect(2.0, 2.0, r.size.width - 4.0, r.size.height - 4.0),
-            5.0,
-            5.0,
-        );
-        // 四色编辑行只有左侧小色块使用基色；整行染色会破坏说明文字对比度。
-        let swatch = if (SWATCH..SWATCH + 4).contains(&style) {
-            None
-        } else {
-            self.ivars().swatch.get()
-        };
-        color(swatch.unwrap_or(if chosen || self.ivars().pressed.get() {
-            p.highlight
-        } else {
-            p.surface
-        }))
-        .setFill();
-        if ![AUTO, COMMON, LEARNING].contains(&style) {
-            outline.fill();
-        }
+        let (w, h) = (r.size.width, r.size.height);
+        let id = state.style.get();
+        let chosen = state.selected.get();
+        let enabled = self.isEnabled();
+        let ink = |on: u32| if enabled { on } else { p.faint };
         let responder: &NSResponder = self;
         let focused = self
             .window()
             .and_then(|w| w.firstResponder())
             .is_some_and(|r| std::ptr::eq(&*r, responder));
-        color(if focused { p.accent } else { p.border }).setStroke();
-        outline.setLineWidth(if focused { 2.0 } else { 1.0 });
-        outline.stroke();
-        if (THEME..THEME + Theme::ALL.len()).contains(&style) {
-            let sample = self.ivars().preview.get().unwrap_or_else(|| {
+        let title = caption(&self.title().to_string());
+        let in_range = |start: usize, count: usize| (start..start + count).contains(&id);
+        if [AUTO, COMMON, LEARNING].contains(&id) {
+            // 开关行：卡片底色上的标题、说明与右侧开关，不另画行框。
+            let description = TOGGLES
+                .iter()
+                .find(|(key, ..)| *key == id)
+                .map_or("", |(.., d)| *d);
+            draw_text(
+                &string(&title, &ui(14.0), ink(p.text)),
+                rect(15.0, 9.0, w - 95.0, 22.0),
+                false,
+            );
+            draw_text(
+                &string(&caption(description), &ui(12.0), p.muted),
+                rect(15.0, 32.0, w - 95.0, 18.0),
+                false,
+            );
+            let track = rect(w - 55.0, ((h - 22.0) / 2.0).floor(), 40.0, 22.0);
+            let (x, y) = (track.origin.x, track.origin.y);
+            if chosen {
+                fill_round(track, 11.0, ink(p.accent));
+                fill_round(rect(x + 22.0, y + 4.0, 14.0, 14.0), 7.0, p.on_accent);
+            } else {
+                ring(track, 11.0, 2.0, ink(p.field));
+                fill_round(rect(x + 5.0, y + 6.0, 10.0, 10.0), 5.0, ink(p.muted));
+            }
+            if focused {
+                ring(inset(track, -3.0), 14.0, 2.0, p.text);
+            }
+        } else if in_range(NAV, PAGES.len()) {
+            // 侧栏分区：图标 + 文字左对齐，选中只是一块浅色底。
+            if chosen {
+                fill_round(r, 6.0, s.nav);
+            }
+            const ICONS: [&[&str]; 4] = [
+                &["character.cursor.ibeam", "textformat"],
+                &["paintpalette"],
+                &["keyboard"],
+                &["slider.horizontal.3"],
+            ];
+            symbol(
+                ICONS[id - NAV],
+                14.0,
+                if chosen { p.accent } else { p.muted },
+                rect(10.0, 0.0, 20.0, h),
+            );
+            draw_text(
+                &string(&title, &ui(14.0), p.text),
+                rect(38.0, 0.0, w - 38.0, h),
+                false,
+            );
+            if focused {
+                ring(r, 6.0, 2.0, p.text);
+            }
+        } else if in_range(THEME, Theme::ALL.len()) {
+            // 主题卡：选中为强调色 2 点外框，内嵌该主题的迷你候选窗。
+            ring(r, 8.0, 2.0, if chosen { p.accent } else { p.line });
+            let sample = state.preview.get().unwrap_or_else(|| {
                 Options {
-                    theme: Theme::ALL[style - THEME],
+                    theme: Theme::ALL[id - THEME],
                     ..Options::default()
                 }
                 .palette()
             });
-            color(sample.window).setFill();
-            NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                rect(8.0, 28.0, r.size.width - 16.0, 40.0),
-                5.0,
-                5.0,
-            )
-            .fill();
-            string("虎", &NSFont::systemFontOfSize(18.0), sample.text)
-                .drawAtPoint(NSPoint::new(16.0, 38.0));
-            color(sample.accent).setFill();
-            NSBezierPath::bezierPathWithOvalInRect(rect(r.size.width - 26.0, 38.0, 12.0, 12.0))
-                .fill();
-            string(
-                &self.title().to_string(),
-                &NSFont::systemFontOfSize(12.0),
-                p.text,
-            )
-            .drawAtPoint(NSPoint::new(10.0, 7.0));
-        } else if (SWATCH..SWATCH + 4).contains(&style) {
-            if let Some(value) = self.ivars().swatch.get() {
-                color(value).setFill();
-                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                    rect(8.0, 8.0, 24.0, 24.0),
-                    4.0,
-                    4.0,
-                )
-                .fill();
+            let mini = rect(8.0, 8.0, w - 16.0, 44.0);
+            fill_round(mini, 5.0, sample.window);
+            ring(mini, 5.0, 1.0, sample.border);
+            let face = art::candidate_font(Options::default(), 12.0);
+            for (row, (words, glyph_ink)) in [("1 拉", sample.chosen), ("2 隹", sample.text)]
+                .into_iter()
+                .enumerate()
+            {
+                let band = rect(12.0, 12.0 + row as f64 * 19.0, w - 24.0, 17.0);
+                if row == 0 && sample.highlight != sample.window {
+                    fill_round(band, 3.0, sample.highlight);
+                }
+                draw_text(
+                    &string(words, &face, glyph_ink),
+                    rect(
+                        band.origin.x + 5.0,
+                        band.origin.y,
+                        band.size.width - 5.0,
+                        17.0,
+                    ),
+                    false,
+                );
             }
-            let (title, description) = COLORS[style - SWATCH];
-            string(title, &NSFont::systemFontOfSize(12.0), p.text)
-                .drawAtPoint(NSPoint::new(44.0, 5.0));
-            string(description, &NSFont::systemFontOfSize(10.0), p.muted)
-                .drawAtPoint(NSPoint::new(44.0, 21.0));
-        } else if self.ivars().swatch.get().is_none() && ![AUTO, COMMON, LEARNING].contains(&style)
-        {
-            let title = string(
-                &self.title().to_string(),
-                &self
-                    .font()
-                    .unwrap_or_else(|| NSFont::systemFontOfSize(13.0)),
-                if !self.isEnabled() {
-                    p.muted
-                } else if chosen {
-                    p.highlight_text
-                } else {
-                    p.text
-                },
+            draw_text(
+                &string(&title, &ui(14.0), p.text),
+                rect(0.0, 54.0, w, h - 57.0),
+                true,
             );
-            let size = title.size();
-            title.drawAtPoint(NSPoint::new(
-                (r.size.width - size.width) / 2.0,
-                (r.size.height - size.height) / 2.0,
-            ));
+            if focused {
+                ring(inset(r, 3.0), 6.0, 2.0, p.text);
+            }
+        } else if in_range(MODE, 2)
+            || in_range(FORM, 3)
+            || in_range(FONT, 2)
+            || in_range(SIZE_CHOICE, 7)
+        {
+            // 分段单选：轨道由父视图画；只有选中段是卡片色小块加细边，未选中段灰字无边。
+            if chosen {
+                fill_round(r, 5.0, p.surface);
+                ring(r, 5.0, 1.0, p.line);
+            }
+            let font = if in_range(FONT, 2) {
+                art::candidate_font(
+                    Options {
+                        candidate_font: CandidateFont::ALL[id - FONT],
+                        ..Options::default()
+                    },
+                    15.0,
+                )
+            } else {
+                ui(14.0)
+            };
+            draw_text(
+                &string(&title, &font, ink(if chosen { p.text } else { p.muted })),
+                r,
+                true,
+            );
+            if focused {
+                ring(r, 5.0, 2.0, p.text);
+            }
+        } else if in_range(SWATCH, COLORS.len()) {
+            // 自定义四色行：左侧圆角色块，右侧名称与说明。
+            let chip = rect(0.0, 5.0, 30.0, 30.0);
+            if let Some(value) = state.swatch.get() {
+                fill_round(chip, 7.0, value);
+            }
+            ring(chip, 7.0, 1.0, p.field);
+            let (name, description) = COLORS[id - SWATCH];
+            draw_text(
+                &string(&format!("{name}色"), &ui(14.0), p.text),
+                rect(42.0, 2.0, w - 42.0, 19.0),
+                false,
+            );
+            draw_text(
+                &string(description, &ui(12.0), p.muted),
+                rect(42.0, 21.0, w - 42.0, 17.0),
+                false,
+            );
+            if focused {
+                ring(inset(chip, -3.0), 9.0, 2.0, p.text);
+            }
+        } else if id == LIST {
+            // 查字字块：选中为浅底加强调色描边；键盘焦点另画正文色环。
+            let chip = rect(3.0, 2.0, w - 6.0, h - 4.0);
+            if chosen {
+                fill_round(chip, 7.0, s.nav);
+                ring(chip, 7.0, 2.0, p.accent);
+            }
+            let font = self.font().unwrap_or_else(|| ui(20.0));
+            draw_text(&string(&title, &font, ink(p.text)), chip, true);
+            if focused && !chosen {
+                ring(chip, 7.0, 2.0, p.text);
+            }
+        } else if let Some(value) = state.swatch.get() {
+            // 色板格：圆角色块；按下或键盘焦点画正文色环，不用系统蓝色高亮。
+            let chip = inset(r, 4.0);
+            fill_round(chip, 5.0, value);
+            ring(chip, 5.0, 1.0, p.line);
+            if focused || state.pressed.get() {
+                ring(inset(r, 1.0), 7.0, 2.0, p.text);
+            }
+        } else {
+            // 普通按钮：卡片色圆角块加细边；翻页箭头无底无边。
+            let flat = matches!(id, PREVIOUS | NEXT);
+            if state.pressed.get() {
+                fill_round(r, 6.0, s.track);
+            } else if !flat {
+                fill_round(r, 6.0, p.surface);
+            }
+            if !flat {
+                ring(r, 6.0, 1.0, p.field);
+            }
+            let icon: Option<&[&str]> = match id {
+                SETTINGS => Some(&["gearshape"]),
+                PREVIOUS => Some(&["chevron.left"]),
+                NEXT => Some(&["chevron.right"]),
+                COPY => Some(&["doc.on.doc"]),
+                RELOAD => Some(&["arrow.clockwise"]),
+                _ => None,
+            };
+            let label = string(&title, &ui(14.0), ink(p.text));
+            match icon {
+                // 只有图标的按钮：标题留作读屏名称，不画出来。
+                Some(names) if matches!(id, SETTINGS | PREVIOUS | NEXT) => {
+                    symbol(names, 14.0, ink(p.text), r);
+                }
+                Some(names) => {
+                    let width = 14.0 + 6.0 + label.size().width;
+                    let left = ((w - width) / 2.0).floor();
+                    symbol(names, 12.0, ink(p.text), rect(left, 0.0, 14.0, h));
+                    draw_text(&label, rect(left + 20.0, 0.0, label.size().width, h), false);
+                }
+                None => draw_text(&label, r, true),
+            }
+            if focused {
+                ring(r, 6.0, 2.0, p.text);
+            }
         }
     }
 }
@@ -326,6 +426,8 @@ pub(super) struct FieldState {
     palette: Cell<Palette>,
     submit: Box<dyn Fn(String)>,
     change: Box<dyn Fn(String)>,
+    /// 取得或失去键盘焦点后通知父窗口重画外框（编辑中外框改强调色）。
+    focus: RefCell<Option<Box<dyn Fn()>>>,
 }
 define_class!(
     // SAFETY: 文本编辑继续交给 NSTextField，delegate 与 target 都是自身且不形成强引用环。
@@ -341,19 +443,24 @@ define_class!(
         #[unsafe(method(controlTextDidChange:))]
         fn changed(&self,_:&NSNotification) { callback(|| (self.ivars().change)(self.stringValue().to_string())); }
         #[unsafe(method(controlTextDidBeginEditing:))]
-        fn editing(&self,_:&NSNotification) { callback(||self.editor_colors()); }
-        #[unsafe(method(controlTextDidEndEditing:))]
-        fn ended(&self,_:&NSNotification){callback(||NSView::setNeedsDisplay(self,true));}
+        fn began(&self,_:&NSNotification) { callback(||self.editor_colors()); }
     }
     // SAFETY: NSTextFieldDelegate 沿用 NSControlTextEditingDelegate 的约定。
     unsafe impl NSTextFieldDelegate for Field {}
     impl Field {
-        #[unsafe(method(drawRect:))]
-        fn draw_field(&self,r:NSRect){callback(||{
-            // SAFETY: 先交回原生文本绘制，再覆盖主题色焦点边框，不更改标记文本。
-            unsafe{let _:()=msg_send![super(self),drawRect:r];}
-            if self.currentEditor().is_some(){color(self.ivars().palette.get().accent).setStroke();let b=self.bounds();let ring=NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(1.0,1.0,b.size.width-2.0,b.size.height-2.0),3.0,3.0);ring.setLineWidth(1.0);ring.stroke();}
-        });}
+        #[unsafe(method(becomeFirstResponder))]
+        fn focus(&self)->bool{
+            // SAFETY: 先交原生实现装入字段编辑器，再通知外框与选区配色。
+            let became:bool=unsafe{msg_send![super(self),becomeFirstResponder]};
+            if became { callback(||{self.editor_colors();self.notify();}); }
+            became
+        }
+        #[unsafe(method(textDidEndEditing:))]
+        fn ended(&self,notification:&NSNotification){
+            // SAFETY: 原生实现先结束字段编辑器会话；随后 currentEditor 为空，外框恢复常态。
+            unsafe{let _:()=msg_send![super(self),textDidEndEditing:notification];}
+            callback(||self.notify());
+        }
         #[unsafe(method(submit:))]
         fn submit(&self,_:Option<&AnyObject>) { callback(|| (self.ivars().submit)(self.stringValue().to_string())); }
     }
@@ -371,6 +478,7 @@ impl Field {
             palette: Cell::new(p),
             submit: Box::new(submit),
             change: Box::new(change),
+            focus: RefCell::new(None),
         });
         // SAFETY: 指定初始化器和与 submit: 对应的 selector；控件自己持有闭包。
         let field: Retained<Self> = unsafe {
@@ -383,16 +491,33 @@ impl Field {
         unsafe {
             field.setDelegate(Some(ProtocolObject::from_ref(&*field)));
         }
+        // 外框由父视图按 Windows 画法绘制，原生凹边与焦点环都关掉。
+        field.setBezeled(false);
+        field.setBordered(false);
+        field.setDrawsBackground(true);
         field.setFocusRingType(NSFocusRingType::None);
+        field.setFont(Some(&ui(14.0)));
         field.setAccessibilityLabel(Some(&NSString::from_str(title)));
         field.update(p);
         field
     }
+    /// 回调只应弱持有界面状态，并在状态未被借用时才重画。
+    pub fn on_focus(&self, callback: impl Fn() + 'static) {
+        *self.ivars().focus.borrow_mut() = Some(Box::new(callback));
+    }
+    pub fn editing(&self) -> bool {
+        self.currentEditor().is_some()
+    }
+    fn notify(&self) {
+        if let Some(callback) = self.ivars().focus.borrow().as_ref() {
+            callback();
+        }
+    }
     pub fn update(&self, p: Palette) {
         self.ivars().palette.set(p);
         self.setTextColor(Some(&color(p.text)));
-        self.setBackgroundColor(Some(&color(p.field)));
-        // 系统占位色随深浅外观变化，不能用于固定主题底色。
+        self.setBackgroundColor(Some(&color(p.surface)));
+        // 系统占位色随深浅外观变化，不能用于固定主题底色；同 Windows 用次要色。
         if let Some(value) = self
             .placeholderAttributedString()
             .map(|value| value.string())
@@ -400,10 +525,8 @@ impl Field {
         {
             self.setPlaceholderAttributedString(Some(&string(
                 &value.to_string(),
-                &self
-                    .font()
-                    .unwrap_or_else(|| NSFont::systemFontOfSize(13.0)),
-                p.text,
+                &self.font().unwrap_or_else(|| ui(14.0)),
+                p.muted,
             )));
         }
         self.editor_colors();
@@ -429,6 +552,7 @@ impl Field {
                 editor.setSelectedTextAttributes(&attrs);
             }
             editor.setInsertionPointColor(Some(&color(p.accent)));
+            editor.setBackgroundColor(&color(p.surface));
         }
     }
 }
