@@ -1,6 +1,6 @@
 [toolchain]
 # 固定已验证工具链；i686 只用于后续 32 位宿主的 TSF，不再运行一套引擎。
-channel = "1.94.1"
+channel = "1.99.1"
 profile = "minimal"
 # Windows 交叉检查 Apple 两架构；个人 Mac 产品只在 M 系列机器构建 ARM64，不生成通用包。
 targets = ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin"]

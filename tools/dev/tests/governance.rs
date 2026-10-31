@@ -285,7 +285,8 @@ fn ui_cannot_call_engine_even_through_an_alias_or_transitive_dependency() {
 #[test]
 fn documentation_policy_detects_broken_links_and_forbidden_artifacts() -> Result<()> {
     let root =
-        resources::new_directory(&std::env::temp_dir(), "tigertype-doc-check")?.canonicalize()?;
+        resources::new_directory(&std::env::temp_dir().canonicalize()?, "tigertype-doc-check")?
+            .canonicalize()?;
     std::fs::write(root.join("existing.md"), "测试目标")?;
     let file = root.join("source.md");
     assert!(policy::links(&root, &file, "[有效](existing.md)").is_ok());
@@ -318,8 +319,11 @@ fn documentation_policy_detects_broken_links_and_forbidden_artifacts() -> Result
 
 #[test]
 fn document_inventory_and_core_unsafe_policy_cannot_be_silently_removed() -> Result<()> {
-    let root =
-        resources::new_directory(&std::env::temp_dir(), "tigertype-doc-policy")?.canonicalize()?;
+    let root = resources::new_directory(
+        &std::env::temp_dir().canonicalize()?,
+        "tigertype-doc-policy",
+    )?
+    .canonicalize()?;
     std::fs::create_dir(root.join("docs"))?;
     for name in [
         "README.md",

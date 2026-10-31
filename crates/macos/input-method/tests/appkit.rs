@@ -1,12 +1,11 @@
-//! 复用生产源文件检查输入边界、隐藏面板与原生事件，不启用 IMKServer 或修改系统输入法。
+//! 检查输入边界、隐藏面板与隔离 IMK 服务/客户端，不注册、启用或切换系统输入法。
 #[cfg(target_os = "macos")]
-pub use tigertype_macos_input_method::{
-    Action, KeyAction, Keyboard, Location, MenuAction, NativeRect, Presentation, Screen, Selection,
-    marked_selection,
-};
+#[path = "../src/lib.rs"]
+// 主线程 harness 只编译一份原生类；普通单元测试及其辅助项仍由库测试执行。
+#[allow(dead_code, unused_imports)]
+mod input_method;
 #[cfg(target_os = "macos")]
-#[path = "../src/appkit.rs"]
-mod appkit;
+pub use input_method::*;
 fn main() {
     #[cfg(target_os = "macos")]
     appkit::tests::run();

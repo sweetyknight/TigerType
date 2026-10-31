@@ -5,7 +5,7 @@
 ## 当前状态
 
 - Windows 输入链路、查字/设置与安装器已有实现；源码协议 v14，直接拒绝旧版本。目录重组不改变输入行为，不代表候选残留或高负载真机问题已修复。
-- macOS 目标已确认为 M 系列芯片。已有 IMKServer/控制器、进程内通道、固定引擎/工作线程、Mac 安全存储、候选/菜单/查字设置接线、ARM64 应用包与安装/升级/卸载源码；尚未在 Mac 链接、运行、生成实际安装包或验证真实上屏。Windows 合成运行与 Apple 类型检查不等于 Mac 验收。
+- macOS 本机为 macOS 26.6（25G72）/ARM64、Command Line Tools 与 Rust 1.99.1。系统发现、IMKServer 类簇启动崩溃、激活文本对象绑定与菜单 action 已修复并部署。Codex 每键重置组合及上屏缺字修复均已安装，用户确认四码有效、“𤛭、𨰻、𪚥”已能显示；安装器今后同时安装供宿主使用的文楷。其他真实应用与完整生命周期未验收，M5 未完成。
 - Linux 仅有方案位置，不建立空目录或空 crate。
 - **10-30 本轮只读复核：**本机已重新安装，x64/x86 COM 注册和自启项存在，后台 PID 15848 自 10-29 21:43 运行；系统启动时间约为 10-29 21:42，重启删除队列中未发现 TigerType 项，`C:\TigerType-Staging` 不存在。现用 EXE/两个 DLL 的 SHA256 均与当前重构的 Release 产物不同，不能拿现用构建替当前提交验收。未读取个人词库或配置；本轮尚未升级、注册或切换输入法。证据见 `artifacts/windows-closure-20261030/deployment-before.json`、`build-hashes-before.json`。
 
@@ -18,28 +18,60 @@
 | 查字/设置 | 主题自绘（琥珀/墨/竹/玫红/自定义，全部无蓝）。设置窗 720×520 分输入/外观/快捷键/高级四区，修改即时保存、超出时滚动，自定义四色可点色板或输入色值并即时校验；配置为带注释的 `config/settings.toml`，可打开并重新载入。查字窗 520×400：查询框、横排字块、详情卡（编码键帽、拆分字块、复制当前字） |
 | 安装包 | Inno Setup 6.7.3；全机安装、两种位数注册（含配置图标 `tigertype.ico`，打包时现画）、随包字体、HKLM Run 自启；升级先停后台并等其退出，准备页经重启管理器列出仍载现版或历次 `*.old` 旧版的程序供关闭/重启，不关的改名后照常安装，装完清掉无人使用的 `*.old`；静默安装/升级及不关闭应用的卸载已在本机实测，交互准备页、自动关闭真实程序、卸载后的重启清理与其他电脑（含 Win10）未实测 |
 | 长期使用 | 未开始 |
-| macOS 端 | P0 与 M1–M4 的跨平台可开发源码已接入；目标 ARM64，最低版本按方案为 macOS 13。通道/工作线程/包契约在 Windows 合成测试，系统边界在 Apple 两目标类型检查；原生链接、输入、安装与 M5 仍待目标 Mac 验收，不标阶段完成 |
+| macOS 端 | 系统发现、启动崩溃修复及本机更新部署已有证据；真实输入、完整安装生命周期及 M5 仍待验收 |
 | Linux 端 | 只预留接入位置，未定框架（IBus 或 Fcitx5） |
 
-## 本批：Mac 适配源码与 Windows 可执行验证
+## 本批：Mac 菜单栏图标对齐
 
-- `macos/app` 为有实现的第 13 个组件：16 槽进程内邮箱、一次性回复、绝对期限、连接寿命取消、共用 Dispatcher/LRU；固定引擎和工作线程，查字/设置有界队列，保存并确认热重载后才回复。Windows 测试使用合成词表和新建目录，覆盖真实调度、租约、设置保存、超时/迟到、满队列、回收和停止。
-- IMKServer 显式注入通道/窗口动作，无全局业务可变表。控制器接按键、Shift、焦点、组合标记/提交、候选点击、菜单与模式提示；UTF-16 边界、宿主标记身份、重入/失效代次、Rust panic 和过期回复设防。合成文本客户端测试已编写，仅在 Mac 实际执行。
-- backend 增加 `storage/macos.rs`：逐级 `openat`/`O_NOFOLLOW`、普通文件/硬链接/所有权检查、标记文件 `flock`、目录身份复核、临时事务与 `F_FULLFSYNC`/`renameat`。这些系统调用目前只有 Apple 类型检查证据，不能拿 Windows 存储测试代替。
-- ARM64 包契约、完整 Info.plist、锁定码表/字体清单、Mach-O/链接器签名命令边界、逐文件 SHA256、原子升级失败恢复已有实现。Rust 原生图标绘制和管理员安装/升级/卸载代码已接入；只操作固定 `/Library/Input Methods`，用户级副本冲突拒绝，保留用户数据，不自动添加/切换输入法。实际包尚未在 Mac 生成，安装源码未执行。
-- 检查与打包入口按宿主分流；Windows 运行 x64/x86 常规测试，并检查全部共享/Mac 产品与工具的两种 Apple 目标；Mac 的本机测试及 Windows 交叉检查命令已写入。架构白名单及反例同步更新，无空 crate、无成功返回的占位实现。已锁定下载 objc2-input-method-kit 0.3.2，其余复用缓存依赖。
-- 提交前复核补齐 IMK 系统菜单的 `doCommandBySelector:commandDictionary:` 转发，菜单 tag 绑定激活身份，非法/禁用/过期动作拒绝；普通预览的 target/action 保留同一语义。打包驱动对 Cargo 自身产物允许只读硬链接，并把校验后的字节交给组包器；仍拒绝符号链接/非文件，不放宽受管数据与锁定资源的硬链接拒绝规则。两项原生桥接仍待 Mac 运行验收。
+- 用户截图中虎码印章明显低于其他菜单栏图标。已安装 PNG 是 36×36 像素、72 DPI，AppKit 实际加载为 36×36 点；系统自带输入源图标为 16×16 点。打包绘制现改为 32×32 像素，并在绘制结束后设置 16×16 点逻辑尺寸，以 144 DPI 保存。
+- 原生回归实际重新解码输出 PNG，检查像素/逻辑尺寸、墨迹居中且四边不裁切；旧实现因 36 点而失败，修复后通过。证据在 `artifacts/macos-menu-icon-20261031/native-before.log`、`native-after.log`。
+- 统一门禁已通过（`unified-check.log`）：架构/文档、fmt、本机工作区 Clippy、共享/Mac 常规与原生测试，以及 Windows x64/x86 类型检查。ARM64 Release 包已重新生成并校验（`package.log`），其中菜单 PNG 与回归测试输出逐字节相同，SHA256 为 `2ed9f5aa11a07b83ade874fa81faa293412488024a4262cfb32b36a30c4d0630`；应用 `.icns` 与现用版相同。现用系统图标尚未替换，实际菜单栏对齐仍待安装后复核；系统缓存旧图时可能须注销重登。
 
-### 必须在 M 系列 Mac 补齐（当前均未通过）
+## 本批：Mac 输入法启动崩溃
 
-1. 确认实际 macOS 版本；准备锁定缓存和 Xcode Command Line Tools，运行统一门禁，核对 IMK 子类注册、原生合成客户端、存储/权限/链接拒绝、kqueue 子进程等待与图标输出。
-2. 本机构建 ARM64 `.app`，核对原始 Mach-O 签名、Info.plist、随包字体与菜单图标；仅有链接器签名的输入法是否能被系统列出并加载，必须实测。
-3. 经授权安装；首次注销重登后由用户手动添加。TextEdit 验证打字、选重/翻页/退格、单击 Shift、⌃.、选区替换、非 BMP、焦点切换、故障撤回、不重放和迟到点击拒绝。
-4. 查字与真实设置事务/热重载、全键盘导航、VoiceOver、增强对比度、多屏/全屏 Space、菜单和拖动跟踪循环；确认 Kaiti SC 可用，检查全部离屏图像与 Windows 一致性。
-5. 安装/升级/卸载、用户级副本冲突、全部用户旧进程退出、失败恢复与异常中断；不得把 Windows 的目录重命名反例当作 APFS 或提权安装证据。
-6. 方案列出的真实应用矩阵、完整回调 50ms 预算、P95/P99、空闲与长期资源占用、两小时压力和八小时使用。
+- 用户报告已安装虎码仍不能打字、没有候选框。只读现场检查确认当前输入源为 `local.inputmethod.tigertype`，系统于 17:26:37、17:26:43（+0800）启动已安装程序后均以 SIGABRT 退出；崩溃栈为 Rust 捕获外部异常失败，词表线程仍在加载，故障在输入服务初始化。
+- 用独立包标识、连接名且不读个人数据的 Rust 探针复现：继承 IMKServer 并向父类发送 `initWithName:bundleIdentifier:` 会报 method not found。IMKServer 是系统类簇，正确创建系统实例后同一初始化成功。产品改为主线程持有系统实例，依赖以有类型的 NSObject 强关联传给控制器；退出时配对解除关联，避免系统继续持有服务时泄漏依赖。
+- 原生测试原先只注册类，没有创建 IMKServer。现新增隔离包/连接，实际初始化服务与控制器；合成客户端经本地 NSDistantObject 代理接入，验证激活、菜单、事件掩码、离线按键放行及释放。原有标记文本、提交保护、迟到结果与候选面板测试继续执行，未注册、启用或切换系统输入源。证据在 `artifacts/macos-input-fix-20261031/`。
+- 统一门禁已通过（`unified-check.log`）：架构/文档、fmt、本机工作区 Clippy、共享/Mac 常规与原生测试，以及 Windows x64/x86 类型检查。ARM64 Release 修复包已生成并核对 Info.plist（`package.log`），可执行文件 SHA256 `0300c20119ea359537b9947ec57c6aa89a4c1569a6976d58b55be41283f954be`，清单 SHA256 `5329e642254b891aee6ffe46013263d8a91d51d944f894fdf5e01d6d67195598`。
+- sudo 要求密码后已提供安装命令；随后只读核对确认系统目录的新程序/清单摘要与修复包相符，属主 root:wheel、目录/可执行文件 755。17:51:55（+0800）启动安装版，PID 3853；52 秒后仍运行，未新增 TigerType 崩溃报告。栈采样确认主线程进入 NSApplication 事件循环，引擎已完成加载并在请求队列等待，工作线程存活。证据为 `installed-after.sha256`、`installed-process.txt`、`installed-startup.sample.txt`；这些只证明启动恢复，真实候选与汉字上屏待用户复测。
+- 用户确认安装完成，但仍有普通英文字母或带下划线编码、无候选且不能上屏。LLDB 确认初始化 client 是 `_IMKXPCCompatibilityDOProxyInterposerLegacy`，激活 sender/控制器 client 是 `_IPMDServerClientWrapperLegacy`；旧逻辑一直保存前者并按指针拒绝后者。现改为激活时校验并绑定本次文本对象，保留同会话的对象身份检查；清理/提交在系统重入期间持有原对象。新增不同代理/文本对象、旧对象拒绝、换客户端只撤回旧组合、缺接口拒绝及新客户端独占提交的反例。统一门禁再次通过（`unified-client-binding-check.log`）。
+- 第二版已安装并核对系统包摘要：可执行文件 SHA256 `8bff4e24788133a1c4ab1d8042125ac2319254a409357317c020bc8841475a54`，清单 SHA256 `29e7108b1ab55f517ee7b8c67e7ec394dde6d5e2815c40603b4442da0d516d2f`。真实按键进入控制器，sender 与绑定文本对象一致、会话激活；曾捕获到 Codex 中组合长度 1、候选窗可见且位于当前屏幕。调试暂停产生 IMK Stall，会干扰宿主连接，因此断点期间的输入/菜单失败不能作为最终验收。
+- 完全解除调试并重启安装版后，独立原生空白宿主经用户手动选择虎码、物理输入，记录到 a/b/c/d 的组合选区依次 1/2/3/4，以及 a、sss、ds、nks 的空格提交回调；用户确认“四码能显示，候选也出现”。未出现 Rust panic。证据 `physical-host.log`、`continuous-input-stderr.log`。早期探针给 CGEvent 设置 Unicode 字符串导致绕过 IMK；改为只向探针自身进程投递物理键码后，a/空格两轮进入 IMK 并上屏“来来”（`native-key-post.log`）。这些结果仍不覆盖 Codex 等其他宿主。
+- 系统菜单故障另已定位：本机 IMK 先核对控制器能响应菜单 action，再直接把命令字典发送给该 action；原代码只覆盖 `doCommandBySelector:commandDictionary:`，控制器不响应 `invoke:`，因此被系统直接拒绝。现实现控制器 `invoke:`，保留菜单身份与禁用检查；原生回归验证响应 action、打开设置动作以及旧菜单拒绝（`menu-action-check.log`）。统一门禁通过（`unified-menu-action-check.log`），Release 包已生成（`package-menu-action.log`）；用户已安装并核对摘要：可执行文件 SHA256 `6734a2734007bc17d885e48ac68de017ffaa93bf47a07e850ccc425f8aee63c0`、清单 SHA256 `65dcfa1b7a312d91407a7867c3a72b076b36918a075aa6e570ae02b1d1117c62`。用户随后明确 Codex 仍只能输入第一个码，不能将菜单修复视为该故障已恢复。
+- Codex 取证确认后续按键均进入控制器且返回 handled，但每次组合仍为长度 1。限定用户测试 a/b 的一次性调试捕获 `matches_marked`：`markedRange=(6,1)` 有效，预期为 a（0x61），`attributedSubstringFromRange` 却返回换行（0x0a）；内容比较失败触发 `Host::discard`，导致下一码重开组合。Chromium 源码的标记范围同步更新、文档缓存异步更新解释了这一区别，证据摘要见 `codex-root-cause.txt`。未证实的重复激活假设未纳入修改，调试已全部解除。
+- 组合校验已移除文档子串比较，只按绑定客户端当前标记范围、UTF-16 长度与既有代次保护判断；所有写入继续使用 NSNotFound，不指定已提交文字范围。新增滞后换行缓存下四码及提交回归，旧实现实际失败（`stale-snapshot-before.log`），新实现通过（`stale-snapshot-after.log`）；组合已结束但缓存仍留旧编码时拒绝提交的反例也通过。完整门禁通过（`unified-stale-snapshot-check.log`，含本机原生测试和 Windows x64/x86 类型检查），Release 包已生成（`package-stale-snapshot.log`），可执行文件 SHA256 `17589a7ee973358ddc3a6d730dc48ba6a4b4cac9d78c5bd9a04119148647af7b`、清单 SHA256 `351e66e566ece6a1c2d248de90215d8a9542fbeafe5a48b26aafaf324045183a`。系统目录摘要已与新包核对一致（`stale-snapshot-installed.log`）；用户安装后确认四码有效，发来的“𤛭、𨰻、𪚥”编码完整，但截图为缺字占位符，继续按字体问题处理。
 
-风险：IMK/远端宿主方法及 AppKit 真实行为尚无运行证据；主动等待受绝对期限限制，但不能中断一个已经进入的同步系统调用。设置写盘成功而引擎确认失败会明确提示重启，磁盘不假称回滚。安装失败保留 staging/旧包证据；若失败在新包就位后的停止/清理阶段，新包可能已安装，必须核对状态，不能推定回滚。当前不自动清理历史中断目录。
+## 本批：Mac 上屏扩展汉字缺字
+
+- 用户确认 Codex 中四码恢复，但 qqqq、zzzz、tttt 上屏显示条纹方框。锁定码表首选分别确为“𤛭、𨰻、𪚥”，字符内容未损坏。只读探针发现系统可见字体没有“𤛭”，CoreText 默认回退为 LastResort；“𨰻”有系统覆盖，仍不能据此认为 Codex 的字体回退正常。随包文楷覆盖全部三个样例（`artifacts/macos-input-fix-20261031/font-qqqq.log`、`shared-font-before.log`）。
+- 根因是 Mac 只把文楷注册到虎码进程，输入法上屏后由 Codex 自行绘制，无法访问这份私有字体。安装器已增加将锁定文楷发布到 `/Library/Fonts/LXGWWenKaiGBScreen.ttf`；同字节复用，冲突、链接及不安全权限拒绝，完整落盘后原子发布，卸载保留供其他应用使用的字体。未增加字体依赖或改动原始字体。
+- 合成临时目录的发布、重复安装、内容冲突、符号/硬链接、目录权限和中断残留反例通过（`shared-font-install-tests.log`）；原生文楷覆盖三个样例断言通过（`shared-font-native.log`）。隔离探针确认同字节 URL 已注册时产品的私有注册仍成功（`font-registration.log`）。完整门禁通过（`shared-font-unified-check.log`），Release 包已生成并由用户安装（`shared-font-package.log`）。
+- 安装后可执行文件 SHA256 `0941ccaf3c656474316257b139fbc81fd2f5bef76d0fb13869869a5db313310d`、清单 SHA256 `af52ea9cd61b1be7d6cf6205221bc72f4cce9b9f38e1a49b049e07c0b5f530c0` 均与新包相同；系统文楷为 root:admin/644，SHA256 与锁定原件一致（`shared-font-installed.log`）。新进程中系统可见文楷覆盖三个字，“𤛭”的默认回退由 LastResort 变为文楷（`shared-font-after.log`）；全机安装后的私有字体原生回归通过（`shared-font-installed-native.log`）。用户随后明确确认“已经可以显示了”，本次 Codex 输入与三个缺字样例已获得现场验证；不推广为所有宿主、全部 Unicode 字形或长期验收通过。
+
+## 本批：Mac 原生验证与修复
+
+- 统一入口实际执行架构/文档、fmt、本机 Clippy、共享/Mac 常规与文档测试，以及 Windows x64/x86 类型检查。IMK 子类注册、合成文本客户端、UTF-16、菜单字典转发、候选点击失效、隐藏窗口、设置异步回复、固定工作线程/热重载、Mac 文件租约/链接拒绝/事务备份与 kqueue 子进程等待已在 Mac 执行；不把这些合成测试当作真实宿主上屏。
+- 修复原生输入测试同时链接库和重复包含源文件产生的 Objective-C 类重复符号；主线程 harness 现在只编译一份类定义。修复查询框提示文字依赖系统外观导致对比度不足，补齐连续换主题的原生反例；按 NSButton 实际坐标方向修正开关与色块的标题/说明顺序，并检查无障碍按钮动作与禁用拒绝。
+- 图标绘制复用产品的已校验字节私有字体注册，删除忽略错误且不注销的 URL 注册路径。连续两次图标绘制/注册通过；原生字体检查确认私有文楷覆盖码表全部 353 个 BMP 私用区字根。本机没有 Kaiti SC；文楷与已检查的系统字体均不含 U+20000，候选/查字离屏图显示缺字框，U+20BB7 则有文楷字形。这是字形覆盖限制，不能宣称所有非 BMP 字形验收通过。
+- 完整锁定码表解析/索引与完整资源合成组包、损坏拒绝已单列执行通过。真实 ARM64 Release 包也已生成，Info.plist 合法、Mach-O 最低系统为 13.0，保留链接器生成的 LC_CODE_SIGNATURE；未运行 codesign 或修改链接后的可执行文件。修正标识后的生成物位于 `target/package/TigerType.app`，可执行文件 SHA256 为 `e37d9894862aeb157b2a080ded02aa3b32a1c3d99cc2bf03e575cbe354cb5890`，清单 SHA256 为 `21304436c27423fd099874527f48727b7303c6ca76d8818274e6be0f1c55a3cb`。
+- 用户已于 10-31 13:29（本机 +0800）安装上一版并注销重登；系统包可执行文件 SHA256 为 `afa90ad5525917d3cf7b0281d861fddd44d80d1a3bbcac1df1bd8fffaa381bf8`，root:wheel/755。重登后只读 TIS 探针仍返回 0 个 TigerType 输入源，用户截图也显示搜索为空。旧包标识 `local.tigertype.inputmethod` 以 inputmethod 结尾；源码现改为 `local.inputmethod.tigertype`，同步 Info.plist、TISInputSourceID 与 IMKServer，并增加一致性检查。这一格式问题有外部同类 A/B 实测佐证，本机修复后的系统发现尚待证实。
+- 同时修复声明变更后旧包无法升级的问题：旧目标核对自身摘要、固定文件集合及锁定资源，新来源和 staging 仍严格核对当前声明；摘要不一致与资源损坏反例继续拒绝。完整资源测试及统一门禁已通过。自动安装遇到 sudo 密码要求后，用户于 13:47:42（+0800）完成管理员安装；系统目录的标识、可执行文件与清单摘要均与修复包相符，属主/权限正确。安装后当前会话 TIS 仍为 0，未启动 TigerType 进程；已请用户保存工作后重新登录，再核对系统发现，不自动注册或切换。
+- 已生成五种主题的候选/四区设置、查字与图标离屏图；抽查了全部主题及四类页面，发现并修正上述文字问题。滚动后的全部内容、实际交互、Windows 逐图对照和 VoiceOver 仍未完成。证据集中在 `artifacts/macos-validation-20261031/`，完整资源测试另在本次 `artifacts/rust-tiger-*` 目录保存 JSON；未读取现用用户数据，未自动注册、启用或切换输入法。
+
+### 仍须完成的 Mac 验收
+
+1. 本批启动崩溃修复已安装，系统目录摘要、实际进程身份与词表加载完成已核对；继续验证真实输入。
+2. TextEdit 验证打字、选重/翻页/退格、单击 Shift、⌃.、选区替换、非 BMP、焦点切换、故障撤回、不重放和迟到点击拒绝。
+3. 真实查字/设置事务与热重载、全键盘导航、VoiceOver、增强对比度、多屏/全屏 Space、菜单/拖动跟踪循环；核对缺失字体及罕见字覆盖，完成全部离屏图与 Windows 的对照。
+4. 提权安装/升级/卸载、全部用户旧进程退出、失败恢复与异常中断。临时目录的冲突副本、链接拒绝和包替换恢复已原生测试，但不能代替系统安装生命周期验收。
+5. 方案真实应用矩阵、完整回调 50ms 预算、P95/P99、空闲与长期资源占用、两小时压力和八小时使用；macOS 13 最低版本也没有真机运行证据。
+
+风险：系统加载、独立原生宿主、Codex 四码输入及本次三个缺字样例已有通过证据；其他宿主、全部字形与长期使用未验收。主动等待有绝对期限，但不能中断已进入的同步系统调用。设置写盘成功而引擎确认失败会提示重启，磁盘不假称回滚。安装失败保留 staging/旧包证据；若失败在新包就位后的停止/清理阶段，新包可能已安装，须核对状态。当前不自动清理历史中断目录。
+
+## 本批：Mac 编辑器工作区报错
+
+- 已复现 `cargo check --workspace --all-targets` 的两处遗漏：Windows 入口无条件调用被 cfg 排除的库入口，TSF 的正式/测试依赖未限定 Windows，导致 Mac 编译 COM 绑定时报错。Windows 入口现按平台选择，非 Windows 误运行明确失败；TSF 依赖与已有源码使用相同平台条件。
+- 本机统一 Clippy 扩为整个工作区，补齐命令矩阵断言，防止仅检查共享/Mac 包漏掉编辑器所见错误。修复前后证据在 `artifacts/macos-validation-20261031/editor-check-before.log`、`editor-check-after.log`；后者已无错误通过。完整统一门禁通过（`editor-unified-check.log`），Mac 误运行 Windows 入口按预期输出平台错误并以状态 1 退出（`editor-windows-entry-on-mac.log`）。此批不改变已安装 Mac 输入法，系统发现问题仍按上一节单独验收。
 
 ## Windows 现场验证（待继续）
 
@@ -53,11 +85,11 @@
 
 - 10-29 高负载修复已合并到源码：定位请求合并、有效位置不做额外查询、Prepare 合并往返、正常 I/O 直接等待内核事件。单 CPU 合成竞争通过，但握手不计入首键，数据不是 TSF/DWM 首帧；x86 尾部波动原因未定位。源码修复不能代替真实 CPU/GPU 压力验收。
 - 微信不显示/残留：10-27 通用生命周期修复曾安装，之后曾卸载；本轮发现已重新安装，但现用构建与当前产物不同，现场复测仍未闭环。磁盘 DLL 哈希与已映射模块不是同一证据。
-- Mac 原生隐藏窗口/离屏 PNG 入口已实现但未在 Mac 执行；完整键盘导航、VoiceOver、多屏/全屏 Space、跟踪循环、真实工作线程和热重载待验收。
+- Mac 原生隐藏窗口/离屏 PNG、工作线程及隔离设置热重载已执行；真实宿主、完整键盘导航、VoiceOver、多屏/全屏 Space 与跟踪循环仍待验收。
 
 ## 未解决问题与已知限制
 
-- 拆分显示：源码已改为私有加载锁定文楷，不再依赖系统安装或其他字体替代。Windows 在 COM 构造/后台启动时校验大小与 SHA256、固定只读文件后私有注册；安装包新增按摘要命名的副本。Mac 在 IMK 服务前从校验后的字节私有注册。保留原有三个字体、楷体选项、配置和 v14 协议。尚未安装到现用宿主，Mac 原生和真实部署验收仍未完成；本轮证据在 `artifacts/private-font-20261031/`。
+- 拆分显示：源码已改为私有加载锁定文楷，不再依赖系统安装或其他字体替代。Windows 在 COM 构造/后台启动时校验大小与 SHA256、固定只读文件后私有注册；安装包新增按摘要命名的副本。Mac 在 IMK 服务前从校验后的字节私有注册。保留原有三个字体、楷体选项、配置和 v14 协议。Windows 现用宿主尚未部署；Mac 原生注册与 353 个 BMP 私用区字根检查通过，真实输入宿主仍未通过，U+20000 缺字见本批记录。原始 Windows 证据在 `artifacts/private-font-20261031/`，Mac 证据在 `artifacts/macos-validation-20261031/`。
 - 高负载候选延迟：10-29 已修复定位与传输中转瓶颈，单 CPU 合成竞争反例通过；当前源码产物尚未部署，现用构建的来源未确认，真实候选首帧验收仍待执行。
 - 微信候选不显示/空框残留：通用窗口生命周期、显隐恢复、层级及焦点竞态修复曾于 10-27 安装，随后卸载；当时旧宿主未重开，不能视为修复后的现场验证。本轮须确认重新部署的构建及宿主实际加载模块后复测，两类问题不能合并为一个未经证实的根因。
 - 特殊隐藏启动的首次查字不显示：源码与回归测试已修复，历史修复包曾安装后卸载；正式安装器与 HKLM Run 的 `serve` 不使用该标志。候选隐藏时的零面积防护仍缺目标宿主现场证据，不能标记空白边框已确认消失。
@@ -92,6 +124,11 @@
 
 ## 最近验证
 
+- 10-31 工作区提交前复核：完整统一门禁通过，日志 `artifacts/workspace-commit-20261031/check.log`；包括架构/文档、fmt、本机工作区 Clippy、共享/Mac 常规与原生测试及 Windows x64/x86 类型检查。已检查全部改动与生成文件边界；本轮未重新打包、安装或执行真实应用及长期验收，异平台原生测试和 ignored 项不计通过。
+- 10-31 Mac 关于文案：按截图去掉简介前的“Rust 专用”，只显示“虎码输入法”；统一门禁通过（架构/文档、fmt、本机 Clippy、共享/Mac 常规与原生测试、Windows x64/x86 类型检查），证据见 `artifacts/macos-about-copy-20261031/check.log`。本批未重新打包或安装，未验收已安装窗口。
+- 10-31 Git 忽略规则：补齐各层目录的 `.DS_Store`、`._*`、`Thumbs.db` 与 `desktop.ini`（兼容首字母大写）；当前无此类已跟踪文件。根目录/子目录命中与源码、配置、资源不误忽略检查通过，统一门禁通过；证据见 `artifacts/gitignore-20261031/ignore-rules.log`、`check.log`。本批只改仓库规则，未执行真实应用或长期验收。
+- 10-31 Mac 系统发现修复：用户安装并重登后 TIS 数量仍为 0（`artifacts/macos-validation-20261031/input-sources-after-install.log`、`input-sources-before-discovery-fix.log`）。修正包标识后单元与完整资源反例测试通过（`discovery-unit.log`、`discovery-package-test.log`），统一门禁通过（`discovery-check.log`、`discovery-final-check.log`），真实 Release 组包通过（`discovery-package.log`）；自动安装要求交互密码（`discovery-install-attempt.log`），随后用户完成安装，系统目录摘要核对通过，但当前会话 TIS 仍为 0（`discovery-installed.log`）。不能把已通过的包契约检查和磁盘安装核对当作系统发现、加载或真实输入的证据。
+- 10-31 Mac 本机批次：统一入口初跑通过但带 Objective-C 重复类符号警告（`artifacts/macos-validation-20261031/check-initial.log`），修复后统一入口无该警告通过（`check-fixed.log`）；查询框连续换主题反例曾失败并修复，原生窗口复测通过（`appkit-fixed.log`）。完整码表与完整资源组包分别通过（`locked-resources.log`、`locked-package.log`），真实 Release 组包通过（`package.log`）；原生私有字体及 353 字根结果见 `native-fonts.log`。图像保存在同目录 `candidate/`、`ui/`、`icons/`；只读系统发现结果见 `input-sources-unsandboxed.log`。真实输入、管理员安装生命周期和长期指标未通过，沙箱内 TIS 服务失败的日志不作为系统发现证据。
 - 10-31 本批提交前复核：完整统一门禁再次通过，日志 `artifacts/private-font-20261031/commit-check.log`；复核源码、调用方、安装映射、资源清单及文档，字体原件未修改，生成产物与测试日志不入 Git。私有字体的多宿主累计内存/GDI/句柄增量尚未测量，同进程多个输入法对象仍可能重复校验和注册；约 32ms 仅是先前单次初始化记录，不代表资源占用验收。未打包、安装或推送，Mac 原生与真实宿主结论不变。
 - 10-31 私有字体加载：新增有实现的 windows-fonts 边界，COM 构造与后台启动使用同一校验/私有注册路径；字体副本、路径固定、配对注销及安装映射已接通。完整统一门禁通过（含 x64/x86 测试与两种 Apple 类型检查），日志 `artifacts/private-font-20261031/final-check.log`；安装映射反例测试通过（`package-mapping.log`），未调用 Inno Setup 或部署。测试用唯一合成字体族证明系统原本无该字体时能私有加载、卸载后不可选；实际 GDI 字体数据 SHA256 与锁定原件一致，码表内 353 个 BMP 私用区字根均有字形；缺文件、错大小/摘要、硬链接和占用期间改写/目录改名均拒绝，其他文件仍可替换。Release 私有加载本机单次约 32ms（`loader-release-final.log`），在初始化阶段，不能作为冷盘或端到端输入预算证据。Mac 私有注册只通过类型检查，CoreText 同名字体冲突会明确失败，原生运行待验证；本机未安装、切换输入法、改动系统字体或现用数据。现有旧安装包不含本轮私有副本，须重新打包后再做真实宿主、UWP/管理员及升级占用验收。
 - 10-31 拆分显示修复：完整统一门禁通过（架构/文档、fmt、Clippy、Windows x64/x86 常规与文档测试、两种 Apple 目标类型检查），日志 `artifacts/learning-font-fix-20261031/check.log`。新增私有加载字体的回归覆盖“你/这/题/缺”、文楷/楷体选项、96/144/192 DPI、TumanPUA 字根回退、查字/预览字体及同源宽度测量；旧等宽字体反例实际失败后恢复正确实现（`negative-old-mono.log`），真实 Popup 绘制的合成离屏图 `candidate-fixed.bmp` 已目视核对。恢复三个字体、选项、配置和 v14 协议，不保留上一轮扩大范围的修改；原始诊断记录保留。未安装、切换输入法或修改现用数据；Mac 原生字形、真实宿主、全字根与长期验收未执行，ignored 不计 passed。

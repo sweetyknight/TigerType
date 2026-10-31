@@ -25,7 +25,7 @@ mod input;
 pub use input::{key_event, marked_text};
 #[path = "appkit/imk.rs"]
 mod imk;
-pub use imk::Server;
+pub use imk::{IDENTIFIER, Server};
 
 /// UI 回调中的 Rust panic 不得穿过 Objective-C 栈；失败时不产生用户动作。
 pub(super) fn callback<T>(f: impl FnOnce() -> T) -> Option<T> {

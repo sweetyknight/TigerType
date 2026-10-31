@@ -140,7 +140,7 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 
 ## macOS 端
 范围：
-- 只在本人的 Mac 上使用。2026-10-30 已确认机器为 M 系列：只打包 `aarch64-apple-darwin`，Intel Apple 目标仅保留类型检查，不做通用二进制。最低 macOS 13（实际系统版本仍待 Mac 确认）。功能同 Windows：单字/词、常用字、简繁、拼音反查、全角、标点、学习信息、查字/设置、配色主题、每页候选数、热重载。
+- 只在本人的 Mac 上使用。2026-10-30 已确认机器为 M 系列：只打包 `aarch64-apple-darwin`，Intel Apple 目标仅保留类型检查，不做通用二进制。最低 macOS 13（实际验证系统及结果只维护在项目状态）。功能同 Windows：单字/词、常用字、简繁、拼音反查、全角、标点、学习信息、查字/设置、配色主题、每页候选数、热重载。
 - 不做：代码签名、Developer ID/公证、App Store/沙箱、通用二进制、自动注册/启用/切换输入法、辅助功能或输入监控权限（不读其他进程界面）、菜单栏状态项（NSStatusItem）、开机自启（系统按需拉起）。
 - 签名说明：Apple 芯片只运行带签名的可执行文件，链接器会自动加 ad-hoc 链接器签名，这不属于代码签名流程；链接后不得再改写可执行文件（`strip`、`install_name_tool`、`lipo` 等），否则内核拒绝运行。Intel 无此要求。未签名的包在本机构建、本机安装，不带隔离属性，不经 Gatekeeper 评估。
 
@@ -154,7 +154,9 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 - 退出：系统或安装器结束进程即可；租约由内核随进程释放，设置写入为临时文件加原子改名，中途结束不损坏旧文件，因此不处理信号。
 
 会话与焦点：
+- IMKServer 按系统类簇的公开初始化器创建，不继承它；主线程包装持有系统实例，系统实例以 Objective-C 强关联持有有类型的依赖对象，控制器核对类型后取得依赖。关联键只作不可变身份，不存全局业务状态或借用指针。
 - IMKServer 为每个客户端输入会话创建一个控制器；每个控制器持有一个 `tigertype_input_client::Host`，相当于 Windows 的一个 TIP 线程实例，第一个需要引擎的按键才在引擎线程登记宿主。`activateServer` 使下一键携带 `Prepare::Focus` 取得焦点；`deactivateServer` 取消自有组合并在本地标记失焦（协议没有单独的失焦消息，其他控制器取得焦点时后台清掉旧组合）；控制器释放时通知引擎移除宿主。
+- 初始化的通信代理与激活/按键的文本包装对象不能按指针混为同一对象；激活时先撤回旧客户端自有组合，校验并绑定系统传入的文本对象，后续按键只接受本次绑定。系统调用期间持有该对象，重入换客户端不转移旧文档的清理/提交。
 - 宿主与会话上限沿用 16/64 与 backend 统一的回收策略（最久未用、无焦点、无组合者先回收）；被回收的控制器下次请求发现断开即重连一次，同 Windows。
 - 进程内通道：主线程以 `try_send` 投递，通道满视为不可用、放行原键（不吞键）；以 `recv_timeout` 等到同一绝对截止时间（50ms，含排队）；超时即丢弃回复槽，迟到回复无处投递；Host 作废连接并通知引擎移除该宿主及其会话（超时请求可能已改动会话），下一键以新宿主 `Prepare::Open` 重开会话。不持锁等待、不忙轮询。
 - 取消通知用连接寿命位和有界邮箱唤醒：满队列本身保证唤醒，引擎处理下一项前清理已失效宿主，不依赖一定能入队的 Close 消息。保存回复须等设置事务成功且引擎确认热重载；若文件已保存但确认失败，明确提示重启，不伪称回滚了磁盘。
@@ -167,6 +169,7 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 
 文本：
 - 组合用 `setMarkedText` 写入（单下划线，选区为折叠光标，`replacementRange` 为 NSNotFound），用户选区随之被替换，同 Windows 语义；上屏用 `insertText`。contracts 的 UTF-8 位置在 macOS input-method 边界换算为 UTF-16。
+- 组合存续按当前绑定客户端的 `markedRange` 及 UTF-16 长度校验，并保留焦点代次检查；不把异步文档子串快照当成组合状态，因为 Chromium 宿主的文档缓存可能落后于已更新的标记范围。宿主已结束组合时拒绝迟到提交与清理，不指定已上屏文档的替换范围。
 - 故障（不可用、超时、拒绝）时清空自有标记文本，返回 NO 放行原键；不改已上屏文字、不重放。
 - 系统调用 `commitComposition`（切换应用、点击别处等）时取消未上屏组合并清空引擎会话，不把编码上屏，同 Windows“焦点切换取消组合”。
 
@@ -174,12 +177,14 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 - 每进程一个非激活 `NSPanel`：无边框、`nonactivatingPanel`、不成为 key/main 窗口，层级高于普通窗口，集合行为含 `canJoinAllSpaces` 与 `fullScreenAuxiliary`，以覆盖全屏应用；首次需要时创建。自绘 NSView、CoreText 排版，只在快照变化时重绘；`CTFont` 按字体与字号缓存；Retina 由系统按缩放倍数处理。
 - 外观：数据取自回复中的 `InputState`（选项随带，不读盘），竖排，由 input-client 视图模型决定行、页脚与“仅多页显示翻页”，圆角与阴影由图层实现。只用主题色；“增强对比度”开启时改用系统颜色（同 Windows 高对比度例外）。
 - 字体：三个原件仍随包放在 `Contents/Resources/Fonts`。Mac 组装层在 IMK 启动前逐个安全读取并核对大小/SHA256，从同一份字节创建 CGFont，以 CTFontManagerRegisterGraphicsFont 注册到当前进程；删除 ATSApplicationFontsPath 隐式加载，避免绕过字节校验或重复注册。加载失败/名称不可用立即报错；所有显示对象销毁后注销。拆分仅用私有文楷，不采用系统回退；候选汉字楷体选项、界面 PingFang SC 和独立编码 Cascadia Mono/Menlo 不变。
+- 上屏字形由宿主绘制，进程私有字体不能补齐宿主缺字。安装器另将锁定文楷安装到 `/Library/Fonts/LXGWWenKaiGBScreen.ttf`，供其他应用回退；不更改宿主字体设置，不承诺覆盖全部 Unicode 汉字。
 - 位置：以 `attributes(forCharacterIndex:lineHeightRectangle:)` 取组合起点（索引 0）的行矩形（屏幕全局坐标、左下原点），全零视为宿主不知道；退路依次为光标处索引、面板正在显示时的原位置、本控制器上次的位置，都没有则不显示。macOS 没有布局变化通知，也不读系统光标或其他进程界面。macOS input-method 把左下原点坐标换算后交给 input-client 的同一摆放规则，限制在锚点所在屏幕的 `visibleFrame` 内。
 - 点击：面板不取焦点；按下与抬起落在同一行才选字，直接经进程内通道发 `Select`（绑定展示编号与快照，过期即拒绝），回复在主线程写入宿主，无需 Windows 的异步编辑会话。
 - 无障碍：面板视图实现 NSAccessibility 列表，候选项为子元素（标签为候选字与注释）；高亮变化时发送 `selectedChildrenChanged`，VoiceOver 运行时另发朗读请求；只在 VoiceOver 开启时构造子元素。
 
 输入法菜单（对应 Windows 任务栏输入法图标的右键菜单）：
 - 控制器 `menu()` 依次给出中文/英文、半角/全角、中文标点/英文标点三项（写当前状态，点击即翻转；组合中切中英把编码原样上屏，同 Windows），分隔线后为查字、设置。后台不可用时状态项置灰，首项写明原因。
+- 控制器直接实现菜单 action `invoke:`，接收系统命令字典并核对菜单身份/禁用状态；IMK 会先检查控制器响应 action，只覆盖 `doCommandBySelector:commandDictionary:` 不足以接收系统点击。
 - 菜单栏输入法图标为虎码印章模板图，不随中英变化（随状态变化须声明多个输入模式，系统设置中会出现多个条目）；切换中英时在候选面板位置短暂显示“中”或“英”（约 0.8 秒，不取焦点）。
 - 输入法菜单由系统绘制，悬停高亮随系统强调色，无法自绘：这是“界面不得出现蓝色”的平台例外，可把系统强调色设为石墨等非蓝色消除。查字/设置窗只经此菜单打开，不另设菜单栏状态项。
 
@@ -196,15 +201,16 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 
 打包与安装（全部由 Rust 完成，不用 pkgbuild、productbuild、codesign、lipo、iconutil）：
 - 打包驱动 `--example package` 的 macOS 分支：本机架构 release 构建；组装 `target/package/TigerType.app`（Rust 按模板写出 `Contents/Info.plist`，另含 `MacOS/tigertype`、`Resources/tiger`、`Resources/Fonts`、应用图标与菜单栏模板图）；按锁定清单核对码表与字体；打印各文件 SHA256。
-- Info.plist 关键项：`CFBundleIdentifier`（本地标识，如 `local.tigertype.inputmethod`）、`InputMethodConnectionName`、`InputMethodServerControllerClass`、`TISInputSourceID`、`TISIntendedLanguage = zh-Hans`、`tsInputMethodCharacterRepertoireKey`、菜单栏图标与 `TISIconIsTemplate`、`LSUIElement = true`、`LSBackgroundOnly = false`、`LSMinimumSystemVersion`。
-- 图标：印章在打包时以 CoreText/CoreGraphics 现画（设计同 Windows），由 Rust 写出 `.icns` 容器与菜单栏模板 PNG。
+- Info.plist 关键项：`CFBundleIdentifier = local.inputmethod.tigertype`（必须含中间独立段 `.inputmethod.`，不能把 inputmethod 放在末尾）、`InputMethodConnectionName`、`InputMethodServerControllerClass`、与包标识一致的 `TISInputSourceID`、`TISIntendedLanguage = zh-Hans`、`tsInputMethodCharacterRepertoireKey`、菜单栏图标与 `TISIconIsTemplate`、`LSUIElement = true`、`LSBackgroundOnly = false`、`LSMinimumSystemVersion`；IMKServer 使用同一标识，测试核对双方一致。
+- 图标：印章在打包时以 CoreText/CoreGraphics 现画（设计同 Windows），由 Rust 写出 `.icns` 容器与菜单栏模板 PNG；模板为 16×16 点、32×32 像素（144 DPI），与系统输入源图标的逻辑尺寸一致。
 - 安装：`sudo target/package/TigerType.app/Contents/MacOS/tigertype install`。
   1. 校验源包：标识、可执行文件、码表与字体清单。
   2. 调用者的 `~/Library/Input Methods/TigerType.app` 若存在（用户级副本会与全机版冲突），拒绝安装并给出路径，由用户删除。
   3. 在 `/Library/Input Methods` 内建临时目录，只复制文件内容并设固定属主与权限，不带扩展属性。
-  4. 结束所有用户的 TigerType 进程（按可执行路径识别，SIGTERM，有界等待），把旧包改名，新包原子改名就位，再删除旧包；任一步失败都保留或恢复旧包。系统在下次使用时拉起新进程。
+  4. 停止旧进程前，从已校验 staging 读取锁定文楷，完整写入系统字体目录的独占临时文件并落盘，以 RENAME_EXCL 原子发布；目标已有同字节则保留，内容或权限冲突、符号/硬链接均拒绝。目录须归当前 root 所有；系统 Fonts 默认的 admin 写权限仅在 sticky 保护下允许，不修改目录权限。失败保留临时证据，绝不覆盖其他字体；后续应用包替换失败时，已发布的共享字体仍保留。
+  5. 旧包核对固定文件集合、锁定资源及自身文件摘要，不要求旧 Info.plist 已等于新版声明；新来源和 staging 仍须符合新版完整契约。结束所有用户的 TigerType 进程（按可执行路径识别，SIGTERM，有界等待），把旧包改名，新包原子改名就位，再删除旧包；任一步失败都保留或恢复旧包。系统在下次使用时拉起新进程。
 - 首次安装后用户注销重登（或重启）让系统发现输入法，再在“系统设置 › 键盘 › 输入法”中手动添加“TigerType 虎码”；安装器不注册、不启用、不切换输入法。
-- 卸载：`sudo …/tigertype uninstall`，结束进程并删除 `/Library/Input Methods/TigerType.app`，保留各用户数据；输入法条目由用户在系统设置中移除。
+- 卸载：`sudo …/tigertype uninstall`，结束进程并删除 `/Library/Input Methods/TigerType.app`，保留各用户数据和供其他应用使用的文楷字体；输入法条目由用户在系统设置中移除。
 - 升级与开发验证走同一安装命令；在真实系统上安装须经用户授权。
 
 开发与检查：
@@ -235,7 +241,7 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 5. M4 打包与安装：图标现画、完整 Info.plist、安装/升级/卸载与冲突检测。
 6. M5 验收：TextEdit、备忘录、Safari、Chrome、VS Code（Electron）、终端、iTerm2、微信、Pages、Microsoft Office、JetBrains、Spotlight、密码框、全屏与多显示器、VoiceOver；按键处理预热 P95≤10ms、P99≤25ms、主动等待≤50ms；空闲 CPU 为零，常驻内存以 M1 实测为基线、长期使用不增长；两小时压力与八小时使用。
 
-Mac 验收前待确认：实际系统版本；Kaiti SC 是否须在“字体册”中下载；只带链接器签名的输入法是否触发权限提示（M1 探针）。芯片已确认为 M 系列，不再等待该项。
+Mac 验收须记录实际系统版本、Kaiti SC 是否可用、随包与系统字体的罕见字覆盖，以及只带链接器签名的输入法能否被系统发现、加载并正常输入（M1 探针）；实际结果只维护在项目状态。
 
 ## 数据与配置
 - Rust 工具只解析锁定单字表、tigress 词码、常用字集、拼音单字/读音、拆分和简繁映射；不导入小狼毫外观配置（候选窗配色与字体由设置给出）。复用数据不是兼容运行时。
@@ -257,7 +263,7 @@ cargo run --locked --offline -p tigertype-dev --example check
 ```
 统一运行架构/文档、fmt、Clippy、x64/x86；架构/文档也在普通 cargo test 中运行。macOS 代码加入后按宿主选目标，另一平台至少做 Clippy 类型检查，见“macOS 端”的开发与检查。完整资源、真实应用、长时验收单列。无远程 CI、自动提交、后台监控；本地检查不等于不可绕过的提交保护。
 
-统一入口对 x64/x86 显式选择 `--lib --bins --tests` 并分别执行 `--doc`，不让 Cargo 顺带重链接 Windows 上正在运行的检查器示例；`--all-targets` Clippy 仍检查所有示例，DLL 探针由其集成测试显式构建执行，不跳过单元/集成/文档测试。
+统一入口对 x64/x86 显式选择 `--lib --bins --tests` 并分别执行 `--doc`，不让 Cargo 顺带重链接 Windows 上正在运行的检查器示例；本机 `--workspace --all-targets` Clippy 检查整个工作区（含异平台入口的条件声明及所有示例），与编辑器默认检查范围一致。Mac 仍只执行共享/Mac 原生测试，Windows 原生测试不能记为已在 Mac 通过；DLL 探针由其集成测试显式构建执行，不跳过单元/集成/文档测试。
 
 依赖检查不能证明业务职责；每批审查输入路径文件操作/阻塞、所有权、生命周期、调用方、配置及文档。
 

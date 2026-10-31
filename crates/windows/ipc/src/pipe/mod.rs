@@ -134,7 +134,7 @@ impl Runtime {
     fn slot(&self) -> Result<Slot> {
         self.0
             .lifecycle
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (state < MAX_PIPES).then_some(state + 1)
             })
             .map_err(|state| {

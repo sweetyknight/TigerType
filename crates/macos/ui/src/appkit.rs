@@ -602,6 +602,53 @@ pub mod tests {
         let _font = test_font();
         let mtm = MainThreadMarker::new().expect("AppKit 检查必须在主线程");
         let _app = NSApplication::sharedApplication(mtm);
+        // 深浅主题都使用自己的占位文字颜色，不依赖当前系统外观。
+        let field = Field::new(
+            mtm,
+            "合成查询框",
+            rect(0.0, 0.0, 200.0, 30.0),
+            Options::default().palette(),
+            |_| {},
+            |_| {},
+        );
+        field.setPlaceholderString(Some(&NSString::from_str("输入拼音")));
+        for theme in Theme::ALL {
+            let p = Options {
+                theme,
+                ..Default::default()
+            }
+            .palette();
+            field.update(p);
+            let placeholder = field.placeholderAttributedString().unwrap();
+            // SAFETY: 非空属性字符串的索引 0 有效；无需返回属性范围。
+            let ink = unsafe {
+                placeholder.attribute_atIndex_effectiveRange(
+                    NSForegroundColorAttributeName,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            }
+            .unwrap();
+            assert_eq!(ink.downcast_ref::<NSColor>().unwrap(), &*color(p.text));
+        }
+        let pressed = Rc::new(Cell::new(0));
+        let clicks = pressed.clone();
+        let button = Button::new(
+            mtm,
+            "合成按钮",
+            rect(0.0, 0.0, 100.0, 60.0),
+            Options::default().palette(),
+            None,
+            move || clicks.set(clicks.get() + 1),
+        );
+        assert!(button.isFlipped(), "自绘布局按 NSButton 的左上原点绘制");
+        // SAFETY: 只对本进程合成控件执行其公开无障碍动作，不操控其他应用。
+        assert!(unsafe { msg_send![&*button, accessibilityPerformPress] });
+        assert_eq!(pressed.get(), 1);
+        button.setEnabled(false);
+        // SAFETY: 禁用控件的同一动作必须拒绝，不能绕过界面状态。
+        assert!(!unsafe { msg_send![&*button, accessibilityPerformPress] });
+        assert_eq!(pressed.get(), 1);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

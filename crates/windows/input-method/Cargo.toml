@@ -9,7 +9,8 @@ publish.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[dependencies]
+# 源码与测试只在 Windows 编译，依赖也必须隔离，避免 Mac 工作区检查加载 COM 绑定。
+[target.'cfg(windows)'.dependencies]
 tigertype-contracts.workspace = true
 tigertype-input-client.workspace = true
 tigertype-windows-ipc.workspace = true
@@ -21,5 +22,5 @@ windows = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Dw
 workspace = true
 
 # 显隐与层级回归在不切换的私有桌面运行，不干扰用户当前应用。
-[dev-dependencies]
+[target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = ["Win32_System_StationsAndDesktops"] }

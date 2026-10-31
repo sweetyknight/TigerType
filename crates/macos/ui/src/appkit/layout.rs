@@ -198,7 +198,7 @@ fn tool_control(s: &State, weak: &WeakState, page: usize, id: usize, frame: NSRe
             FILE_NAME => "settings.toml".into(),
             FILE_PATH => s.config.display().to_string(),
             ABOUT_TITLE => format!("TigerType {}", env!("CARGO_PKG_VERSION")),
-            ABOUT_DESC => "Rust 专用虎码输入法".into(),
+            ABOUT_DESC => "虎码输入法".into(),
             KEYS_NOTE => "按当前输入状态生效".into(),
             _ => String::new(),
         }

@@ -1,3 +1,9 @@
+# macOS / Windows 自动生成的目录元数据不入库，规则覆盖所有层级。
+.DS_Store
+._*
+Thumbs.db
+[Dd]esktop.ini
+
 # 构建产物、缓存、测试证据、日志与个人词典不得入库；锁定码表与字体在 resources/ 随仓库保存，
 # vendor/ 只剩退役路线的本地下载，不入库。
 /.cache/

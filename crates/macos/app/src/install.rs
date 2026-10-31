@@ -1,14 +1,14 @@
 //! 全机安装边界；只允许 root 操作固定目录，复制已校验字节，不自动启用输入法或触碰用户数据。
 use crate::bundle;
 use std::{
-    ffi::{CStr, OsStr},
+    ffi::{CStr, CString, OsStr},
     fs,
     io::Write,
     os::{
         fd::AsRawFd,
         unix::{
             ffi::OsStrExt,
-            fs::{MetadataExt, PermissionsExt},
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
         },
     },
     path::{Path, PathBuf},
@@ -17,6 +17,7 @@ use std::{
 use tigertype_backend::{Result, resources, storage};
 const PARENT: &str = "/Library/Input Methods";
 const NAME: &str = "TigerType.app";
+const FONT_NAME: &str = "LXGWWenKaiGBScreen.ttf";
 struct Mask(libc::mode_t);
 impl Drop for Mask {
     fn drop(&mut self) {
@@ -170,6 +171,48 @@ fn fix_directories(path: &Path) -> Result<()> {
     directory.sync_all()?;
     Ok(())
 }
+/// 文楷同时供上屏宿主回退；先完整写入再独占发布，不覆盖已有字体或暴露半个字体文件。
+fn publish_font(directory: &Path, bytes: &[u8]) -> Result<()> {
+    storage::reject_links(directory)?;
+    let metadata = fs::metadata(directory)?;
+    // SAFETY: 只读当前有效身份；系统 Fonts 默认允许 admin 写入，但 sticky 位保护 root 文件。
+    if metadata.uid() != unsafe { libc::geteuid() }
+        || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
+    {
+        return Err("字体目录属主或写权限不安全".into());
+    }
+    let target = directory.join(FONT_NAME);
+    match fs::symlink_metadata(&target) {
+        Ok(existing) => {
+            if existing.uid() != metadata.uid()
+                || existing.mode() & 0o022 != 0
+                || storage::read_file(&target, bytes.len() as u64)? != bytes
+            {
+                return Err(format!("已有字体内容或权限不同，未覆盖：{}", target.display()).into());
+            }
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let temporary = directory.join(format!(".TigerType-font-{}.tmp", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.set_permissions(fs::Permissions::from_mode(0o644))?;
+    file.sync_all()?;
+    let from = CString::new(temporary.as_os_str().as_bytes())?;
+    let to = CString::new(target.as_os_str().as_bytes())?;
+    // SAFETY: 路径为已核对目录中的自建文件；RENAME_EXCL 原子发布且拒绝竞态出现的目标。
+    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
 pub fn install(source: &Path) -> Result<()> {
     let parent = privileged()?;
     // SAFETY: 安装是独立单线程命令，先收紧 staging 创建权限，结束后恢复；不改全局系统设置。
@@ -218,12 +261,19 @@ pub fn install(source: &Path) -> Result<()> {
     // 旧包必须仍是安全的受管布局；失败时保留旧包和 staging 证据。
     if target.try_exists()? {
         safe_tree(&target, &mut 0)?;
-        bundle::inspect(&target)?;
+        bundle::inspect_existing(&target)?;
     }
     let backup = parent.join(format!("TigerType-old-{}", std::process::id()));
     if backup.try_exists()? {
         return Err("旧恢复目录已存在，请先核对安装状态；未停止现用输入法".into());
     }
+    // 只发布锁定的文楷；输入法私有加载不变，其他应用也能显示已上屏的扩展汉字。
+    let font = manifest
+        .files
+        .iter()
+        .find(|entry| entry.path == format!("Contents/Resources/Fonts/{FONT_NAME}"))
+        .ok_or("应用包缺少文楷字体")?;
+    publish_font(Path::new("/Library/Fonts"), &bundle::read(&stage, font)?)?;
     stop(&target)?;
     bundle::replace(&stage, &target, &backup)?;
     if backup.try_exists()? {
@@ -232,23 +282,62 @@ pub fn install(source: &Path) -> Result<()> {
         remove(&parent, &backup)?;
     }
     println!(
-        "安装完成。首次安装请注销重登，再在系统设置中手动添加 TigerType 虎码；未自动启用或切换。"
+        "安装完成，文楷已安装供其他应用显示扩展汉字；仍缺字的应用请重新打开。首次安装请注销重登，再在系统设置中手动添加 TigerType 虎码；未自动启用或切换。"
     );
     Ok(())
 }
 pub fn uninstall() -> Result<()> {
     let parent = privileged()?;
     let target = parent.join(NAME);
-    bundle::inspect(&target)?;
+    bundle::inspect_existing(&target)?;
     stop(&target)?;
     remove(&parent, &target)?;
-    println!("已卸载程序，保留全部用户数据；请手动移除系统设置中的输入法条目。");
+    println!(
+        "已卸载程序，保留用户数据与供其他应用使用的文楷字体；请手动移除系统设置中的输入法条目。"
+    );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_font_is_complete_idempotent_and_never_overwrites_conflicts() -> Result<()> {
+        let root = resources::new_directory(
+            &std::env::temp_dir().canonicalize()?,
+            "tigertype-font-install",
+        )?;
+        let target = root.join(FONT_NAME);
+        publish_font(&root, b"synthetic-font")?;
+        let original = fs::metadata(&target)?;
+        assert_eq!(fs::read(&target)?, b"synthetic-font");
+        assert_eq!(original.mode() & 0o777, 0o644);
+        publish_font(&root, b"synthetic-font")?;
+        assert_eq!(fs::metadata(&target)?.ino(), original.ino());
+        assert!(publish_font(&root, b"other-font").is_err());
+        assert_eq!(fs::read(&target)?, b"synthetic-font");
+        // 已有符号链接、硬链接与宽松写权限均拒绝，不接管其他文件。
+        fs::remove_file(&target)?;
+        let other = root.join("unrelated");
+        fs::write(&other, b"synthetic-font")?;
+        std::os::unix::fs::symlink(&other, &target)?;
+        assert!(publish_font(&root, b"synthetic-font").is_err());
+        fs::remove_file(&target)?;
+        fs::hard_link(&other, &target)?;
+        assert!(publish_font(&root, b"synthetic-font").is_err());
+        fs::remove_file(&target)?;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o777))?;
+        assert!(publish_font(&root, b"synthetic-font").is_err());
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755))?;
+        // 中断残留暂存不能被截断；目标仍须不存在，用户文件原样保留。
+        let temporary = root.join(format!(".TigerType-font-{}.tmp", std::process::id()));
+        fs::write(&temporary, b"interrupted")?;
+        assert!(publish_font(&root, b"synthetic-font").is_err());
+        assert!(!target.try_exists()?);
+        assert_eq!(fs::read(&temporary)?, b"interrupted");
+        assert_eq!(fs::read(&other)?, b"synthetic-font");
+        Ok(())
+    }
     #[test]
     fn cleanup_refuses_non_system_or_nested_targets_before_touching_files() {
         assert!(remove(Path::new("/tmp"), Path::new("/tmp/TigerType.app")).is_err());

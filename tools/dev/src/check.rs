@@ -30,10 +30,17 @@ pub fn commands(macos: bool) -> Vec<Vec<&'static str>> {
         ],
         vec!["fmt", "--all", "--", "--check"],
     ];
-    let mut lint = vec!["clippy", "--locked", "--offline", "--all-targets"];
-    lint.extend(selection(macos));
-    lint.extend(["--", "-D", "warnings"]);
-    commands.push(lint);
+    // 编辑器默认检查整个工作区；本机门禁也覆盖异平台入口及依赖的条件声明。
+    commands.push(vec![
+        "clippy",
+        "--locked",
+        "--offline",
+        "--all-targets",
+        "--workspace",
+        "--",
+        "-D",
+        "warnings",
+    ]);
     // 明确测试种类，避免 Windows 重链接仍在运行的 check.exe；all-targets Clippy 仍覆盖示例。
     let native_targets: &[Option<&str>] = if macos {
         &[None]
@@ -71,6 +78,14 @@ mod tests {
     fn host_matrix_runs_only_native_tests_and_checks_all_mac_product_and_tool_targets() {
         let win = commands(false);
         let mac = commands(true);
+        for commands in [&win, &mac] {
+            let native_lint = commands
+                .iter()
+                .find(|c| c[0] == "clippy" && !c.contains(&"--target"))
+                .unwrap();
+            assert!(native_lint.contains(&"--workspace"));
+            assert!(native_lint.contains(&"--all-targets"));
+        }
         assert!(
             win.iter()
                 .any(|c| c[0] == "test" && c.contains(&"i686-pc-windows-msvc"))

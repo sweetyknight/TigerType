@@ -200,15 +200,15 @@ impl Button {
         let chosen = self.ivars().selected.get();
         let r = self.bounds();
         let style = self.ivars().style.get();
-        // 开关行沿用 Windows 的标题/说明/右侧开关，而不是另一套大按钮布局。
+        // NSButton 以左上为原点；标题在上、说明在下，与共用布局保持一致。
         if let Some((_, title, description)) = TOGGLES.iter().find(|(id, ..)| *id == style) {
             let title = art::caption(title);
             let description = art::caption(description);
             string(&title, &NSFont::systemFontOfSize(13.0), p.text)
-                .drawAtPoint(NSPoint::new(16.0, r.size.height - 28.0));
+                .drawAtPoint(NSPoint::new(16.0, 8.0));
             string(&description, &NSFont::systemFontOfSize(11.0), p.muted).drawInRect(rect(
                 16.0,
-                8.0,
+                30.0,
                 r.size.width - 84.0,
                 18.0,
             ));
@@ -295,9 +295,9 @@ impl Button {
             }
             let (title, description) = COLORS[style - SWATCH];
             string(title, &NSFont::systemFontOfSize(12.0), p.text)
-                .drawAtPoint(NSPoint::new(44.0, 21.0));
-            string(description, &NSFont::systemFontOfSize(10.0), p.muted)
                 .drawAtPoint(NSPoint::new(44.0, 5.0));
+            string(description, &NSFont::systemFontOfSize(10.0), p.muted)
+                .drawAtPoint(NSPoint::new(44.0, 21.0));
         } else if self.ivars().swatch.get().is_none() && ![AUTO, COMMON, LEARNING].contains(&style)
         {
             let title = string(
@@ -392,6 +392,20 @@ impl Field {
         self.ivars().palette.set(p);
         self.setTextColor(Some(&color(p.text)));
         self.setBackgroundColor(Some(&color(p.field)));
+        // 系统占位色随深浅外观变化，不能用于固定主题底色。
+        if let Some(value) = self
+            .placeholderAttributedString()
+            .map(|value| value.string())
+            .or_else(|| self.placeholderString())
+        {
+            self.setPlaceholderAttributedString(Some(&string(
+                &value.to_string(),
+                &self
+                    .font()
+                    .unwrap_or_else(|| NSFont::systemFontOfSize(13.0)),
+                p.text,
+            )));
+        }
         self.editor_colors();
     }
     fn editor_colors(&self) {

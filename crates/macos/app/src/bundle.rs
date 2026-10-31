@@ -9,7 +9,7 @@ use tigertype_backend::{
 pub const INFO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>local.tigertype.inputmethod</string>
+<key>CFBundleIdentifier</key><string>local.inputmethod.tigertype</string>
 <key>CFBundleName</key><string>TigerType 虎码</string>
 <key>CFBundleDisplayName</key><string>TigerType 虎码</string>
 <key>CFBundleExecutable</key><string>tigertype</string>
@@ -21,7 +21,7 @@ pub const INFO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <key>LSUIElement</key><true/><key>LSBackgroundOnly</key><false/>
 <key>InputMethodConnectionName</key><string>TigerType_Connection</string>
 <key>InputMethodServerControllerClass</key><string>TigerTypeInputController</string>
-<key>TISInputSourceID</key><string>local.tigertype.inputmethod</string>
+<key>TISInputSourceID</key><string>local.inputmethod.tigertype</string>
 <key>TISIntendedLanguage</key><string>zh-Hans</string>
 <key>tsInputMethodCharacterRepertoireKey</key><array><string>Hans</string><string>Hant</string></array>
 <key>tsInputMethodIconFileKey</key><string>TigerTypeTemplate.png</string>
@@ -178,12 +178,22 @@ pub fn read(root: &Path, file: &File) -> Result<Vec<u8>> {
     if file.path == EXECUTABLE {
         executable(&bytes)?;
     }
-    if file.path == "Contents/Info.plist" && bytes != INFO.as_bytes() {
-        return Err("Info.plist 与产品契约不符".into());
-    }
     Ok(bytes)
 }
 pub fn inspect(root: &Path) -> Result<Manifest> {
+    let manifest = inspect_existing(root)?;
+    let info = manifest
+        .files
+        .iter()
+        .find(|file| file.path == "Contents/Info.plist")
+        .unwrap();
+    if read(root, info)? != INFO.as_bytes() {
+        return Err("Info.plist 与产品契约不符".into());
+    }
+    Ok(manifest)
+}
+/// 旧包按自身完整摘要校验；升级不能要求旧声明已等于新声明，来源包仍用 inspect 严格检查。
+pub fn inspect_existing(root: &Path) -> Result<Manifest> {
     let manifest: Manifest =
         serde_json::from_slice(&storage::read_file(&root.join(MANIFEST), 64 * 1024)?)?;
     validate_manifest(&manifest)?;
@@ -307,6 +317,26 @@ fn replace_with(
 mod tests {
     use super::*;
     #[test]
+    fn input_method_identifier_is_a_middle_segment_and_matches_the_server() {
+        let value = |key| {
+            INFO.split_once(&format!("<key>{key}</key><string>"))
+                .unwrap()
+                .1
+                .split_once("</string>")
+                .unwrap()
+                .0
+        };
+        let identifier = value("CFBundleIdentifier");
+        assert!(
+            identifier.contains(".inputmethod."),
+            "系统输入源识别要求 inputmethod 是中间独立段"
+        );
+        assert!(!identifier.ends_with('.'));
+        assert_eq!(value("TISInputSourceID"), identifier);
+        #[cfg(target_os = "macos")]
+        assert_eq!(identifier, tigertype_macos_input_method::appkit::IDENTIFIER);
+    }
+    #[test]
     fn user_copy_conflict_is_rejected_without_removing_it() -> Result<()> {
         let home = resources::new_directory(
             &std::env::temp_dir().canonicalize()?,
@@ -403,12 +433,29 @@ mod tests {
         )?;
         assert_eq!(inspect(&target)?.files.len(), expected()?.len());
         assert!(assemble(&repository, &binary, &target, b"x", b"x").is_err());
+        // 旧版声明保持自身摘要一致即可被替换，但不能作为新版来源安装。
+        let previous_info = INFO.replace("<string>0.1.0</string>", "<string>0.0.1</string>");
+        fs::write(target.join("Contents/Info.plist"), &previous_info)?;
+        assert!(
+            inspect_existing(&target).is_err(),
+            "未更新摘要的旧包必须拒绝"
+        );
+        let mut manifest: Manifest = serde_json::from_slice(&fs::read(target.join(MANIFEST))?)?;
+        *manifest
+            .files
+            .iter_mut()
+            .find(|f| f.path == "Contents/Info.plist")
+            .unwrap() = entry("Contents/Info.plist", previous_info.as_bytes());
+        fs::write(target.join(MANIFEST), serde_json::to_vec_pretty(&manifest)?)?;
+        inspect_existing(&target)?;
+        assert!(inspect(&target).is_err());
         // 只破坏刚复制的合成包，仓库原始码表始终只读。
         fs::OpenOptions::new()
             .append(true)
             .open(target.join("Contents/Resources/tiger/tiger.dict.yaml"))?
             .write_all(b"corrupt")?;
         assert!(inspect(&target).is_err());
+        assert!(inspect_existing(&target).is_err());
         println!(
             "完整锁定资源复制与损坏拒绝通过；非可安装包：{}",
             target.display()

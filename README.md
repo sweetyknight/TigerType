@@ -26,10 +26,10 @@ Windows Rust 专用虎码输入法项目：默认单字输入，可在设置切�
 
 共享不等于全部平台无关：backend 的安全存储按 Windows/macOS 实现；进程和线程由各平台 app 组装。候选窗归 input-method，不混进查字/设置 UI。依赖表与进程/线程模型只维护在[实施方案](docs/implementation-plan.md#多平台架构)。
 
-原始资源在 `resources`，Windows 安装定义在 `installer/windows`。`target`、`artifacts`、`.cache`、`vendor` 是本地生成物或缓存，不是产品源码；不为 Linux 或未实现的 Mac app 建空目录。
+原始资源在 `resources`，Windows 安装定义在 `installer/windows`。`target`、`artifacts`、`.cache`、`vendor` 是本地生成物或缓存，不是产品源码；不为未实现的组件建空目录。
 
 ## 构建和检查
-需要 Windows x64、锁定 Rust 1.94.1、MSVC 工具链与 i686-pc-windows-msvc 目标。首次准备缓存可运行 `cargo fetch --locked`；之后离线检查，不自动下载原词表或引擎。两种 MSVC 目标经 `.cargo/config.toml` 静态链接 CRT，产物不依赖 VC++ 运行库。
+使用锁定 Rust 1.99.1。Windows 需要 x64 系统、MSVC 工具链与 i686-pc-windows-msvc 目标；Mac 需要 Apple 芯片、macOS 13+ 与 Xcode Command Line Tools。首次准备缓存可运行 `cargo fetch --locked`；之后离线检查，不自动下载原词表或引擎。两种 MSVC 目标经 `.cargo/config.toml` 静态链接 CRT，产物不依赖 VC++ 运行库。
 
 ```powershell
 cargo run --locked --offline -p tigertype-dev --example check
@@ -47,7 +47,7 @@ Windows 常规测试执行输入边界、进程内通道、固定工作线程、
 在有图形登录会话的 Mac 上单独运行（本机架构、无注册/启用输入法）：
 
 ```sh
-# 主线程检查原生按键/标记文本、隐藏窗口、合成事件与异步回复，离屏 PNG 输出到新建临时目录。
+# 主线程检查原生按键/标记文本、隐藏窗口、隔离 IMK 服务/代理与异步回复，离屏 PNG 输出到新建临时目录。
 cargo test --locked --offline -p tigertype-macos-ui -p tigertype-macos-input-method --test appkit
 # 人工视觉/交互对照：只用合成资料，保存/载入仅在内存，配置文件打开会失败。
 cargo run --locked --offline -p tigertype-dev --example macos_views
@@ -58,7 +58,7 @@ cargo run --locked --offline -p tigertype-dev --example macos_views
 在 Apple 芯片 Mac 的图形登录会话中，准备锁定缓存后：
 
 ```sh
-# 本机执行共享/Mac 测试（含 IMK 合成客户端），对两个 Windows 目标只做 Clippy。
+# 本机检查整个工作区并执行共享/Mac 测试（含 IMK 合成客户端），对两个 Windows 目标只做 Clippy。
 cargo run --locked --offline -p tigertype-dev --example check
 # 原生图标离屏检查，不安装；输出 icns/PNG 到新建临时目录。
 cargo test --locked --offline -p tigertype-macos-app --test native
@@ -70,7 +70,7 @@ sudo target/package/TigerType.app/Contents/MacOS/tigertype install
 sudo '/Library/Input Methods/TigerType.app/Contents/MacOS/tigertype' uninstall
 ```
 
-首次安装后注销重登，在系统设置中手动添加 TigerType 虎码。默认最低 macOS 13；最终系统版本兼容、链接器签名加载、真实上屏与升级恢复必须在目标 Mac 验收。安装失败保留 staging/旧包证据，不要手工批量清理。
+首次安装后保存工作并注销重登，在“系统设置 → 键盘 → 文本输入 → 编辑”中手动添加 TigerType 虎码；复制应用包或成功打包不等于系统已发现输入法。`sudo` 要求管理员密码时，在自己的交互终端输入，不把密码写入命令、日志或聊天。默认最低 macOS 13；最终系统版本兼容、链接器签名加载、真实上屏与升级恢复必须在目标 Mac 验收。安装失败保留 staging/旧包证据，不要手工批量清理。
 
 统一入口显式运行 lib/bin/integration 测试并单列 doctest，避免 Windows 工作区特性合并时重链接正在运行的 `check.exe`；所有目标仍经 Clippy，DLL 探针仍由集成测试构建/执行。
 
@@ -146,7 +146,9 @@ cargo run --locked --offline -p tigertype-windows-app -- lookup-window
 - 霞鹜文楷、TumanPUA：虎码官网盘 <https://huma.ysepan.com/> 的“06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z”，取其中 `LXGWWenKaiGBScreen.ttf` 与 `TumanPUA.ttf`。
 - Cascadia Mono：<https://github.com/microsoft/cascadia-code/releases/download/v2407.24/CascadiaCode-2407.24.zip> 中的 `ttf/CascadiaMono.ttf`。
 
-安装包保留三个全机字体安装项，另把按 SHA256 命名的文楷原件放到 Windows DLL/EXE 旁供私有加载。debug 构建使用编译时确定的仓库原件；release 构建必须带上私有副本，不能只复制 EXE/DLL。同摘要副本不覆盖；若它被破坏，须移除损坏副本再修复安装。下列用户级安装命令仍可供其他程序使用，但输入法拆分不依赖此操作：
+macOS 的 `install` 同时把已校验文楷安装到 `/Library/Fonts/LXGWWenKaiGBScreen.ttf`，供 Codex 等宿主显示“𤛭、𨰻、𪚥”等扩展汉字；输入法内仍使用随包私有加载。已有相同字节时不改动，同名不同内容或不安全文件则拒绝覆盖。字体先完整写入临时文件再原子发布；安装中断可能留下 `.TigerType-font-*.tmp`，不把它当成有效字体。卸载保留共享字体；字体安装后仍显示缺字框的应用需重新打开。文楷不覆盖全部 Unicode 汉字。
+
+Windows 安装包保留三个全机字体安装项，另把按 SHA256 命名的文楷原件放到 DLL/EXE 旁供私有加载。debug 构建使用编译时确定的仓库原件；release 构建必须带上私有副本，不能只复制 EXE/DLL。同摘要副本不覆盖；若它被破坏，须移除损坏副本再修复安装。下列用户级安装命令仍可供其他程序使用，但输入法拆分不依赖此操作：
 
 ```powershell
 cargo run --locked --offline -p tigertype-windows-app -- install-fonts 'D:\Projects\TigerType\resources\fonts'
