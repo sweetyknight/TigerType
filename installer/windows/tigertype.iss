@@ -48,7 +48,7 @@ Name: "chs"; MessagesFile: "{#Root}\installer\windows\ChineseSimplified.isl"
 
 [Messages]
 ApplicationsFound2=以下程序仍在使用旧版 TigerType，不重新打开就只能输入英文。建议让安装程序关闭它们；支持的程序会在安装完成后自动重新打开，其余请手动重开。
-FinishedLabel=TigerType 已安装，输入后台已启动并会随登录自动启动。%n%n请在“设置 → 时间和语言 → 语言和区域 → 中文(简体) → 语言选项 → 键盘”中添加“TigerType 虎码”。查字与设置可从开始菜单打开。%n%n升级时未关闭的程序须重新打开才会用上新版本。
+FinishedLabel=TigerType 已安装，输入后台已启动并会随登录自动启动。%n%n请在“设置 → 时间和语言 → 语言和区域 → 中文(简体) → 语言选项 → 键盘”中添加“TigerType 虎码”。查字与设置可从开始菜单打开。%n%n升级时未关闭的程序须重新打开才会用上新版本；首次安装生僻字字体后如仍缺字，请注销重登以更新字体回退。
 
 [Files]
 ; 进程私有字体独立于系统 Fonts；摘要文件名避免覆盖仍被旧宿主使用的版本。
@@ -73,6 +73,10 @@ Source: "{#Root}\resources\tiger\opencc\TSCharacters.txt"; DestDir: "{app}\tiger
 Source: "{#Root}\resources\fonts\LXGWWenKaiGBScreen.ttf"; DestDir: "{autofonts}"; FontInstall: "LXGW WenKai GB Screen"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "{#Root}\resources\fonts\CascadiaMono.ttf"; DestDir: "{autofonts}"; FontInstall: "Cascadia Mono"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "{#Root}\resources\fonts\TumanPUA.ttf"; DestDir: "{autofonts}"; FontInstall: "TumanPUA"; Flags: onlyifdoesntexist uninsneveruninstall
+; 天珩三个分卷补齐锁定码表的基本区与扩展汉字，默认安装供候选窗和上屏宿主回退。
+Source: "{#Root}\resources\fonts\TH-Tshyn-P0.ttf"; DestDir: "{autofonts}"; FontInstall: "TH-Tshyn-P0"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}\resources\fonts\TH-Tshyn-P1.ttf"; DestDir: "{autofonts}"; FontInstall: "TH-Tshyn-P1"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}\resources\fonts\TH-Tshyn-P2.ttf"; DestDir: "{autofonts}"; FontInstall: "TH-Tshyn-P2"; Flags: onlyifdoesntexist uninsneveruninstall
 
 [InstallDelete]
 ; 旧版的 JSON 数据包已由 tiger 码表目录取代。
@@ -86,6 +90,14 @@ Type: files; Name: "{app}\*.old"
 [Registry]
 ; 每个用户登录时以其普通权限启动自己的后台（数据在各自 %APPDATA%\TigerType）。
 Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "TigerType"; ValueData: """{app}\tigertype.exe"" serve"; Flags: uninsdeletevalue
+; 仅为产品的文楷/楷体补充 GDI 回退，不导入字体包对系统、Office、IE 的全局覆盖；已有自定义项保留。
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink"; ValueType: multisz; ValueName: "LXGW WenKai GB Screen"; ValueData: "TH-Tshyn-P0.ttf,TH-Tshyn-P0{break}TH-Tshyn-P2.ttf,TH-Tshyn-P2{break}TH-Tshyn-P1.ttf,TH-Tshyn-P1"; Flags: createvalueifdoesntexist
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink"; ValueType: multisz; ValueName: "KaiTi"; ValueData: "TH-Tshyn-P0.ttf,TH-Tshyn-P0{break}TH-Tshyn-P2.ttf,TH-Tshyn-P2{break}TH-Tshyn-P1.ttf,TH-Tshyn-P1"; Flags: createvalueifdoesntexist
+; 非 BMP 汉字须使用代理平面回退：扩展 B–F/I 在平面 2，G/H/J 在平面 3（天珩 P1 文件）。
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\LanguagePack\SurrogateFallback\LXGW WenKai GB Screen"; ValueType: string; ValueName: "Plane2"; ValueData: "TH-Tshyn-P2"; Flags: createvalueifdoesntexist
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\LanguagePack\SurrogateFallback\LXGW WenKai GB Screen"; ValueType: string; ValueName: "Plane3"; ValueData: "TH-Tshyn-P1"; Flags: createvalueifdoesntexist
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\LanguagePack\SurrogateFallback\KaiTi"; ValueType: string; ValueName: "Plane2"; ValueData: "TH-Tshyn-P2"; Flags: createvalueifdoesntexist
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\LanguagePack\SurrogateFallback\KaiTi"; ValueType: string; ValueName: "Plane3"; ValueData: "TH-Tshyn-P1"; Flags: createvalueifdoesntexist
 
 [Icons]
 Name: "{autoprograms}\TigerType 查字与设置"; Filename: "{app}\tigertype.exe"; Parameters: "lookup-window"; IconFilename: "{app}\tigertype.ico"; Comment: "查字、设置；后台未运行时一并启动"

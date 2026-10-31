@@ -75,6 +75,29 @@ fn workspace_architecture_and_documentation() -> Result<()> {
         String::from_utf8_lossy(&eol.stderr)
     );
     policy::raw_resources(std::str::from_utf8(&eol.stdout)?, &expected)?;
+    let script = std::fs::read_to_string(root.join("installer/windows/tigertype.iss"))?;
+    policy::installed_fonts(&script, &fonts)?;
+    // 删资源、装错位置或改为可选项都不能被当成默认安装通过。
+    for font in fonts["fonts"].as_array().unwrap() {
+        let removed = script
+            .lines()
+            .filter(|line| !line.contains(font["path"].as_str().unwrap()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(policy::installed_fonts(&removed, &fonts).is_err());
+    }
+    for replacement in [
+        r#"DestDir: "{app}";"#,
+        r#"DestDir: "{autofonts}"; Tasks: optional;"#,
+    ] {
+        assert!(
+            policy::installed_fonts(
+                &script.replace(r#"DestDir: "{autofonts}";"#, replacement),
+                &fonts
+            )
+            .is_err()
+        );
+    }
     Ok(())
 }
 

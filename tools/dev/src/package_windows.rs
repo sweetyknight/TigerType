@@ -205,7 +205,9 @@ mod tests {
                 .map(|l| format!("{l}\n"))
                 .collect()
         };
-        assert!(check_script(&without("TumanPUA.ttf"), &locked).is_err());
+        for font in &locked {
+            assert!(check_script(&without(&font.path), &locked).is_err());
+        }
         assert!(check_script(&without("DestName: \"{#PrivateFont}\""), &locked).is_err());
         assert!(check_script(&without("PY_c.dict.yaml"), &locked).is_err());
         let flattened = script.replace(

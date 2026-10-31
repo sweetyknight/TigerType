@@ -60,7 +60,7 @@ cargo run --locked --offline -p tigertype-dev --example macos_views
 ```sh
 # 本机检查整个工作区并执行共享/Mac 测试（含 IMK 合成客户端），对两个 Windows 目标只做 Clippy。
 cargo run --locked --offline -p tigertype-dev --example check
-# 原生图标离屏检查，不安装；输出 icns/PNG 到新建临时目录。
+# 原生图标、全码表字体覆盖与四个缺字回退检查，不安装；输出 icns/PNG 到新建临时目录。
 cargo test --locked --offline -p tigertype-macos-app --test native
 # 只构建本机 ARM64 包，链接后不修改可执行文件；不调用 codesign/lipo/iconutil。
 cargo run --locked --offline -p tigertype-dev --example package
@@ -141,14 +141,15 @@ cargo run --locked --offline -p tigertype-windows-app -- lookup-window
 
 ## 随包字体
 
-候选窗与查字字形默认用霞鹜文楷屏幕阅读版（虎码融合字根版），独立编码与序号用 Cascadia Mono；候选注释（拆分及其内嵌编码）、设置预览的注释与查字拆分只使用经校验并进程私有加载的 LXGW WenKai GB Screen，不跟随候选字体选择，不依赖系统安装；三者按 `resources/fonts.lock.json` 锁定大小与 SHA256，文件随仓库放在 `resources/fonts`（仅限个人本地使用），来源如下，更换版本时才需重新取得。楷体与微软雅黑 UI 是 Windows 自带的微软字体，不随包分发；缺楷体时回退微软雅黑 UI。拆分按实际绘制的字体与排版 API 测量宽度；私有字体副本缺失、被篡改或加载失败时初始化报错，不用系统字体替代。字体只在 COM 对象创建/后台启动或 IMK 启动前加载，按键与绘制不读文件。
+候选窗与查字字形默认用霞鹜文楷屏幕阅读版（虎码融合字根版），独立编码与序号用 Cascadia Mono；候选注释（拆分及其内嵌编码）、设置预览的注释与查字拆分只使用经校验并进程私有加载的 LXGW WenKai GB Screen，不跟随候选字体选择，不依赖系统安装。生僻字由天珩全字库 5.0.0 的 P0/P1/P2 分卷补齐。六份字体按 `resources/fonts.lock.json` 锁定大小与 SHA256，原始文件随仓库放在 `resources/fonts`（仅限个人本地使用），来源如下，更换版本时才需重新取得。楷体与微软雅黑 UI 是 Windows 自带的微软字体，不随包分发；缺楷体时回退微软雅黑 UI。拆分按实际绘制的字体与排版 API 测量宽度；私有字体副本缺失、被篡改或加载失败时初始化报错，不用系统字体替代。字体只在 COM 对象创建/后台启动或 IMK 启动前加载，按键与绘制不读文件。
 
 - 霞鹜文楷、TumanPUA：虎码官网盘 <https://huma.ysepan.com/> 的“06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z”，取其中 `LXGWWenKaiGBScreen.ttf` 与 `TumanPUA.ttf`。
+- 天珩全字库：同一官网包内 `TH-Tshyn-5.0.0.7z` 的 `TH-Tshyn-P0.ttf`、`TH-Tshyn-P1.ttf`、`TH-Tshyn-P2.ttf`；两层压缩包与原件摘要记录在锁定清单。P0 补基本区，P2 补平面 2，P1 补平面 3 汉字；P16 对当前码表无新增覆盖，不随包。原附说明禁止商业用途，资源整体仍不公开分发。
 - Cascadia Mono：<https://github.com/microsoft/cascadia-code/releases/download/v2407.24/CascadiaCode-2407.24.zip> 中的 `ttf/CascadiaMono.ttf`。
 
-macOS 的 `install` 同时把已校验文楷安装到 `/Library/Fonts/LXGWWenKaiGBScreen.ttf`，供 Codex 等宿主显示“𤛭、𨰻、𪚥”等扩展汉字；输入法内仍使用随包私有加载。已有相同字节时不改动，同名不同内容或不安全文件则拒绝覆盖。字体先完整写入临时文件再原子发布；安装中断可能留下 `.TigerType-font-*.tmp`，不把它当成有效字体。卸载保留共享字体；字体安装后仍显示缺字框的应用需重新打开。文楷不覆盖全部 Unicode 汉字。
+macOS 的 `install` 默认将清单中全部六份字体安装到 `/Library/Fonts`，供候选窗及 Codex 等上屏宿主自动回退；仅 CGFont 内存私有注册不会让新增字体进入系统自动回退。已有相同字节时不改动，同名不同内容或不安全文件则拒绝覆盖。字体先完整写入临时文件再原子发布；安装中断可能留下 `.TigerType-font-*.tmp`，不把它当成有效字体。卸载保留共享字体；字体安装后仍显示缺字框的应用需重新打开。
 
-Windows 安装包保留三个全机字体安装项，另把按 SHA256 命名的文楷原件放到 DLL/EXE 旁供私有加载。debug 构建使用编译时确定的仓库原件；release 构建必须带上私有副本，不能只复制 EXE/DLL。同摘要副本不覆盖；若它被破坏，须移除损坏副本再修复安装。下列用户级安装命令仍可供其他程序使用，但输入法拆分不依赖此操作：
+Windows 安装包默认全机安装全部六份字体，另把按 SHA256 命名的文楷原件放到 DLL/EXE 旁供私有加载。仅为文楷与楷体登记 `FontLink/SystemLink` 和平面 2/3 的 `SurrogateFallback`，已有自定义项保留，卸载时与字体一起保留；不导入上游修改系统其他字体、Office 或 IE 的注册表文件。首次安装回退仍未生效时须注销重登。debug 构建使用编译时确定的仓库原件；release 构建必须带上私有副本，不能只复制 EXE/DLL。同摘要副本不覆盖；若它被破坏，须移除损坏副本再修复安装。下列用户级命令安装清单中的字体，但不写管理员级 GDI 回退项，不能替代完整安装包：
 
 ```powershell
 cargo run --locked --offline -p tigertype-windows-app -- install-fonts 'D:\Projects\TigerType\resources\fonts'
@@ -157,6 +158,8 @@ cargo test --locked --offline -p tigertype-windows-app --lib fonts -- --ignored
 ```
 
 命令先核对全部字体与清单一致才开始，复制到 `%LOCALAPPDATA%\Microsoft\Windows\Fonts` 并登记到当前用户；已有同名而内容不同的文件不覆盖，已装过的不改动。之后新开的程序即可使用；UWP 宿主能否看到当前用户安装的字体尚未实测。
+
+后续 Linux 安装器也须默认安装同一锁定清单、更新字体缓存，并验证候选窗及上屏宿主的回退；目前只列接入要求，未实现 Linux 安装。字体覆盖和平台实际显示的验证范围见[项目状态](docs/project-status.md)。
 
 ## 手动运行跨进程后台
 

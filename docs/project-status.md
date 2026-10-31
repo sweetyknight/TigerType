@@ -48,6 +48,16 @@
 - 合成临时目录的发布、重复安装、内容冲突、符号/硬链接、目录权限和中断残留反例通过（`shared-font-install-tests.log`）；原生文楷覆盖三个样例断言通过（`shared-font-native.log`）。隔离探针确认同字节 URL 已注册时产品的私有注册仍成功（`font-registration.log`）。完整门禁通过（`shared-font-unified-check.log`），Release 包已生成并由用户安装（`shared-font-package.log`）。
 - 安装后可执行文件 SHA256 `0941ccaf3c656474316257b139fbc81fd2f5bef76d0fb13869869a5db313310d`、清单 SHA256 `af52ea9cd61b1be7d6cf6205221bc72f4cce9b9f38e1a49b049e07c0b5f530c0` 均与新包相同；系统文楷为 root:admin/644，SHA256 与锁定原件一致（`shared-font-installed.log`）。新进程中系统可见文楷覆盖三个字，“𤛭”的默认回退由 LastResort 变为文楷（`shared-font-after.log`）；全机安装后的私有字体原生回归通过（`shared-font-installed-native.log`）。用户随后明确确认“已经可以显示了”，本次 Codex 输入与三个缺字样例已获得现场验证；不推广为所有宿主、全部 Unicode 字形或长期验收通过。
 
+## 本批：Mac/Windows 生僻字字体补齐
+
+- 用户截图中 `agt` 第 4、5 项为 𡈾（U+2123E）、𡉘（U+21258），`isi` 第 3、4 项为 𣥢（U+23962）、𱼷（U+31F37）；与锁定码表及拆分对应，问号方框是缺字占位符。
+- 只读核对确认系统与应用包中的文楷 SHA256 均与仓库原件一致。隔离 Rust 探针逐字枚举本机可见字体，并检查三份随包字体：四字均无覆盖，从文楷发起的 CoreText 回退均为 LastResort。证据在 `artifacts/macos-candidate-font-20261031/coverage.rs`、`coverage.log`。
+- 官网“06 其他资源/虎码必装字体！”仍提供 `虎码方案必装字体 2026.08.15.7z`。HTTPS 下载 SHA256 与既有来源记录一致；内含此前遗漏的天珩全字库 5.0.0。原始 P0/P1/P2 已存入 `resources/fonts` 并加入 Git 跟踪，清单锁定文件大小、SHA256 与两层压缩包来源；合计新增 66,742,612 字节。P16 对当前码表无新增覆盖，未引入 Emoji、复杂文本字体、上游 EXE 或注册表文件。
+- 逐字覆盖实测：文楷缺少 72,406 个码表单字，天珩 P0/P2/P1 分别补齐 104/59,209/13,093 个，全部 103,460 个不同单字覆盖；含词与简繁映射为 103,461 字符。原生回归先由产品入口校验/私有加载，再在测试进程以 URL 注册模拟安装后的字体发现；文楷、Kaiti SC、Helvetica 对四个现场缺字均回退到天珩且取得真实 glyph。仅 CGFont 内存私有注册仍返回 LastResort，不能省掉系统字体安装。证据在 `artifacts/macos-font-bundle-20261031/inspect.log`、`native-coverage.log`。
+- Mac 安装改为发布清单全部字体；同字节复用、冲突/路径越界/链接/损坏拒绝与中断保护继续保留。旧包允许字体少于新清单，但必需程序/码表与已知路径、逐文件自身摘要仍检查；新包来源必须含完整锁定字体，防止新增字体阻断升级。合成多字体安装与边界反例通过（`install-and-bundle.log`）。Windows 安装默认加入三个天珩分卷，并仅为文楷/楷体声明 GDI 字体链接及平面 2/3 回退，保留已有自定义项；Mac 普通门禁也检查 Windows 字体不可缺项、装错目录或改为可选。
+- Linux 尚无安装器，本批在方案和约束中明确同一字体清单的默认安装、缓存更新与候选/宿主回退验收，不建立占位实现。本机系统安装尚未更新，Windows 安装器编译、x64/x86 真机显示和 Linux 实现均未验收；字体覆盖通过不等于所有宿主实际显示通过。
+- 统一门禁通过（`unified-check.log`）：架构/文档、fmt、本机 Clippy、共享/Mac 常规与原生测试，以及 Windows x64/x86 类型检查。完整资源组包/损坏拒绝与旧包缺新增字体的升级反例单列通过（`complete-resource.log`）。ARM64 Release 包已生成并逐文件校验（`package.log`），程序 SHA256 `633f70fde87309a5d657f18819580ede9ace36ff302fea40d8454939f106735e`、清单 SHA256 `378e2c3e8c5a1bcf74d271f79495e0927023934bc90e6cf8dc663b4e1d85f894`；尚未安装。
+
 ## 本批：Mac 原生验证与修复
 
 - 统一入口实际执行架构/文档、fmt、本机 Clippy、共享/Mac 常规与文档测试，以及 Windows x64/x86 类型检查。IMK 子类注册、合成文本客户端、UTF-16、菜单字典转发、候选点击失效、隐藏窗口、设置异步回复、固定工作线程/热重载、Mac 文件租约/链接拒绝/事务备份与 kqueue 子进程等待已在 Mac 执行；不把这些合成测试当作真实宿主上屏。

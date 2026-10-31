@@ -376,6 +376,27 @@ pub fn raw_resources(listing: &str, expected: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// 两平台共用字体清单；在 Mac 门禁也检查 Windows 默认安装声明，防止只更新本机安装器。
+pub fn installed_fonts(script: &str, fonts: &Value) -> Result<()> {
+    for font in array(fonts, "fonts")? {
+        let file = format!(r#"resources\fonts\{}""#, string(font, "path")?);
+        let family = format!(r#"FontInstall: "{}";"#, string(font, "family")?);
+        if !script.lines().any(|line| {
+            line.starts_with("Source:")
+                && line.contains(&file)
+                && line.contains(&family)
+                && line.contains(r#"DestDir: "{autofonts}";"#)
+                && line.contains("uninsneveruninstall")
+                && !["Tasks:", "Components:", "Check:"]
+                    .iter()
+                    .any(|s| line.contains(s))
+        }) {
+            return Err(format!("Windows 须默认全机安装并保留锁定字体：{file}"));
+        }
+    }
+    Ok(())
+}
+
 pub fn links(root: &Path, file: &Path, text: &str) -> Result<()> {
     let mut fenced = false;
     for line in text.lines() {

@@ -339,12 +339,19 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn lock_lists_the_three_bundled_fonts_with_hashes() -> Result<()> {
+    fn lock_includes_the_bundled_fonts_and_rare_character_fallbacks() -> Result<()> {
         let fonts = locked()?;
         let names: Vec<_> = fonts.iter().map(|f| f.family.as_str()).collect();
         assert_eq!(
             names,
-            ["LXGW WenKai GB Screen", "Cascadia Mono", "TumanPUA"]
+            [
+                "LXGW WenKai GB Screen",
+                "Cascadia Mono",
+                "TumanPUA",
+                "TH-Tshyn-P0",
+                "TH-Tshyn-P1",
+                "TH-Tshyn-P2",
+            ]
         );
         assert!(fonts.iter().all(|f| f.size > 0 && f.sha256.len() == 64));
         Ok(())

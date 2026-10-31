@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "license_status": "personal-use-only; LXGW WenKai and Cascadia Mono are SIL OFL 1.1, TumanPUA unconfirmed",
+  "license_status": "personal-use-only; LXGW WenKai and Cascadia Mono are SIL OFL 1.1, TumanPUA unconfirmed; TH-Tshyn 5.0.0 readme prohibits commercial use, redistribution rights unconfirmed",
   "fonts": [
     {
       "path": "LXGWWenKaiGBScreen.ttf",
@@ -22,6 +22,27 @@
       "sha256": "9239f5a7c00a5301a713237975c7b3b4f746f8c07647fb2dc003e1603fa00b00",
       "family": "TumanPUA",
       "source": "https://huma.ysepan.com/ 06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z"
+    },
+    {
+      "path": "TH-Tshyn-P0.ttf",
+      "size": 20098196,
+      "sha256": "303602ec95cc3f60edcf33289b5de4174d30a3e0c8f5be8f4e7bcdfebb500e28",
+      "family": "TH-Tshyn-P0",
+      "source": "https://huma.ysepan.com/ 06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z（SHA256 d80340c88cb67b4881a4057b3c2fa4fb5f1ad3de2696a61f2be4bdac03cabcb7）内 TH-Tshyn-5.0.0.7z（SHA256 72a62045f8f76eeb1bc55b906ca61d0fe8dcc7798391f52bb458100e911d6b33）"
+    },
+    {
+      "path": "TH-Tshyn-P1.ttf",
+      "size": 22242532,
+      "sha256": "a748d0e0da17912b159a9b7e31af827b57f8a3f8d44d2bb552c0f6ff5ef47091",
+      "family": "TH-Tshyn-P1",
+      "source": "https://huma.ysepan.com/ 06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z（SHA256 d80340c88cb67b4881a4057b3c2fa4fb5f1ad3de2696a61f2be4bdac03cabcb7）内 TH-Tshyn-5.0.0.7z（SHA256 72a62045f8f76eeb1bc55b906ca61d0fe8dcc7798391f52bb458100e911d6b33）"
+    },
+    {
+      "path": "TH-Tshyn-P2.ttf",
+      "size": 24401884,
+      "sha256": "f99e979a53b8f68958ac6c04bc8c0ad44178ee575cd3345e05f8a56123b02b97",
+      "family": "TH-Tshyn-P2",
+      "source": "https://huma.ysepan.com/ 06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z（SHA256 d80340c88cb67b4881a4057b3c2fa4fb5f1ad3de2696a61f2be4bdac03cabcb7）内 TH-Tshyn-5.0.0.7z（SHA256 72a62045f8f76eeb1bc55b906ca61d0fe8dcc7798391f52bb458100e911d6b33）"
     }
   ]
 }

@@ -17,7 +17,6 @@ use std::{
 use tigertype_backend::{Result, resources, storage};
 const PARENT: &str = "/Library/Input Methods";
 const NAME: &str = "TigerType.app";
-const FONT_NAME: &str = "LXGWWenKaiGBScreen.ttf";
 struct Mask(libc::mode_t);
 impl Drop for Mask {
     fn drop(&mut self) {
@@ -171,8 +170,12 @@ fn fix_directories(path: &Path) -> Result<()> {
     directory.sync_all()?;
     Ok(())
 }
-/// 文楷同时供上屏宿主回退；先完整写入再独占发布，不覆盖已有字体或暴露半个字体文件。
-fn publish_font(directory: &Path, bytes: &[u8]) -> Result<()> {
+/// 字体同时供上屏宿主回退；先完整写入再独占发布，不覆盖已有字体或暴露半个字体文件。
+fn publish_font(directory: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    let name = resources::relative(name)?;
+    if name.components().count() != 1 {
+        return Err("字体目标只能是文件名".into());
+    }
     storage::reject_links(directory)?;
     let metadata = fs::metadata(directory)?;
     // SAFETY: 只读当前有效身份；系统 Fonts 默认允许 admin 写入，但 sticky 位保护 root 文件。
@@ -181,7 +184,7 @@ fn publish_font(directory: &Path, bytes: &[u8]) -> Result<()> {
     {
         return Err("字体目录属主或写权限不安全".into());
     }
-    let target = directory.join(FONT_NAME);
+    let target = directory.join(name);
     match fs::symlink_metadata(&target) {
         Ok(existing) => {
             if existing.uid() != metadata.uid()
@@ -211,6 +214,15 @@ fn publish_font(directory: &Path, bytes: &[u8]) -> Result<()> {
         return Err(std::io::Error::last_os_error().into());
     }
     fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
+/// 源包已经完整校验；安装清单中的全部字体，避免只发布文楷而遗漏生僻字回退。
+fn publish_fonts(directory: &Path, source: &Path, manifest: &bundle::Manifest) -> Result<()> {
+    for entry in &manifest.files {
+        if let Some(name) = entry.path.strip_prefix("Contents/Resources/Fonts/") {
+            publish_font(directory, name, &bundle::read(source, entry)?)?;
+        }
+    }
     Ok(())
 }
 pub fn install(source: &Path) -> Result<()> {
@@ -267,13 +279,7 @@ pub fn install(source: &Path) -> Result<()> {
     if backup.try_exists()? {
         return Err("旧恢复目录已存在，请先核对安装状态；未停止现用输入法".into());
     }
-    // 只发布锁定的文楷；输入法私有加载不变，其他应用也能显示已上屏的扩展汉字。
-    let font = manifest
-        .files
-        .iter()
-        .find(|entry| entry.path == format!("Contents/Resources/Fonts/{FONT_NAME}"))
-        .ok_or("应用包缺少文楷字体")?;
-    publish_font(Path::new("/Library/Fonts"), &bundle::read(&stage, font)?)?;
+    publish_fonts(Path::new("/Library/Fonts"), &stage, &manifest)?;
     stop(&target)?;
     bundle::replace(&stage, &target, &backup)?;
     if backup.try_exists()? {
@@ -282,7 +288,7 @@ pub fn install(source: &Path) -> Result<()> {
         remove(&parent, &backup)?;
     }
     println!(
-        "安装完成，文楷已安装供其他应用显示扩展汉字；仍缺字的应用请重新打开。首次安装请注销重登，再在系统设置中手动添加 TigerType 虎码；未自动启用或切换。"
+        "安装完成，随包字体已安装供其他应用显示扩展汉字；仍缺字的应用请重新打开。首次安装请注销重登，再在系统设置中手动添加 TigerType 虎码；未自动启用或切换。"
     );
     Ok(())
 }
@@ -292,15 +298,14 @@ pub fn uninstall() -> Result<()> {
     bundle::inspect_existing(&target)?;
     stop(&target)?;
     remove(&parent, &target)?;
-    println!(
-        "已卸载程序，保留用户数据与供其他应用使用的文楷字体；请手动移除系统设置中的输入法条目。"
-    );
+    println!("已卸载程序，保留用户数据与供其他应用使用的字体；请手动移除系统设置中的输入法条目。");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    const FONT_NAME: &str = "synthetic.ttf";
     #[test]
     fn shared_font_is_complete_idempotent_and_never_overwrites_conflicts() -> Result<()> {
         let root = resources::new_directory(
@@ -308,34 +313,73 @@ mod tests {
             "tigertype-font-install",
         )?;
         let target = root.join(FONT_NAME);
-        publish_font(&root, b"synthetic-font")?;
+        publish_font(&root, FONT_NAME, b"synthetic-font")?;
         let original = fs::metadata(&target)?;
         assert_eq!(fs::read(&target)?, b"synthetic-font");
         assert_eq!(original.mode() & 0o777, 0o644);
-        publish_font(&root, b"synthetic-font")?;
+        publish_font(&root, FONT_NAME, b"synthetic-font")?;
         assert_eq!(fs::metadata(&target)?.ino(), original.ino());
-        assert!(publish_font(&root, b"other-font").is_err());
+        assert!(publish_font(&root, FONT_NAME, b"other-font").is_err());
         assert_eq!(fs::read(&target)?, b"synthetic-font");
         // 已有符号链接、硬链接与宽松写权限均拒绝，不接管其他文件。
         fs::remove_file(&target)?;
         let other = root.join("unrelated");
         fs::write(&other, b"synthetic-font")?;
         std::os::unix::fs::symlink(&other, &target)?;
-        assert!(publish_font(&root, b"synthetic-font").is_err());
+        assert!(publish_font(&root, FONT_NAME, b"synthetic-font").is_err());
         fs::remove_file(&target)?;
         fs::hard_link(&other, &target)?;
-        assert!(publish_font(&root, b"synthetic-font").is_err());
+        assert!(publish_font(&root, FONT_NAME, b"synthetic-font").is_err());
         fs::remove_file(&target)?;
         fs::set_permissions(&root, fs::Permissions::from_mode(0o777))?;
-        assert!(publish_font(&root, b"synthetic-font").is_err());
+        assert!(publish_font(&root, FONT_NAME, b"synthetic-font").is_err());
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755))?;
         // 中断残留暂存不能被截断；目标仍须不存在，用户文件原样保留。
         let temporary = root.join(format!(".TigerType-font-{}.tmp", std::process::id()));
         fs::write(&temporary, b"interrupted")?;
-        assert!(publish_font(&root, b"synthetic-font").is_err());
+        assert!(publish_font(&root, FONT_NAME, b"synthetic-font").is_err());
         assert!(!target.try_exists()?);
         assert_eq!(fs::read(&temporary)?, b"interrupted");
         assert_eq!(fs::read(&other)?, b"synthetic-font");
+        Ok(())
+    }
+    #[test]
+    fn publishes_every_manifest_font_and_rejects_escape_or_corruption() -> Result<()> {
+        let root = resources::new_directory(
+            &std::env::temp_dir().canonicalize()?,
+            "tigertype-font-manifest",
+        )?;
+        let source = root.join("source");
+        let target = root.join("fonts");
+        fs::create_dir_all(source.join("Contents/Resources/Fonts"))?;
+        fs::create_dir(&target)?;
+        let mut manifest = bundle::Manifest { files: Vec::new() };
+        // 采用真实清单的文件名但使用合成字节，确保新字体自动进入同一发布路径。
+        for entry in bundle::locked()? {
+            if entry.path.starts_with("Contents/Resources/Fonts/") {
+                let bytes = entry.path.as_bytes();
+                fs::write(source.join(&entry.path), bytes)?;
+                manifest.files.push(bundle::entry(&entry.path, bytes));
+            }
+        }
+        publish_fonts(&target, &source, &manifest)?;
+        assert_eq!(fs::read_dir(&target)?.count(), manifest.files.len());
+        for entry in &manifest.files {
+            let name = Path::new(&entry.path).file_name().unwrap();
+            assert_eq!(fs::read(target.join(name))?, entry.path.as_bytes());
+        }
+        publish_fonts(&target, &source, &manifest)?;
+        fs::write(source.join(&manifest.files[0].path), b"corrupted")?;
+        assert!(publish_fonts(&target, &source, &manifest).is_err());
+        for name in [
+            "../outside.ttf",
+            "/outside.ttf",
+            "nested/a.ttf",
+            r"nested\a.ttf",
+        ] {
+            assert!(publish_font(&target, name, b"synthetic").is_err());
+        }
+        assert!(!root.join("outside.ttf").exists());
         Ok(())
     }
     #[test]

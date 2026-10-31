@@ -85,6 +85,8 @@ Windows UI 内部同样单向：events 组装 panels、window、tray；panels �
 ### Linux 预留
 开工前另行批准框架：IBus 的输入法进程形态，或 Fcitx5 插件加独立后台形态（C++ 胶水须另批）。届时在 Linux 分组新增有实现的输入法、视图和组装组件；只有确需跨进程时增加传输，不把 Windows IPC 扩成预设的万能传输。Wayland 下候选定位优先服从框架面板能力，无蓝色主题限制另行确认。Unix 文件安全原语可复用 macOS 的实现，但当前不建空实现。
 
+Linux 安装器必须沿用 `resources/fonts.lock.json` 的原始字体，默认安装文楷、字根/等宽字体及天珩 P0/P1/P2；按发行版字体目录规则发布并更新 fontconfig 缓存，不从网络临时取资源。安装/升级校验大小、SHA256 和路径边界，保留冲突文件及卸载后供其他应用使用的字体。验收须覆盖全部锁定单字、词与简繁输出，并在候选窗及真实宿主验证扩展汉字回退；不能以字体复制成功替代显示验收。
+
 ## Windows 运行模型
 本节只描述 Windows 的进程、系统回调与传输；组件职责和允许依赖以上节为准。
 
@@ -176,8 +178,8 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 候选面板：
 - 每进程一个非激活 `NSPanel`：无边框、`nonactivatingPanel`、不成为 key/main 窗口，层级高于普通窗口，集合行为含 `canJoinAllSpaces` 与 `fullScreenAuxiliary`，以覆盖全屏应用；首次需要时创建。自绘 NSView、CoreText 排版，只在快照变化时重绘；`CTFont` 按字体与字号缓存；Retina 由系统按缩放倍数处理。
 - 外观：数据取自回复中的 `InputState`（选项随带，不读盘），竖排，由 input-client 视图模型决定行、页脚与“仅多页显示翻页”，圆角与阴影由图层实现。只用主题色；“增强对比度”开启时改用系统颜色（同 Windows 高对比度例外）。
-- 字体：三个原件仍随包放在 `Contents/Resources/Fonts`。Mac 组装层在 IMK 启动前逐个安全读取并核对大小/SHA256，从同一份字节创建 CGFont，以 CTFontManagerRegisterGraphicsFont 注册到当前进程；删除 ATSApplicationFontsPath 隐式加载，避免绕过字节校验或重复注册。加载失败/名称不可用立即报错；所有显示对象销毁后注销。拆分仅用私有文楷，不采用系统回退；候选汉字楷体选项、界面 PingFang SC 和独立编码 Cascadia Mono/Menlo 不变。
-- 上屏字形由宿主绘制，进程私有字体不能补齐宿主缺字。安装器另将锁定文楷安装到 `/Library/Fonts/LXGWWenKaiGBScreen.ttf`，供其他应用回退；不更改宿主字体设置，不承诺覆盖全部 Unicode 汉字。
+- 字体：锁定清单中的六个原件随包放在 `Contents/Resources/Fonts`，天珩 P0/P1/P2 补文楷未收录的基本区及扩展汉字。Mac 组装层在 IMK 启动前逐个安全读取并核对大小/SHA256，从同一份字节创建 CGFont，以 CTFontManagerRegisterGraphicsFont 注册到当前进程；不使用 ATSApplicationFontsPath 隐式加载，避免绕过字节校验或重复注册。加载失败/名称不可用立即报错；所有显示对象销毁后注销。拆分仅用私有文楷，不采用系统回退；候选汉字楷体选项、界面 PingFang SC 和独立编码 Cascadia Mono/Menlo 不变。
+- 上屏字形由宿主绘制，进程私有字体不能补齐宿主缺字，CGFont 内存注册也不进入系统自动回退。安装器默认将清单全部字体安装到 `/Library/Fonts`，供候选窗及其他应用回退；不更改宿主字体设置。原生测试校验完整码表输出覆盖，并在进程内 URL 注册模拟安装后的字体发现，检查现场缺字的实际回退与 glyph；不承诺未收录的全部 Unicode 字形或任意宿主。
 - 位置：以 `attributes(forCharacterIndex:lineHeightRectangle:)` 取组合起点（索引 0）的行矩形（屏幕全局坐标、左下原点），全零视为宿主不知道；退路依次为光标处索引、面板正在显示时的原位置、本控制器上次的位置，都没有则不显示。macOS 没有布局变化通知，也不读系统光标或其他进程界面。macOS input-method 把左下原点坐标换算后交给 input-client 的同一摆放规则，限制在锚点所在屏幕的 `visibleFrame` 内。
 - 点击：面板不取焦点；按下与抬起落在同一行才选字，直接经进程内通道发 `Select`（绑定展示编号与快照，过期即拒绝），回复在主线程写入宿主，无需 Windows 的异步编辑会话。
 - 无障碍：面板视图实现 NSAccessibility 列表，候选项为子元素（标签为候选字与注释）；高亮变化时发送 `selectedChildrenChanged`，VoiceOver 运行时另发朗读请求；只在 VoiceOver 开启时构造子元素。
@@ -207,10 +209,10 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
   1. 校验源包：标识、可执行文件、码表与字体清单。
   2. 调用者的 `~/Library/Input Methods/TigerType.app` 若存在（用户级副本会与全机版冲突），拒绝安装并给出路径，由用户删除。
   3. 在 `/Library/Input Methods` 内建临时目录，只复制文件内容并设固定属主与权限，不带扩展属性。
-  4. 停止旧进程前，从已校验 staging 读取锁定文楷，完整写入系统字体目录的独占临时文件并落盘，以 RENAME_EXCL 原子发布；目标已有同字节则保留，内容或权限冲突、符号/硬链接均拒绝。目录须归当前 root 所有；系统 Fonts 默认的 admin 写权限仅在 sticky 保护下允许，不修改目录权限。失败保留临时证据，绝不覆盖其他字体；后续应用包替换失败时，已发布的共享字体仍保留。
-  5. 旧包核对固定文件集合、锁定资源及自身文件摘要，不要求旧 Info.plist 已等于新版声明；新来源和 staging 仍须符合新版完整契约。结束所有用户的 TigerType 进程（按可执行路径识别，SIGTERM，有界等待），把旧包改名，新包原子改名就位，再删除旧包；任一步失败都保留或恢复旧包。系统在下次使用时拉起新进程。
+  4. 停止旧进程前，从已校验 staging 逐个读取清单中的全部字体，目标仅接受文件名；完整写入系统字体目录的独占临时文件并落盘，以 RENAME_EXCL 原子发布；目标已有同字节则保留，内容或权限冲突、符号/硬链接均拒绝。目录须归当前 root 所有；系统 Fonts 默认的 admin 写权限仅在 sticky 保护下允许，不修改目录权限。失败保留临时证据，绝不覆盖其他字体；后续字体发布或应用包替换失败时，先前已发布的共享字体仍保留。
+  5. 旧包只允许已知文件，程序和码表不得缺项、须有字体；允许字体集合少于新清单，资源按自身文件摘要核对，不要求旧 Info.plist 或字体已等于新版。新来源和 staging 仍须符合当前锁定资源及完整文件集合，缺新增字体即拒绝。结束所有用户的 TigerType 进程（按可执行路径识别，SIGTERM，有界等待），把旧包改名，新包原子改名就位，再删除旧包；任一步失败都保留或恢复旧包。系统在下次使用时拉起新进程。
 - 首次安装后用户注销重登（或重启）让系统发现输入法，再在“系统设置 › 键盘 › 输入法”中手动添加“TigerType 虎码”；安装器不注册、不启用、不切换输入法。
-- 卸载：`sudo …/tigertype uninstall`，结束进程并删除 `/Library/Input Methods/TigerType.app`，保留各用户数据和供其他应用使用的文楷字体；输入法条目由用户在系统设置中移除。
+- 卸载：`sudo …/tigertype uninstall`，结束进程并删除 `/Library/Input Methods/TigerType.app`，保留各用户数据和供其他应用使用的字体；输入法条目由用户在系统设置中移除。
 - 升级与开发验证走同一安装命令；在真实系统上安装须经用户授权。
 
 开发与检查：
@@ -251,6 +253,7 @@ Mac 验收须记录实际系统版本、Kaiti SC 是否可用、随包与系统�
 - 独立 APPDATA，复用目录占用、链接拒绝、配置事务替换；不导入个人 Rime 数据。安装版后台与查字窗使用程序目录下的 `tiger` 码表目录与 `%APPDATA%\TigerType`（不存在则新建，已有目录须带所有权标记）；开发期 `serve <码表目录> <数据目录>` 仍可指定独立目录。
 - 安装包由 Inno Setup 6.7 编译（用户批准的唯一非 Rust 工具；`.iss` 只含声明与停后台、登记/改名/清理占用旧文件的少量 Pascal），Rust 打包驱动 `--example package` 先构建 release、校验码表/字体/语言文件（均在仓库内，换机克隆即可打包），并核对脚本逐个列出的字体与码表和清单一致（码表须装到 `{app}\tiger` 并保持相对路径）；安装时删除旧版的 `tiger-v1.json`。两种 MSVC 目标静态链接 CRT。安装需管理员，固定装到 Program Files（不提供改目录）；先放程序再分别以 64/32 位注册 DLL；字体全机安装；HKLM Run 登记 `serve` 使各用户登录时以普通权限启动自己的后台，安装结束以原用户身份启动一次；开始菜单只有“查字与设置”；不添加或切换键盘。`tigertype.exe` 为 GUI 子系统，从终端运行时借用父控制台，无控制台时 `serve`/`lookup-window` 失败弹错误框。升级先以原用户身份 `stop`（停止确认后等旧后台进程退出才返回）；DLL 驻留且协议严格相等，宿主不重开只能出英文，因此启用重启管理器：现名文件与历次改名的 `*.old` 一并登记检测，准备页列出占用程序，经用户同意关闭并在装完后重启支持重启的程序；不关或关不掉的，在关闭步骤之后（`BeforeInstall`）把仍被占用的旧程序与 DLL 改名并登记重启后删除，装完删除已无人使用的 `*.old`。`*.old` 不得列入 `[InstallDelete]`：它们已在重启删除队列中，Inno 会据此要求先重启；卸载先请求停止后台、注销 DLL、删除程序与自启项，占用文件重启后删除，保留用户数据。
 - TIP DLL 与后台程序须位于 Program Files，或位于已对 ALL APPLICATION PACKAGES 授予读取/执行的独立目录，否则 AppContainer 宿主无法加载；DLL 不读取数据文件。
+- Windows 安装器默认全机安装字体清单全部六项（含天珩 P0/P1/P2），普通架构门禁也检查默认安装声明及删项/可选项反例；仅为产品使用的文楷、楷体设置 GDI FontLink 与平面 2/3 的 SurrogateFallback，已有自定义项不覆盖。字体和对应回退项卸载保留；不执行上游 EXE 或导入修改系统其他字体、Office、IE 的注册表。新增字体后的真实候选、x86/x64 宿主与上屏回退须在 Windows 单列验收。
 - 注册入口为 DLL 导出的 `DllRegisterServer`/`DllUnregisterServer`（regsvr32，须管理员）：COM 类写入 HKLM\SOFTWARE\Classes（`InprocServer32`、`ThreadingModel=Apartment`），以 `ITfInputProcessorProfileMgr` 登记简体中文（0x0804）语言配置（默认启用，图标为 DLL 同目录的 `tigertype.ico`，缺图标拒绝注册；任务栏据此显示虎码图标，不再退回语言名“简体”），以 `ITfCategoryMgr` 登记键盘 TIP、沉浸式与托盘三类别；注册前要求 DLL 为绝对路径且同目录有后台程序，任一步失败回滚；注销尽力移除全部内容，重复注销时系统对未登记项的报错照实返回。x64/x86 DLL 放同一目录（x86 改名）共用一个后台，分别由 System32 与 SysWOW64 的 regsvr32 注册；32 位 COM 类经 WOW64 写入 32 位视图。注册测试只核对注册内容，并在临时私有配置单元（`RegLoadAppKeyW`）中验证读写，不写系统或用户注册表。
 
 ## 工程治理
