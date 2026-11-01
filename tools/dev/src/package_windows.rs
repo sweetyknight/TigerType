@@ -100,7 +100,7 @@ fn run() -> Result<()> {
     let iscc = Path::new(&local).join(r"Programs\Inno Setup 6\ISCC.exe");
     if !iscc.is_file() {
         return Err(format!(
-            "未找到 Inno Setup 编译器：{}（安装方法见 README）",
+            "未找到 Inno Setup 编译器：{}（安装方法见实施方案“开发命令”）",
             iscc.display()
         )
         .into());
