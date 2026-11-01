@@ -1,6 +1,6 @@
 [workspace]
 # 分组目录不是包；只登记已有实现，不为未开发的平台建立占位 crate。
-members = ["crates/shared/contracts", "crates/shared/engine", "crates/shared/input-client", "crates/shared/ui-model", "crates/shared/backend", "crates/windows/ipc", "crates/windows/fonts", "crates/windows/ui", "crates/windows/input-method", "crates/windows/app", "crates/macos/input-method", "crates/macos/ui", "crates/macos/app", "tools/dev"]
+members = ["crates/shared/contracts", "crates/shared/engine", "crates/shared/input-client", "crates/shared/ui-model", "crates/shared/backend", "crates/windows/ipc", "crates/windows/ui", "crates/windows/input-method", "crates/windows/app", "crates/macos/input-method", "crates/macos/ui", "crates/macos/app", "tools/dev"]
 resolver = "3"
 
 [workspace.package]
@@ -18,7 +18,6 @@ tigertype-backend = { path = "crates/shared/backend" }
 tigertype-ui-model = { path = "crates/shared/ui-model" }
 tigertype-windows-app = { path = "crates/windows/app" }
 tigertype-windows-ui = { path = "crates/windows/ui" }
-tigertype-windows-fonts = { path = "crates/windows/fonts" }
 tigertype-macos-input-method = { path = "crates/macos/input-method" }
 tigertype-macos-ui = { path = "crates/macos/ui" }
 tigertype-macos-app = { path = "crates/macos/app" }

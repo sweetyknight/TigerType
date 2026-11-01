@@ -89,6 +89,7 @@ fn workspace_architecture_and_documentation() -> Result<()> {
     for replacement in [
         r#"DestDir: "{app}";"#,
         r#"DestDir: "{autofonts}"; Tasks: optional;"#,
+        r#"DestDir: "{autofonts}"; Check: IsWin64;"#,
     ] {
         assert!(
             policy::installed_fonts(
@@ -416,16 +417,6 @@ fn split_components_reject_tool_back_edges_cross_platform_and_shared_platform_de
             "tigertype-backend",
         ),
         ("tigertype-dev", "tigertype-macos-ui", "objc2"),
-        (
-            "tigertype-windows-input-method",
-            "tigertype-windows-fonts",
-            "sha2",
-        ),
-        (
-            "tigertype-windows-ui",
-            "tigertype-windows-fonts",
-            "windows-sys",
-        ),
     ] {
         assert!(policy::architecture(&reach(origin, via, reached)).is_ok());
     }
@@ -446,8 +437,6 @@ fn split_components_reject_tool_back_edges_cross_platform_and_shared_platform_de
             "tigertype-windows-ui",
         ),
         ("tigertype-ui-model", "tigertype-contracts", "windows-sys"),
-        ("tigertype-windows-fonts", "sha2", "tigertype-backend"),
-        ("tigertype-windows-fonts", "sha2", "tigertype-macos-ui"),
         ("tigertype-ui-model", "tigertype-contracts", "objc2"),
         (
             "tigertype-backend",

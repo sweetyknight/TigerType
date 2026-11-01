@@ -292,6 +292,86 @@ fn system_hidden_or_covered_popup_recovers_without_stealing_focus() {
     drop(desktop);
     result.unwrap();
 }
+/// 主显示器工作区；用真实边界验证翻转与夹取，不依赖本机分辨率。
+fn primary_work() -> Rect {
+    let mut monitor = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: 输出结构大小已填写；(0,0) 总在主显示器上。
+    unsafe {
+        let primary = MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY);
+        assert!(GetMonitorInfoW(primary, &mut monitor).as_bool());
+    }
+    portable(monitor.rcWork)
+}
+
+#[test]
+fn visible_update_never_passes_through_the_raw_composition_position() {
+    // 输入框贴屏幕底部时候选窗翻到上方；先移到组合下方再翻回，屏幕上就是逐键上下跳。
+    // 候选窗按逐显示器 DPI 创建；本线程取同一上下文，核对的才是未被虚拟化的物理坐标。
+    // SAFETY: 只改本测试线程的 DPI 上下文，线程随测试结束。
+    unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let work = primary_work();
+    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let caret = |left| Rect {
+        left,
+        top: work.bottom - 30,
+        right: left + 10,
+        bottom: work.bottom - 10,
+    };
+    popup
+        .show(&state(3, 0), caret(200), HWND::default())
+        .unwrap();
+    popup.moves.borrow_mut().clear();
+    let mut next = state(2, 0);
+    next.revision += 1;
+    popup.show(&next, caret(230), HWND::default()).unwrap();
+    let moves = popup.moves.borrow().clone();
+    assert!(!moves.is_empty(), "新位置必须真正移动");
+    let height = popup.view.borrow().layout.size.cy;
+    for (x, y) in moves {
+        assert_eq!(x, 230);
+        assert_eq!(y, work.bottom - 30 - height, "不得经过未夹取的组合下方位置");
+    }
+    // 右边缘同理：不能先越出屏幕再夹回。
+    popup.moves.borrow_mut().clear();
+    let edge = Rect {
+        left: work.right - 5,
+        top: 300,
+        right: work.right,
+        bottom: 320,
+    };
+    next.revision += 1;
+    popup.show(&next, edge, HWND::default()).unwrap();
+    let width = popup.view.borrow().layout.size.cx;
+    for (x, _) in popup.moves.borrow().iter() {
+        assert_eq!(*x, work.right - width, "不得越出工作区再夹回");
+    }
+    popup.hide();
+}
+
+#[test]
+fn layout_growth_that_keeps_the_placement_does_not_touch_the_window() {
+    // 组合变长只改矩形右缘，候选窗位置不变：宿主每次布局通知都重摆重画只是浪费宿主 UI 线程。
+    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let sample = state(3, 0);
+    popup.show(&sample, CARET, HWND::default()).unwrap();
+    let serial = popup.view.borrow().serial;
+    let notified = Rc::new(Cell::new(0));
+    let counter = notified.clone();
+    *popup.before_notify.borrow_mut() = Some(Box::new(move |_| counter.set(counter.get() + 1)));
+    let wider = Rect {
+        right: CARET.right + 40,
+        ..CARET
+    };
+    popup.show(&sample, wider, HWND::default()).unwrap();
+    assert_eq!(notified.get(), 0, "位置未变不重画、不发外部通知");
+    assert_eq!(popup.anchor(), Some(wider), "退路位置仍要跟上最新组合矩形");
+    assert_eq!(popup.view.borrow().serial, serial);
+    popup.hide();
+}
+
 /// 只取出本窗口的点击通知并按系统流程派发，不处理其他消息。
 fn pump(popup: &Popup) {
     let mut message = MSG::default();
@@ -408,12 +488,25 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
     let _ = render(&popup, size);
 }
 
+/// 测试不依赖机器预装字体：本进程只私有注册一次仓库原件，随进程结束释放。
+pub(crate) fn register_test_font() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let path: Vec<u16> = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf")
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: 路径 NUL 结尾；注册只在本进程可见。
+        let added = unsafe { AddFontResourceExW(PCWSTR(path.as_ptr()), FR_PRIVATE, None) };
+        assert_ne!(added, 0);
+    });
+}
+
 #[test]
 fn learning_font_keeps_private_roots_when_candidate_font_changes() {
-    // 测试走正式校验/私有加载路径，窗口和 HFONT 先于注册引用释放。
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf");
-    let private = tigertype_windows_fonts::PrivateFont::load(&path).unwrap();
+    register_test_font();
     let popup = Popup::new(|_, _| {}, true).unwrap();
     let mut shown = state(4, 0);
     shown.is_last_page = true;
@@ -481,8 +574,6 @@ fn learning_font_keeps_private_roots_when_candidate_font_changes() {
     }
     popup.show(&shown, CARET, HWND::default()).unwrap();
     let _ = render(&popup, popup.view.borrow().layout.size);
-    drop(popup);
-    drop(private);
 }
 
 #[test]

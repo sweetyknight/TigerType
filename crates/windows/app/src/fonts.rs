@@ -14,7 +14,10 @@ use std::{
 use tigertype_backend::{resources, storage};
 use windows_sys::Win32::{
     Foundation::ERROR_SUCCESS,
-    Graphics::Gdi::AddFontResourceW,
+    Graphics::Gdi::{
+        AddFontResourceW, CreateCompatibleDC, CreateFontW, DEFAULT_CHARSET, DeleteDC, DeleteObject,
+        GGI_MARK_NONEXISTING_GLYPHS, GetGlyphIndicesW, GetTextFaceW, SelectObject,
+    },
     System::Registry::{
         HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, RegCloseKey,
         RegCreateKeyExW, RegEnumValueW, RegSetValueExW,
@@ -27,6 +30,9 @@ use windows_sys::Win32::{
 /// 字体文件 128MB 上限只防异常输入。
 const LIMIT: u64 = 128 * 1024 * 1024;
 const USER_FONTS: &str = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts";
+/// 拆分专用文楷与关键字根：只有虎码融合字根版才有这些私用区字形。
+const LEARNING_FAMILY: &str = "LXGW WenKai GB Screen";
+const LEARNING_ROOTS: [u16; 3] = [0xe4e4, 0xe46a, 0xe432];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Font {
@@ -42,6 +48,63 @@ struct Lock {
 }
 pub fn locked() -> Result<Vec<Font>> {
     Ok(serde_json::from_str::<Lock>(include_str!("../../../../resources/fonts.lock.json"))?.fonts)
+}
+
+/// 后台启动时核对系统字体。拆分不接受替代字体，缺字体或缺字根时明确失败，不把方块显示给用户。
+pub(crate) fn ensure_learning_font() -> Result<()> {
+    if has_roots(LEARNING_FAMILY) {
+        return Ok(());
+    }
+    Err(format!("系统缺少含虎码字根的 {LEARNING_FAMILY}，请重新运行安装包").into())
+}
+fn has_roots(family: &str) -> bool {
+    let name = wide(OsStr::new(family));
+    let mut actual = [0; 64];
+    let mut glyphs = [0; LEARNING_ROOTS.len()];
+    // SAFETY: 临时 DC/HFONT 不逃出本函数，所有分支配对还原、释放；缓冲区长度如实传入。
+    unsafe {
+        let dc = CreateCompatibleDC(null_mut());
+        if dc.is_null() {
+            return false;
+        }
+        let font = CreateFontW(
+            -20,
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            0,
+            0,
+            0,
+            0,
+            name.as_ptr(),
+        );
+        if font.is_null() {
+            DeleteDC(dc);
+            return false;
+        }
+        let old = SelectObject(dc, font);
+        let length = GetTextFaceW(dc, actual.len() as i32, actual.as_mut_ptr());
+        let found = GetGlyphIndicesW(
+            dc,
+            LEARNING_ROOTS.as_ptr(),
+            LEARNING_ROOTS.len() as i32,
+            glyphs.as_mut_ptr(),
+            GGI_MARK_NONEXISTING_GLYPHS,
+        );
+        SelectObject(dc, old);
+        DeleteObject(font);
+        DeleteDC(dc);
+        // GDI 找不到字体会静默替换，所以同时核对实际字体名。
+        length > 0
+            && String::from_utf16_lossy(&actual[..length as usize - 1]) == family
+            && found != u32::MAX
+            && glyphs.iter().all(|glyph| *glyph != 0 && *glyph != 0xffff)
+    }
 }
 
 /// 当前用户字体登记键；Drop 时关闭。
@@ -148,7 +211,11 @@ pub enum Outcome {
 pub fn install(source: &Path) -> Result<Vec<(String, Outcome)>> {
     let local = std::env::var_os("LOCALAPPDATA").ok_or("缺少 LOCALAPPDATA")?;
     let target = PathBuf::from(local).join(r"Microsoft\Windows\Fonts");
-    let report = install_into(&locked()?, source, &target, &Key::user()?)?;
+    // 系统已有的字体不再装到用户目录，否则同一字体在全机和用户下重复注册。
+    let system = PathBuf::from(std::env::var_os("WINDIR").ok_or("缺少 WINDIR")?).join("Fonts");
+    let mut fonts = locked()?;
+    fonts.retain(|font| !system.join(&font.path).exists());
+    let report = install_into(&fonts, source, &target, &Key::user()?)?;
     let mut changed = false;
     for (name, outcome) in &report {
         if *outcome != Outcome::Unchanged {
@@ -245,7 +312,25 @@ fn create(to: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_sys::Win32::System::Registry::{KEY_ALL_ACCESS, RegLoadAppKeyW};
+    use windows_sys::Win32::{
+        Graphics::Gdi::{AddFontResourceExW, FR_PRIVATE},
+        System::Registry::{KEY_ALL_ACCESS, RegLoadAppKeyW},
+    };
+
+    #[test]
+    fn learning_font_check_requires_the_family_and_its_roots() {
+        // 只在测试进程私有注册仓库原件，不依赖机器预装。
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf");
+        // SAFETY: 路径 NUL 结尾；注册只在本进程可见，随进程结束释放。
+        let added =
+            unsafe { AddFontResourceExW(wide(path.as_os_str()).as_ptr(), FR_PRIVATE, null()) };
+        assert_ne!(added, 0);
+        assert!(has_roots(LEARNING_FAMILY));
+        // 反例：字体不存在时 GDI 静默替换；存在但不含字根的字体同样不能算通过。
+        assert!(!has_roots("TigerType 不存在的字体"));
+        assert!(!has_roots("Segoe UI"));
+    }
 
     #[test]
     fn a_failed_create_never_deletes_a_file_another_installer_just_made() -> Result<()> {

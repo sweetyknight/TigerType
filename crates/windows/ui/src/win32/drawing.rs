@@ -328,7 +328,7 @@ pub(super) fn create_font(
         }
     }
     Err(if faces == LEARNING_FACES {
-        "无法选择已私有加载的虎码文楷".into()
+        "无法选择系统已安装的虎码文楷".into()
     } else {
         error()
     })

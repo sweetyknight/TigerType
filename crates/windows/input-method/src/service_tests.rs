@@ -315,6 +315,7 @@ impl ITfThreadMgr_Impl for ThreadMgr_Impl {
 /// 每个测试独立命名空间，预期映像为本测试进程，绝不触碰正式 backend 命名空间；候选窗保持隐藏。
 fn service() -> ComObject<TextService> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
+    crate::candidate::tests::register_test_font();
     ComObject::new(TextService {
         namespace: format!(
             "tsf-test-{}-{}",
@@ -323,14 +324,6 @@ fn service() -> ComObject<TextService> {
         ),
         image: Some(std::env::current_exe().unwrap()),
         quiet: true,
-        // 与正式 COM 构造一致，在激活前加载；测试直接构造对象不能依赖机器预装字体。
-        font: Some(Rc::new(
-            tigertype_windows_fonts::PrivateFont::load(
-                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf"),
-            )
-            .unwrap(),
-        )),
         ..TextService::new()
     })
 }

@@ -14,7 +14,7 @@
 - 独立查字窗输入拼音/虎码/粘贴汉字或词，显示可用编码、完整编码、读音、拆分；词查询保留词码，复制由用户点击，不监视剪贴板。
 - 缺资料明确标注，不猜编码或拆分；学习信息对应实际显示汉字，转换字形标注来源。
 - 原字/简体/繁体三档，默认原字；一对多列候选，不猜语境，不改已上屏内容，不做地区词汇替换。
-- 竖排候选、15pt，每页 3–9 个（默认 5），候选多于一页时才在页脚显示翻页指示，拼音反查时页脚另有“拼音”标签。候选字体可选霞鹜文楷（默认）或楷体，未安装时回退微软雅黑 UI；独立编码与序号用 Cascadia Mono（回退 Consolas），窗口文字用微软雅黑 UI。候选注释（拆分及内嵌编码）、设置预览注释与查字拆分只使用经锁定校验并私有加载的 LXGW WenKai GB Screen，不受候选字楷体选项影响；禁止系统回退，私有字体初始化失败立即返回错误。绘制与测量使用同一字体和排版 API。配色主题可选琥珀（默认）、墨、竹、玫红与自定义；自定义四基色在设置页点色块从无蓝色板选取或直接输入色值，即时校验并热加载。玫红取自小狼毫配色 MacRoseo（白底黑字，高亮候选无底色、只把字染成玫红，原色 #FA114F 等比压暗为 #E8114E 以达 4.5:1）；保存与载入均校验无蓝且文字对比度不低于 4.5:1。为保证换电脑可用，霞鹜文楷（虎码融合字根版）、Cascadia Mono 与 TumanPUA 随包：取自官方渠道，按 `resources/fonts.lock.json` 锁定大小与 SHA256，由安装包全机安装。原生 UI，所有界面不得出现任何蓝色（高对比度除外）。
+- 竖排候选、15pt，每页 3–9 个（默认 5），候选多于一页时才在页脚显示翻页指示，拼音反查时页脚另有“拼音”标签。候选字体可选霞鹜文楷（默认）或楷体，未安装时回退微软雅黑 UI；独立编码与序号用 Cascadia Mono（回退 Consolas），窗口文字用微软雅黑 UI。候选注释（拆分及内嵌编码）、设置预览注释与查字拆分只使用 LXGW WenKai GB Screen，不受候选字楷体选项影响；禁止替代字体（字根是私用区字形，替代只会显示方块），字体不可用时立即返回错误。绘制与测量使用同一字体和排版 API。配色主题可选琥珀（默认）、墨、竹、玫红与自定义；自定义四基色在设置页点色块从无蓝色板选取或直接输入色值，即时校验并热加载。玫红取自小狼毫配色 MacRoseo（白底黑字，高亮候选无底色、只把字染成玫红，原色 #FA114F 等比压暗为 #E8114E 以达 4.5:1）；保存与载入均校验无蓝且文字对比度不低于 4.5:1。为保证换电脑可用，霞鹜文楷（虎码融合字根版）、Cascadia Mono 与 TumanPUA 随包：取自官方渠道，按 `resources/fonts.lock.json` 锁定大小与 SHA256，由安装包全机安装。原生 UI，所有界面不得出现任何蓝色（高对比度除外）。
 - 设置窗分“输入、外观、快捷键、高级”四区（左侧导航，内容超出窗口时纵向滚动），修改即时保存并热加载，不设保存/取消按钮；保存在途时的新改动不排队，回复后按最新草稿与已确认设置比较再存一次，保存失败时控件撤回已确认设置并说明原因。输入区：单字/词输入模式（默认单字）、仅常用字、四码唯一自动上屏、输出字形；外观区：按草稿现画的候选窗预览、候选字体、每页候选数、显示拆分与编码（开启后候选注释为小狼毫虎码方案同款〔拆分 · 编码〕，缺拆分时只列编码；默认关闭）、配色主题卡片与自定义四色（色块点开 8×4 无蓝色板或输入 `#RRGGBB`，提示最低对比度或不可用原因）；快捷键区只读列出现有快捷键（数字键范围随每页候选数）；高级区用系统默认编辑器打开受管 `config/settings.toml`，手工修改后点“重新载入”生效（格式错误时保留当前设置并指出行号），另有版本信息。`settings.toml` 按带中文注释的固定模板写出（`[input]`、`[candidate]`、`[theme]`、`[theme.custom]` 四节，颜色写作 `"#RRGGBB"`），读回时缺键、多键、类型或范围不符都拒绝；首次运行写出默认文件；界面保存按模板重写，用户自加的注释不保留；文件被外部修改后界面保存被拒，须先重新载入。旧 `settings.json` 不再读取（开发期不兼容）。当前程序任务栏输入法图标右键菜单前三项写当前状态（中文/英文、半角/全角、中文标点/英文标点），点击即翻转，其下为查字、设置；全角另可按 `Shift+空格` 切换；全角与标点开关仍为会话状态。保存成功即热重载到后台，新会话与无组合的会话立即使用；组合中的会话在本次组合结束时换上，无需重启后台。
 - 不做 librime、Lua、OpenCC 运行库、数据库、英文补全、计算器、日期、Emoji、网址启动或通用 YAML 配置兼容。
 
@@ -42,20 +42,19 @@
 | crates/shared/ui-model | 查字/设置 Model、文案、控件标识、派生绘制色与纯布局 | contracts | 无 |
 | crates/shared/backend | 锁定资源加载、settings.toml、受管目录、Dispatcher、宿主回收和查字控制器 | contracts、engine | serde、serde_json、sha2、toml；Windows 文件原语 windows-sys、Mac 文件原语 libc |
 | crates/windows/ipc | Windows 跨进程信封、帧校验、认证管道、取消和驻留保护 | contracts | serde、serde_json、windows-sys |
-| crates/windows/fonts | 文楷锁定清单、只读校验、进程私有加载及配对注销；不访问用户数据 | 无 | serde_json、sha2、windows-sys |
-| crates/windows/input-method | TSF DLL、编辑会话、候选窗、UIA、输入法菜单与注册 | contracts、input-client、windows-ipc、windows-fonts | windows、windows-core |
-| crates/windows/ui | Win32 查字/设置窗、托盘、事件邮箱 | contracts、ui-model、windows-fonts | windows-sys |
-| crates/windows/app | Windows 后台/命令行/字体管理，组装固定线程 | contracts、backend、windows-ipc、windows-ui、windows-fonts | serde、serde_json、windows-sys |
+| crates/windows/input-method | TSF DLL、编辑会话、候选窗、UIA、输入法菜单与注册 | contracts、input-client、windows-ipc | windows、windows-core |
+| crates/windows/ui | Win32 查字/设置窗、托盘、事件邮箱 | contracts、ui-model | windows-sys |
+| crates/windows/app | Windows 后台/命令行/字体管理，组装固定线程 | contracts、backend、windows-ipc、windows-ui | serde、serde_json、windows-sys |
 | crates/macos/input-method | IMKServer/控制器、按键/文本边界、候选面板、菜单；由组装层注入通道与窗口动作 | contracts、input-client | objc2、objc2-foundation、objc2-app-kit、objc2-input-method-kit |
 | crates/macos/ui | AppKit 查字/设置视图、Mac 草稿交互和主线程回复 | contracts、ui-model | objc2、objc2-foundation、objc2-app-kit、dispatch2 |
 | crates/macos/app | Mac 主程序、进程内有界通道、固定线程组装、包清单/图标及安装 | contracts、input-client、backend；Mac：macos-input-method、macos-ui | serde、serde_json；Mac：objc2、objc2-foundation、objc2-app-kit、libc |
-| tools/dev | 检查、打包、合成预览和跨组件治理测试，不进入产品 | contracts、backend；Windows：windows-app、windows-ui、windows-fonts；Mac：macos-input-method、macos-ui、macos-app | serde_json；Windows：windows-sys；Mac：objc2、objc2-foundation、objc2-app-kit、libc |
+| tools/dev | 检查、打包、合成预览和跨组件治理测试，不进入产品 | contracts、backend；Windows：windows-app、windows-ui；Mac：macos-input-method、macos-ui、macos-app | serde_json；Windows：windows-sys；Mac：objc2、objc2-foundation、objc2-app-kit、libc |
 
 backend 的 `storage/windows.rs` 与 `storage/macos.rs` 集中各平台目录固定、链接/硬链接拒绝、租约和原子替换；其余后台模块不直接调用平台 API。不得用普通文件读取占位绕过校验。词表类型通过 backend 公开，组装层不直接依赖 engine；产品组件不得反向依赖平台 app。
 
 原始资源在 `resources`，安装定义在 `installer/windows`；构建产物、缓存与证据不作为源码。测试跟随组件：纯模型测试在 shared，原生测试在对应平台，架构/文档与安装脚本校验归 tools/dev。
 
-Windows 字体只在 COM CreateInstance（早于 ActivateEx/按键 sink）或后台接请求/UI 启动前加载，DllMain、按键、布局与绘制不读字体文件。windows-fonts 固定目录与只读文件对象、拒绝链接/硬链接、流式验证大小/SHA256，再以 FR_PRIVATE | FR_NOT_ENUM 私有注册；窗口/HFONT 先销毁，再注销和释放句柄。安装副本按摘要命名，升级不覆盖旧宿主占用的版本，卸载占用文件延至重启删除。debug 只用编译时仓库原件，release 只用自身目录副本；固定 64KiB 校验缓冲，不在每个宿主嵌入或保留 26MB Rust 字节数组。
+Windows 字体只用安装器全机注册的系统字体：宿主进程不读字体文件、不做私有注册，DllMain、COM 构造、按键、布局与绘制都不访问字体文件。后台接请求前用 GDI 核对文楷实际字体名与关键字根，不通过即报错退出，不用其他字体替代，也不留下半就绪后台。
 
 ### 依赖方向与禁止边
 **A → B 表示 A 依赖 B**；返回消息不构成反向代码依赖。直接依赖以上表为准，另检查传递可达性：
@@ -251,9 +250,9 @@ Mac 验收须记录实际系统版本、Kaiti SC 是否可用、随包与系统�
 - 启动校验并构建排序索引，二分查询；输入时不读文件或扫描整表。不引入数据库、自定义二进制格式。
 - 保留多编码/多音字/多拆分码，完整码与实际码交叉检查，不仅凭长度判断全码。
 - 独立 APPDATA，复用目录占用、链接拒绝、配置事务替换；不导入个人 Rime 数据。安装版后台与查字窗使用程序目录下的 `tiger` 码表目录与 `%APPDATA%\TigerType`（不存在则新建，已有目录须带所有权标记）；开发期 `serve <码表目录> <数据目录>` 仍可指定独立目录。
-- 安装包由 Inno Setup 6.7 编译（用户批准的唯一非 Rust 工具；`.iss` 只含声明与停后台、登记/改名/清理占用旧文件的少量 Pascal），Rust 打包驱动 `--example package` 先构建 release、校验码表/字体/语言文件（均在仓库内，换机克隆即可打包），并核对脚本逐个列出的字体与码表和清单一致（码表须装到 `{app}\tiger` 并保持相对路径）；安装时删除旧版的 `tiger-v1.json`。两种 MSVC 目标静态链接 CRT。安装需管理员，固定装到 Program Files（不提供改目录）；先放程序再分别以 64/32 位注册 DLL；字体全机安装；HKLM Run 登记 `serve` 使各用户登录时以普通权限启动自己的后台，安装结束以原用户身份启动一次；开始菜单只有“查字与设置”；不添加或切换键盘。`tigertype.exe` 为 GUI 子系统，从终端运行时借用父控制台，无控制台时 `serve`/`lookup-window` 失败弹错误框。升级先以原用户身份 `stop`（停止确认后等旧后台进程退出才返回）；DLL 驻留且协议严格相等，宿主不重开只能出英文，因此启用重启管理器：现名文件与历次改名的 `*.old` 一并登记检测，准备页列出占用程序，经用户同意关闭并在装完后重启支持重启的程序；不关或关不掉的，在关闭步骤之后（`BeforeInstall`）把仍被占用的旧程序与 DLL 改名并登记重启后删除，装完删除已无人使用的 `*.old`。`*.old` 不得列入 `[InstallDelete]`：它们已在重启删除队列中，Inno 会据此要求先重启；卸载先请求停止后台、注销 DLL、删除程序与自启项，占用文件重启后删除，保留用户数据。
+- 安装包由 Inno Setup 6.7 编译（用户批准的唯一非 Rust 工具；`.iss` 只含声明与停后台、登记/改名/清理占用旧文件的少量 Pascal），Rust 打包驱动 `--example package` 先构建 release、校验码表/字体/语言文件（均在仓库内，换机克隆即可打包），并核对脚本逐个列出的字体与码表和清单一致（码表须装到 `{app}\tiger` 并保持相对路径）；安装时删除旧版的 `tiger-v1.json`。两种 MSVC 目标静态链接 CRT。安装需管理员，固定装到 Program Files（不提供改目录）；先放程序再分别以 64/32 位注册 DLL；字体缺失时才全机安装；HKLM Run 登记 `serve` 使各用户登录时以普通权限启动自己的后台，安装结束以原用户身份启动一次；开始菜单只有“查字与设置”；不添加或切换键盘。`tigertype.exe` 为 GUI 子系统，从终端运行时借用父控制台，无控制台时 `serve`/`lookup-window` 失败弹错误框。升级先以原用户身份 `stop`（停止确认后等旧后台进程退出才返回）；DLL 驻留且协议严格相等，宿主不重开只能出英文，因此启用重启管理器：现名文件与历次改名的 `*.old` 一并登记检测，准备页列出占用程序，经用户同意关闭并在装完后重启支持重启的程序；不关或关不掉的，在关闭步骤之后（`BeforeInstall`）把仍被占用的旧程序与 DLL 改名并登记重启后删除，装完删除已无人使用的 `*.old`。`*.old` 不得列入 `[InstallDelete]`：它们已在重启删除队列中，Inno 会据此要求先重启；卸载先请求停止后台、注销 DLL、删除程序与自启项，占用文件重启后删除，保留用户数据。
 - TIP DLL 与后台程序须位于 Program Files，或位于已对 ALL APPLICATION PACKAGES 授予读取/执行的独立目录，否则 AppContainer 宿主无法加载；DLL 不读取数据文件。
-- Windows 安装器默认全机安装字体清单全部六项（含天珩 P0/P1/P2），普通架构门禁也检查默认安装声明及删项/可选项反例；仅为产品使用的文楷、楷体设置 GDI FontLink 与平面 2/3 的 SurrogateFallback，已有自定义项不覆盖。字体和对应回退项卸载保留；不执行上游 EXE 或导入修改系统其他字体、Office、IE 的注册表。新增字体后的真实候选、x86/x64 宿主与上屏回退须在 Windows 单列验收。
+- Windows 安装器默认全机安装字体清单全部六项（含天珩 P0/P1/P2），系统已有的字体（全机或当前用户）以 `Check: not FontExists(...)` 跳过，避免同一字体重复注册，已有的同名文件不覆盖；这是门禁唯一允许的条件，普通架构门禁也检查默认安装声明及删项/可选项反例；仅为产品使用的文楷、楷体设置 GDI FontLink 与平面 2/3 的 SurrogateFallback，已有自定义项不覆盖。字体和对应回退项卸载保留；不执行上游 EXE 或导入修改系统其他字体、Office、IE 的注册表。新增字体后的真实候选、x86/x64 宿主与上屏回退须在 Windows 单列验收。
 - 注册入口为 DLL 导出的 `DllRegisterServer`/`DllUnregisterServer`（regsvr32，须管理员）：COM 类写入 HKLM\SOFTWARE\Classes（`InprocServer32`、`ThreadingModel=Apartment`），以 `ITfInputProcessorProfileMgr` 登记简体中文（0x0804）语言配置（默认启用，图标为 DLL 同目录的 `tigertype.ico`，缺图标拒绝注册；任务栏据此显示虎码图标，不再退回语言名“简体”），以 `ITfCategoryMgr` 登记键盘 TIP、沉浸式与托盘三类别；注册前要求 DLL 为绝对路径且同目录有后台程序，任一步失败回滚；注销尽力移除全部内容，重复注销时系统对未登记项的报错照实返回。x64/x86 DLL 放同一目录（x86 改名）共用一个后台，分别由 System32 与 SysWOW64 的 regsvr32 注册；32 位 COM 类经 WOW64 写入 32 位视图。注册测试只核对注册内容，并在临时私有配置单元（`RegLoadAppKeyW`）中验证读写，不写系统或用户注册表。
 
 ## 工程治理

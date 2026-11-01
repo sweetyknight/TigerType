@@ -221,8 +221,6 @@ struct Active {
     indicator: Option<ComObject<Indicator>>,
     /// 线程焦点 sink cookie；登记失败为 None，只是后台不隐藏通知区图标。
     focus: Option<u32>,
-    // 排队回调可能持有 Active；字体引用必须晚于候选窗和 HFONT 释放。
-    _font: Option<Rc<tigertype_windows_fonts::PrivateFont>>,
 }
 /// 登记任务栏输入法图标；按钮经弱引用回到激活状态，不形成引用环。
 fn indicator(manager: &ITfThreadMgr, owner: &Weak<Active>) -> Option<ComObject<Indicator>> {
@@ -674,8 +672,6 @@ pub struct TextService {
     namespace: String,
     image: Option<PathBuf>,
     quiet: bool,
-    // COM 构造时加载，不在 ActivateEx 或任何输入/布局回调中访问字体文件。
-    font: Option<Rc<tigertype_windows_fonts::PrivateFont>>,
 }
 impl TextService {
     fn new() -> Self {
@@ -685,7 +681,6 @@ impl TextService {
             namespace: "backend".into(),
             image: None,
             quiet: false,
-            font: None,
         }
     }
     fn active(&self) -> Option<Rc<Active>> {
@@ -764,7 +759,6 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
                 key_focused: Cell::new(true),
                 quiet: self.quiet,
                 keyboard,
-                _font: self.font.clone(),
             });
             *self.active.try_borrow_mut().map_err(busy)? = Some(active.clone());
             // 在持有焦点的线程里切到本输入法：任务栏此刻即显示本输入法图标。
@@ -909,15 +903,7 @@ impl IClassFactory_Impl for Factory_Impl {
             if !outer.is_null() {
                 return Err(CLASS_E_NOAGGREGATION.into());
             }
-            let path = tigertype_windows_fonts::bundled_path(&crate::module_path()?)
-                .map_err(|e| Error::new(E_FAIL, e.to_string()))?;
-            let font = tigertype_windows_fonts::PrivateFont::load(&path)
-                .map_err(|e| Error::new(E_FAIL, format!("字根字体初始化失败：{e}")))?;
-            let unknown: IUnknown = TextService {
-                font: Some(Rc::new(font)),
-                ..TextService::new()
-            }
-            .into();
+            let unknown: IUnknown = TextService::new().into();
             // SAFETY: iid/object 由 COM 调用方提供；QueryInterface 自行校验 iid 并写出引用。
             unsafe { unknown.query(iid, object) }.ok()
         })

@@ -9,9 +9,6 @@
 #ifndef Icon
   #error 请用打包驱动编译（缺少 /DIcon）
 #endif
-#ifndef PrivateFont
-  #error 请用打包驱动编译（缺少 /DPrivateFont）
-#endif
 #define Root AddBackslash(SourcePath) + "..\.."
 
 [Setup]
@@ -51,8 +48,6 @@ ApplicationsFound2=以下程序仍在使用旧版 TigerType，不重新打开就
 FinishedLabel=TigerType 已安装，输入后台已启动并会随登录自动启动。%n%n请在“设置 → 时间和语言 → 语言和区域 → 中文(简体) → 语言选项 → 键盘”中添加“TigerType 虎码”。查字与设置可从开始菜单打开。%n%n升级时未关闭的程序须重新打开才会用上新版本；首次安装生僻字字体后如仍缺字，请注销重登以更新字体回退。
 
 [Files]
-; 进程私有字体独立于系统 Fonts；摘要文件名避免覆盖仍被旧宿主使用的版本。
-Source: "{#Root}\resources\fonts\LXGWWenKaiGBScreen.ttf"; DestDir: "{app}"; DestName: "{#PrivateFont}"; Flags: onlyifdoesntexist uninsrestartdelete
 ; 程序与配置图标在前：注册 DLL 时要求同目录已有后台程序与 tigertype.ico（任务栏据此显示虎码图标）。
 ; 改名在关闭程序之后（BeforeInstall），改早了重启管理器就找不到占用者。
 Source: "{#Root}\target\release\tigertype.exe"; DestDir: "{app}"; Flags: ignoreversion uninsrestartdelete; BeforeInstall: Retire('tigertype.exe')
@@ -69,23 +64,26 @@ Source: "{#Root}\resources\tiger\opencc\hu_cf.txt"; DestDir: "{app}\tiger\opencc
 Source: "{#Root}\resources\tiger\opencc\PYCharacters.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\opencc\STCharacters_Tu.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\opencc\TSCharacters.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
-; 字体为全机安装（各用户与 UWP 宿主可见）；已有同名文件（如 Win11 自带 Cascadia Mono）不覆盖，卸载不删除。
-Source: "{#Root}\resources\fonts\LXGWWenKaiGBScreen.ttf"; DestDir: "{autofonts}"; FontInstall: "LXGW WenKai GB Screen"; Flags: onlyifdoesntexist uninsneveruninstall
-Source: "{#Root}\resources\fonts\CascadiaMono.ttf"; DestDir: "{autofonts}"; FontInstall: "Cascadia Mono"; Flags: onlyifdoesntexist uninsneveruninstall
-Source: "{#Root}\resources\fonts\TumanPUA.ttf"; DestDir: "{autofonts}"; FontInstall: "TumanPUA"; Flags: onlyifdoesntexist uninsneveruninstall
+; 字体缺失时才全机安装（各用户与 UWP 宿主可见）：系统已有该字体（全机或当前用户）就跳过，避免同一字体重复注册；已有同名文件不覆盖，卸载不删除。
+Source: "{#Root}\resources\fonts\LXGWWenKaiGBScreen.ttf"; DestDir: "{autofonts}"; FontInstall: "LXGW WenKai GB Screen"; Check: not FontExists('LXGW WenKai GB Screen'); Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}\resources\fonts\CascadiaMono.ttf"; DestDir: "{autofonts}"; FontInstall: "Cascadia Mono"; Check: not FontExists('Cascadia Mono'); Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}\resources\fonts\TumanPUA.ttf"; DestDir: "{autofonts}"; FontInstall: "TumanPUA"; Check: not FontExists('TumanPUA'); Flags: onlyifdoesntexist uninsneveruninstall
 ; 天珩三个分卷补齐锁定码表的基本区与扩展汉字，默认安装供候选窗和上屏宿主回退。
-Source: "{#Root}\resources\fonts\TH-Tshyn-P0.ttf"; DestDir: "{autofonts}"; FontInstall: "TH-Tshyn-P0"; Flags: onlyifdoesntexist uninsneveruninstall
-Source: "{#Root}\resources\fonts\TH-Tshyn-P1.ttf"; DestDir: "{autofonts}"; FontInstall: "TH-Tshyn-P1"; Flags: onlyifdoesntexist uninsneveruninstall
-Source: "{#Root}\resources\fonts\TH-Tshyn-P2.ttf"; DestDir: "{autofonts}"; FontInstall: "TH-Tshyn-P2"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}\resources\fonts\TH-Tshyn-P0.ttf"; DestDir: "{autofonts}"; FontInstall: "TH-Tshyn-P0"; Check: not FontExists('TH-Tshyn-P0'); Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}\resources\fonts\TH-Tshyn-P1.ttf"; DestDir: "{autofonts}"; FontInstall: "TH-Tshyn-P1"; Check: not FontExists('TH-Tshyn-P1'); Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#Root}\resources\fonts\TH-Tshyn-P2.ttf"; DestDir: "{autofonts}"; FontInstall: "TH-Tshyn-P2"; Check: not FontExists('TH-Tshyn-P2'); Flags: onlyifdoesntexist uninsneveruninstall
 
 [InstallDelete]
 ; 旧版的 JSON 数据包已由 tiger 码表目录取代。
 Type: files; Name: "{app}\tiger-v1.json"
+; 旧版给每个宿主私有加载的文楷副本；仍被已打开的程序占用时留到下次安装或卸载清理。
+Type: files; Name: "{app}\LXGWWenKaiGBScreen-*.ttf"
 ; 历次改名的 *.old 不能列在这里：它们都已登记重启后删除，Inno 会据此拒绝安装、要求先重启；改由 [Code] 登记与清理。
 
 [UninstallDelete]
 ; 卸载时同样删掉已无人使用的旧版文件，仍被占用的已登记重启后删除。
 Type: files; Name: "{app}\*.old"
+Type: files; Name: "{app}\LXGWWenKaiGBScreen-*.ttf"
 
 [Registry]
 ; 每个用户登录时以其普通权限启动自己的后台（数据在各自 %APPDATA%\TigerType）。

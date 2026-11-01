@@ -14,7 +14,6 @@ pub const COMPONENTS: &[(&str, &str)] = &[
     ("tigertype-ui-model", "crates/shared/ui-model"),
     ("tigertype-backend", "crates/shared/backend"),
     ("tigertype-windows-ipc", "crates/windows/ipc"),
-    ("tigertype-windows-fonts", "crates/windows/fonts"),
     ("tigertype-windows-ui", "crates/windows/ui"),
     (
         "tigertype-windows-input-method",
@@ -32,10 +31,6 @@ const RULES: &[(&str, &[&str])] = &[
     ("tigertype-engine", &["tigertype-contracts"]),
     ("tigertype-input-client", &["tigertype-contracts"]),
     ("tigertype-ui-model", &["tigertype-contracts"]),
-    (
-        "tigertype-windows-fonts",
-        &["serde_json", "sha2", "windows-sys"],
-    ),
     (
         "tigertype-backend",
         &[
@@ -55,12 +50,7 @@ const RULES: &[(&str, &[&str])] = &[
     ),
     (
         "tigertype-windows-ui",
-        &[
-            "tigertype-contracts",
-            "tigertype-ui-model",
-            "tigertype-windows-fonts",
-            "windows-sys",
-        ],
+        &["tigertype-contracts", "tigertype-ui-model", "windows-sys"],
     ),
     (
         "tigertype-windows-input-method",
@@ -69,14 +59,12 @@ const RULES: &[(&str, &[&str])] = &[
             "tigertype-input-client",
             "tigertype-windows-ipc",
             "windows",
-            "tigertype-windows-fonts",
             "windows-core",
         ],
     ),
     (
         "tigertype-windows-app",
         &[
-            "tigertype-windows-fonts",
             "tigertype-contracts",
             "tigertype-backend",
             "tigertype-windows-ipc",
@@ -132,7 +120,6 @@ const RULES: &[(&str, &[&str])] = &[
             "tigertype-windows-app",
             "tigertype-windows-ui",
             "tigertype-macos-input-method",
-            "tigertype-windows-fonts",
             "tigertype-macos-ui",
             "tigertype-macos-app",
             "serde_json",
@@ -381,15 +368,17 @@ pub fn installed_fonts(script: &str, fonts: &Value) -> Result<()> {
     for font in array(fonts, "fonts")? {
         let file = format!(r#"resources\fonts\{}""#, string(font, "path")?);
         let family = format!(r#"FontInstall: "{}";"#, string(font, "family")?);
+        // 唯一允许的条件：系统已有该字体就跳过，避免重复注册；其余条件都算改成了可选。
+        let skip = format!("Check: not FontExists('{}');", string(font, "family")?);
         if !script.lines().any(|line| {
             line.starts_with("Source:")
                 && line.contains(&file)
                 && line.contains(&family)
                 && line.contains(r#"DestDir: "{autofonts}";"#)
                 && line.contains("uninsneveruninstall")
-                && !["Tasks:", "Components:", "Check:"]
-                    .iter()
-                    .any(|s| line.contains(s))
+                && line.contains(&skip)
+                && !["Tasks:", "Components:"].iter().any(|s| line.contains(s))
+                && line.matches("Check:").count() == 1
         }) {
             return Err(format!("Windows 须默认全机安装并保留锁定字体：{file}"));
         }

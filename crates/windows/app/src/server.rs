@@ -402,11 +402,8 @@ impl<'a> Server<'a> {
 /// 前台线程即固定反应器/引擎线程；查字/设置另有固定 UI 线程与工作线程，三者共用只读词表，
 /// 用 stop 命令停止。show 为真时启动即显示查字窗（用户唤起时后台尚未运行）。
 pub fn run(tables: &Path, directory: &Path, show: bool) -> Result<()> {
-    // 引擎接请求和 UI 线程启动前完成字体加载；失败立即退出，不留下无字体的半就绪后台。
-    let font_path = tigertype_windows_fonts::bundled_path(&std::env::current_exe()?)
-        .map_err(|e| e.to_string())?;
-    let _font =
-        tigertype_windows_fonts::PrivateFont::load(&font_path).map_err(|e| e.to_string())?;
+    // 引擎接请求前核对系统字体；失败立即退出，不留下拆分显示方块的半就绪后台。
+    crate::fonts::ensure_learning_font()?;
     let dictionary = Dictionary::new(import::load(tables)?)?;
     // 受管目录租约归查字工作线程，在后台运行期间保持，退出后才释放。
     let data = if directory.try_exists()? {

@@ -56,14 +56,6 @@ fn check_script(script: &str, locked: &[fonts::Font]) -> Result<()> {
             return Err(format!("安装脚本缺少锁定字体 {}（{}）", font.path, font.family).into());
         }
     }
-    // 发布 DLL/EXE 从自身目录加载私有副本，不能只有全机 FontInstall 条目。
-    if !listed(
-        r#"resources\fonts\LXGWWenKaiGBScreen.ttf""#,
-        r#"DestName: "{#PrivateFont}""#,
-    ) || !listed(r#"DestName: "{#PrivateFont}""#, r#"DestDir: "{app}""#)
-    {
-        return Err("安装脚本缺少按摘要命名的私有文楷副本".into());
-    }
     // 码表须装到程序旁的 TABLES 目录且保持相对路径，后台按 installed() 在那里加载。
     for name in import::SOURCES {
         let name = name.replace('/', "\\");
@@ -156,10 +148,6 @@ fn run() -> Result<()> {
         // 不加静默参数：编译输出逐个列出打包文件，留作打包记录。
         Command::new(&iscc)
             .arg(format!("/DVersion={version}"))
-            .arg(format!(
-                "/DPrivateFont={}",
-                tigertype_windows_fonts::installed_name().map_err(|e| e.to_string())?
-            ))
             .arg(define)
             .arg(plain(&script)),
         Duration::from_secs(1800),
@@ -208,7 +196,6 @@ mod tests {
         for font in &locked {
             assert!(check_script(&without(&font.path), &locked).is_err());
         }
-        assert!(check_script(&without("DestName: \"{#PrivateFont}\""), &locked).is_err());
         assert!(check_script(&without("PY_c.dict.yaml"), &locked).is_err());
         let flattened = script.replace(
             r#"DestDir: "{app}\tiger\opencc""#,

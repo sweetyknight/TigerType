@@ -13,7 +13,6 @@ path = "src/main.rs"
 [target.'cfg(windows)'.dependencies]
 tigertype-contracts.workspace = true
 tigertype-windows-ui.workspace = true
-tigertype-windows-fonts.workspace = true
 tigertype-backend.workspace = true
 tigertype-windows-ipc.workspace = true
 serde.workspace = true

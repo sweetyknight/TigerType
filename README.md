@@ -141,7 +141,7 @@ cargo run --locked --offline -p tigertype-windows-app -- lookup-window
 
 ## 随包字体
 
-候选窗与查字字形默认用霞鹜文楷屏幕阅读版（虎码融合字根版），独立编码与序号用 Cascadia Mono；候选注释（拆分及其内嵌编码）、设置预览的注释与查字拆分只使用经校验并进程私有加载的 LXGW WenKai GB Screen，不跟随候选字体选择，不依赖系统安装。生僻字由天珩全字库 5.0.0 的 P0/P1/P2 分卷补齐。六份字体按 `resources/fonts.lock.json` 锁定大小与 SHA256，原始文件随仓库放在 `resources/fonts`（仅限个人本地使用），来源如下，更换版本时才需重新取得。楷体与微软雅黑 UI 是 Windows 自带的微软字体，不随包分发；缺楷体时回退微软雅黑 UI。拆分按实际绘制的字体与排版 API 测量宽度；私有字体副本缺失、被篡改或加载失败时初始化报错，不用系统字体替代。字体只在 COM 对象创建/后台启动或 IMK 启动前加载，按键与绘制不读文件。
+候选窗与查字字形默认用霞鹜文楷屏幕阅读版（虎码融合字根版），独立编码与序号用 Cascadia Mono；候选注释（拆分及其内嵌编码）、设置预览的注释与查字拆分只使用 LXGW WenKai GB Screen（Windows 为安装器全机注册的系统字体，macOS 为校验后的进程私有注册），不跟随候选字体选择，不用其他字体替代。生僻字由天珩全字库 5.0.0 的 P0/P1/P2 分卷补齐。六份字体按 `resources/fonts.lock.json` 锁定大小与 SHA256，原始文件随仓库放在 `resources/fonts`（仅限个人本地使用），来源如下，更换版本时才需重新取得。楷体与微软雅黑 UI 是 Windows 自带的微软字体，不随包分发；缺楷体时回退微软雅黑 UI。拆分按实际绘制的字体与排版 API 测量宽度。Windows 后台启动时核对系统文楷及关键字根，缺失时报错退出；macOS 私有字体副本缺失、被篡改或加载失败时初始化报错。Windows 宿主进程不读字体文件，macOS 只在 IMK 启动前加载，按键与绘制都不读文件。
 
 - 霞鹜文楷、TumanPUA：虎码官网盘 <https://huma.ysepan.com/> 的“06 其他资源/虎码必装字体！/虎码方案必装字体 2026.08.15.7z”，取其中 `LXGWWenKaiGBScreen.ttf` 与 `TumanPUA.ttf`。
 - 天珩全字库：同一官网包内 `TH-Tshyn-5.0.0.7z` 的 `TH-Tshyn-P0.ttf`、`TH-Tshyn-P1.ttf`、`TH-Tshyn-P2.ttf`；两层压缩包与原件摘要记录在锁定清单。P0 补基本区，P2 补平面 2，P1 补平面 3 汉字；P16 对当前码表无新增覆盖，不随包。原附说明禁止商业用途，资源整体仍不公开分发。
@@ -149,7 +149,7 @@ cargo run --locked --offline -p tigertype-windows-app -- lookup-window
 
 macOS 的 `install` 默认将清单中全部六份字体安装到 `/Library/Fonts`，供候选窗及 Codex 等上屏宿主自动回退；仅 CGFont 内存私有注册不会让新增字体进入系统自动回退。已有相同字节时不改动，同名不同内容或不安全文件则拒绝覆盖。字体先完整写入临时文件再原子发布；安装中断可能留下 `.TigerType-font-*.tmp`，不把它当成有效字体。卸载保留共享字体；字体安装后仍显示缺字框的应用需重新打开。
 
-Windows 安装包默认全机安装全部六份字体，另把按 SHA256 命名的文楷原件放到 DLL/EXE 旁供私有加载。仅为文楷与楷体登记 `FontLink/SystemLink` 和平面 2/3 的 `SurrogateFallback`，已有自定义项保留，卸载时与字体一起保留；不导入上游修改系统其他字体、Office 或 IE 的注册表文件。首次安装回退仍未生效时须注销重登。debug 构建使用编译时确定的仓库原件；release 构建必须带上私有副本，不能只复制 EXE/DLL。同摘要副本不覆盖；若它被破坏，须移除损坏副本再修复安装。下列用户级命令安装清单中的字体，但不写管理员级 GDI 回退项，不能替代完整安装包：
+Windows 安装包默认全机安装全部六份字体；系统已有的字体（全机或当前用户）跳过不装，避免同一字体重复注册，已有的同名文件也不覆盖。仅为文楷与楷体登记 `FontLink/SystemLink` 和平面 2/3 的 `SurrogateFallback`，已有自定义项保留，卸载时与字体一起保留；不导入上游修改系统其他字体、Office 或 IE 的注册表文件。首次安装回退仍未生效时须注销重登。已有文楷不含虎码字根时后台拒绝启动，须先卸载该字体再运行安装包。下列用户级命令只安装系统字体目录里还没有的字体，不写管理员级 GDI 回退项，不能替代完整安装包：
 
 ```powershell
 cargo run --locked --offline -p tigertype-windows-app -- install-fonts 'D:\Projects\TigerType\resources\fonts'

@@ -47,8 +47,6 @@ use windows::{
 const CLICK: u32 = WM_APP + 0x54;
 const CLASS: PCWSTR = w!("TigerType.Candidate");
 pub(crate) const UI_FACE: &str = "Microsoft YaHei UI";
-/// 初始化已私有加载锁定文楷；拆分不再接受系统字体替代。
-const LEARNING_FACES: [&str; 1] = [tigertype_windows_fonts::FAMILY];
 /// 候选字体的 Windows 字体名；未安装时由 create_font 回退到界面字体。
 pub(crate) const fn font_face(font: CandidateFont) -> &'static str {
     match font {
@@ -56,6 +54,8 @@ pub(crate) const fn font_face(font: CandidateFont) -> &'static str {
         CandidateFont::KaiTi => "KaiTi",
     }
 }
+/// 拆分只用安装器全机注册的锁定文楷：字根是私用区字形，任何替代字体都会显示成方块。
+const LEARNING_FACES: [&str; 1] = [font_face(CandidateFont::WenKai)];
 
 thread_local! {
     // 窗口过程按句柄找回本线程的候选窗；弱引用随候选窗释放自动失效，不经窗口数据传指针。
@@ -91,6 +91,21 @@ const fn native(rect: Rect) -> RECT {
         top: rect.top,
         right: rect.right,
         bottom: rect.bottom,
+    }
+}
+/// 组合所在显示器及其工作区。
+fn work_area(caret: Rect) -> Result<(HMONITOR, Rect)> {
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: 输出结构大小已填写，矩形为本地值。
+    unsafe {
+        let monitor = MonitorFromRect(&native(caret), MONITOR_DEFAULTTONEAREST);
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return Err(E_FAIL.into());
+        }
+        Ok((monitor, portable(info.rcWork)))
     }
 }
 /// 视图区域也取不到时的输入区域：视图窗口（为空则焦点窗口）的屏幕矩形。
@@ -431,6 +446,9 @@ impl Fonts {
 
 #[cfg(test)]
 type BeforeNotify = Box<dyn Fn(u32)>;
+/// 测试记录窗口实际经过的每个位置；屏幕上能看到的是这些中间位置，不只是最终结果。
+#[cfg(test)]
+type Moves = RefCell<Vec<(i32, i32)>>;
 
 pub struct Popup {
     pub(crate) hwnd: HWND,
@@ -447,6 +465,8 @@ pub struct Popup {
     /// 测试在外部通知发出前检查首帧已画完，不把通知时间误当成绘制时间。
     #[cfg(test)]
     before_notify: RefCell<Option<BeforeNotify>>,
+    #[cfg(test)]
+    moves: Moves,
 }
 
 // SAFETY: 回调截住 panic；只按句柄在本线程登记表中查找候选窗，其余消息交系统默认处理。
@@ -541,6 +561,8 @@ impl Popup {
             quiet,
             #[cfg(test)]
             before_notify: RefCell::new(None),
+            #[cfg(test)]
+            moves: RefCell::default(),
         });
         POPUPS.with(|popups| {
             popups
@@ -550,6 +572,14 @@ impl Popup {
         Ok(popup)
     }
     fn handle(self: &Rc<Self>, message: u32, w: WPARAM, l: LPARAM) -> Option<LRESULT> {
+        #[cfg(test)]
+        if message == WM_WINDOWPOSCHANGED {
+            // SAFETY: 系统保证本消息的 LPARAM 指向有效 WINDOWPOS。
+            let moved = unsafe { &*(l.0 as *const WINDOWPOS) };
+            if !moved.flags.contains(SWP_NOMOVE) {
+                self.moves.borrow_mut().push((moved.x, moved.y));
+            }
+        }
         match message {
             WM_PAINT => self.paint(),
             WM_LBUTTONDOWN => {
@@ -916,6 +946,17 @@ impl Popup {
             },
         })
     }
+    /// 窗口已在该组合矩形应有的位置：组合变长只改矩形右缘，不必重摆重画。
+    fn placed(&self, caret: Rect, work: Rect) -> bool {
+        let Ok(view) = self.view.try_borrow() else {
+            return false;
+        };
+        let size = view.layout.size;
+        let mut current = RECT::default();
+        // SAFETY: 只读本窗口矩形，输出为本地值。
+        unsafe { GetWindowRect(self.hwnd, &mut current) }.is_ok()
+            && portable(current) == position(caret, work, size.cx, size.cy)
+    }
     /// 显示或刷新：owner 取视图窗口（空则取焦点窗口），按组合位置放在工作区内，不激活。
     pub fn show(self: &Rc<Self>, state: &InputState, caret: Rect, owner: HWND) -> Result<()> {
         if !self.alive() {
@@ -942,7 +983,15 @@ impl Popup {
         // 系统可能在最小化或关闭 owned window 时自行隐藏候选；缓存有快照不代表窗口可见。
         // SAFETY: 登记已核对为本对象的存活窗口，仅查询可见性。
         let visible = self.quiet || unsafe { IsWindowVisible(self.hwnd) }.as_bool();
-        if same && !moved && !owner_changed && visible {
+        let (monitor, work) = work_area(caret)?;
+        // 可见且不跨显示器时 DPI 不变：直接移到算好的位置，用户看不到未夹取的中间位置。
+        // SAFETY: 只查询本窗口所在显示器。
+        let settled =
+            visible && unsafe { MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) } == monitor;
+        if same && !owner_changed && settled && self.placed(caret, work) {
+            if moved && let Ok(mut view) = self.view.try_borrow_mut() {
+                view.caret = Some(caret);
+            }
             // SAFETY: 只在原 z-order 层内提到前面，不变为全局 topmost、不激活；不重新布局或重画。
             return unsafe {
                 SetWindowPos(
@@ -962,17 +1011,19 @@ impl Popup {
         if owner_changed {
             set_owner(self.hwnd, owner);
         }
-        // SAFETY: 先移到组合所在显示器再读 DPI，使逐显示器感知的宿主得到正确字号；不激活、不改 z 序。
-        unsafe {
-            SetWindowPos(
-                self.hwnd,
-                None,
-                caret.left,
-                caret.bottom,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            )?;
+        if !settled {
+            // SAFETY: 先移到组合所在显示器再读 DPI，使逐显示器感知的宿主得到正确字号；不激活、不改 z 序。
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    None,
+                    caret.left,
+                    caret.bottom,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )?;
+            }
         }
         // SAFETY: 读取本窗口所在上下文的 DPI；未声明感知的宿主恒为 96。
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96);
@@ -1002,22 +1053,7 @@ impl Popup {
             };
             self.border.set(set.is_ok().then_some(border));
         }
-        let mut monitor = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        // SAFETY: 输出结构大小已填写，矩形为本地值。
-        if !unsafe {
-            GetMonitorInfoW(
-                MonitorFromRect(&native(caret), MONITOR_DEFAULTTONEAREST),
-                &mut monitor,
-            )
-        }
-        .as_bool()
-        {
-            return Err(E_FAIL.into());
-        }
-        let place = position(caret, portable(monitor.rcWork), size.cx, size.cy);
+        let place = position(caret, work, size.cx, size.cy);
         // SAFETY: 工作区夹取后的位置与尺寸；不激活、不改 z 序。
         unsafe {
             SetWindowPos(
@@ -1241,4 +1277,4 @@ impl Drop for Popup {
 
 #[cfg(test)]
 #[path = "candidate_tests.rs"]
-mod tests;
+pub(crate) mod tests;

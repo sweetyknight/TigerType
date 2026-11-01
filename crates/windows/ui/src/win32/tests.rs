@@ -446,10 +446,19 @@ fn assert_learning_fonts(main: &mut Window) {
 fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
     // 合成控件测试不显示窗口、不碰剪贴板、不加载个人资源。
     let _dpi = DpiContext::enter().unwrap();
-    // 使用生产加载器；不依赖系统预装，所有窗口先于字体守卫释放。
+    // 只在测试里私有注册仓库原件，不依赖机器预装；随测试进程结束释放。
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf");
-    let _font = tigertype_windows_fonts::PrivateFont::load(&path).unwrap();
+    let path = wide(&path.to_string_lossy());
+    // SAFETY: 路径 NUL 结尾；注册只在本进程可见。
+    let added = unsafe {
+        windows_sys::Win32::Graphics::Gdi::AddFontResourceExW(
+            path.as_ptr(),
+            windows_sys::Win32::Graphics::Gdi::FR_PRIVATE,
+            std::ptr::null(),
+        )
+    };
+    assert_ne!(added, 0);
     for _ in 0..2 {
         let class = Class::register().unwrap();
         let defaults = Options::default();
