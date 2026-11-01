@@ -39,10 +39,12 @@ unsafe extern "C" {
     fn CTFontManagerRegisterGraphicsFont(font: *const c_void, error: *mut *const c_void) -> bool;
     fn CTFontManagerUnregisterGraphicsFont(font: *const c_void, error: *mut *const c_void) -> bool;
 }
-pub struct PrivateFont(*const c_void);
-impl PrivateFont {
+pub struct PrivateFont(GraphicsFont);
+/// 只解码同一份字节，不注册字体；安装判重和私有注册共用这个加载边界。
+struct GraphicsFont(*const c_void);
+impl GraphicsFont {
     fn new(bytes: &[u8]) -> Result<Self> {
-        // SAFETY: CFData 复制已校验字节；provider/font 逐层持有引用，各失败路径释放已创建对象。
+        // SAFETY: CFData 复制有界字节；provider/font 逐层持有引用，各失败路径释放已创建对象。
         unsafe {
             let data = CFDataCreate(ptr::null(), bytes.as_ptr(), bytes.len().try_into()?);
             if data.is_null() {
@@ -56,10 +58,28 @@ impl PrivateFont {
             let font = CGFontCreateWithDataProvider(provider);
             CGDataProviderRelease(provider);
             if font.is_null() {
-                return Err("无效的随包字体".into());
+                return Err("字体无法加载".into());
             }
+            Ok(Self(font))
+        }
+    }
+}
+impl Drop for GraphicsFont {
+    fn drop(&mut self) {
+        // SAFETY: 只释放本对象持有的创建引用，未注册字体也走同一释放路径。
+        unsafe { CGFontRelease(self.0) };
+    }
+}
+pub(crate) fn validate(bytes: &[u8]) -> Result<()> {
+    GraphicsFont::new(bytes).map(|_| ())
+}
+impl PrivateFont {
+    fn new(bytes: &[u8]) -> Result<Self> {
+        let font = GraphicsFont::new(bytes)?;
+        // SAFETY: 解码对象存活至注册完成；失败自动释放，成功由 PrivateFont 持有。
+        unsafe {
             let mut error = ptr::null();
-            if !CTFontManagerRegisterGraphicsFont(font, &mut error) {
+            if !CTFontManagerRegisterGraphicsFont(font.0, &mut error) {
                 let code = if error.is_null() {
                     0
                 } else {
@@ -67,7 +87,6 @@ impl PrivateFont {
                     CFRelease(error);
                     code
                 };
-                CGFontRelease(font);
                 return Err(format!(
                     "进程私有字体注册失败（CoreText {code}），不使用同名系统字体替代"
                 )
@@ -81,8 +100,7 @@ impl Drop for PrivateFont {
     fn drop(&mut self) {
         // SAFETY: 成功注册的字体仅注销一次；显示组件先销毁，随后释放自有 CGFont 引用。
         unsafe {
-            CTFontManagerUnregisterGraphicsFont(self.0, ptr::null_mut());
-            CGFontRelease(self.0);
+            CTFontManagerUnregisterGraphicsFont(self.0.0, ptr::null_mut());
         }
     }
 }

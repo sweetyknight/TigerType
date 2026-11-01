@@ -1,7 +1,7 @@
 //! 全机安装边界；只允许 root 操作固定目录，复制已校验字节，不自动启用输入法或触碰用户数据。
-use crate::{bundle, font_file};
+use crate::{bundle, font_file, fonts};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::{CStr, CString, OsStr},
     fs,
     io::{Cursor, Write},
@@ -267,11 +267,31 @@ fn publish_fonts(directories: &[&Path], source: &Path, manifest: &bundle::Manife
             return Err(format!("已有文楷缺少虎码字根，请先移除后重新安装：{path}").into());
         }
     }
+    let mut checked = BTreeSet::new();
     for entry in &manifest.files {
         if let Some(name) = entry.path.strip_prefix("Contents/Resources/Fonts/") {
             let bytes = bundle::read(source, entry)?;
             let families = font_file::families(&mut Cursor::new(&bytes));
-            if families.iter().any(|family| existing.contains_key(family)) {
+            let matches: BTreeSet<_> = families
+                .iter()
+                .filter_map(|family| existing.get(family))
+                .flatten()
+                .collect();
+            for path in &matches {
+                if checked.insert(*path) {
+                    // name/cmap 可在字体损坏后仍完好；有界安全读取后实际解码，不能假称已安装。
+                    let usable = storage::read_file(path, 128 << 20)
+                        .and_then(|bytes| fonts::validate(&bytes));
+                    if let Err(error) = usable {
+                        return Err(format!(
+                            "已有字体无法加载，请先移除后重新安装：{}（{error}）",
+                            path.display()
+                        )
+                        .into());
+                    }
+                }
+            }
+            if !matches.is_empty() {
                 println!("已有字体，未改动：{name}");
                 continue;
             }
@@ -476,6 +496,84 @@ mod tests {
         fs::write(user.join("official.ttf"), plain)?;
         let error = publish_fonts(&directories, &source, &manifest).unwrap_err();
         assert!(error.to_string().contains("缺少虎码字根"), "{error}");
+        Ok(())
+    }
+    #[test]
+    fn damaged_fonts_with_intact_names_and_cmap_are_not_accepted() -> Result<()> {
+        let root = resources::new_directory(
+            &std::env::temp_dir().canonicalize()?,
+            "tigertype-font-damaged",
+        )?;
+        let (system, user, source) = (root.join("system"), root.join("user"), root.join("source"));
+        fs::create_dir_all(source.join("Contents/Resources/Fonts"))?;
+        fs::create_dir(&system)?;
+        fs::create_dir(&user)?;
+        // 文楷和非文楷都须实际解码；元数据和字根映射完好不能掩盖字形表缺失。
+        for name in ["LXGWWenKaiGBScreen.ttf", "CascadiaMono.ttf"] {
+            let font = fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../resources/fonts")
+                    .join(name),
+            )?;
+            fonts::validate(&font)?;
+            let count = u16::from_be_bytes(font[4..6].try_into()?) as usize;
+            let tables: Vec<_> = font[12..12 + count * 16]
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .filter(|record| matches!(&record[..4], b"name" | b"cmap"))
+                .map(|record| {
+                    let offset = u32::from_be_bytes(record[8..12].try_into().unwrap()) as usize;
+                    let length = u32::from_be_bytes(record[12..16].try_into().unwrap()) as usize;
+                    (&record[..4], &font[offset..offset + length])
+                })
+                .collect();
+            assert_eq!(tables.len(), 2);
+            let mut damaged = vec![0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0];
+            let mut offset = 44u32;
+            for (tag, data) in &tables {
+                damaged.extend_from_slice(tag);
+                damaged.extend_from_slice(&[0; 4]);
+                damaged.extend_from_slice(&offset.to_be_bytes());
+                damaged.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                offset += data.len() as u32;
+            }
+            for (_, data) in tables {
+                damaged.extend_from_slice(data);
+            }
+            assert_eq!(
+                font_file::families(&mut Cursor::new(&damaged)),
+                font_file::families(&mut Cursor::new(&font))
+            );
+            if name == "LXGWWenKaiGBScreen.ttf" {
+                assert!(font_file::covers(
+                    &mut Cursor::new(&damaged),
+                    &font_file::LEARNING_ROOTS
+                ));
+            }
+            assert!(fonts::validate(&damaged).is_err());
+            let path = format!("Contents/Resources/Fonts/{name}");
+            fs::write(source.join(&path), &font)?;
+            let manifest = bundle::Manifest {
+                files: vec![bundle::entry(&path, &font)],
+            };
+            let existing = user.join("renamed.ttf");
+            fs::write(&existing, &damaged)?;
+            let error = publish_fonts(&[&system, &user], &source, &manifest).unwrap_err();
+            assert!(error.to_string().contains("已有字体无法加载"), "{error}");
+            assert!(error.to_string().contains(existing.to_str().unwrap()));
+            assert_eq!(fs::read(&existing)?, damaged);
+            assert_eq!(fs::read_dir(&system)?.count(), 0);
+            // 移除冲突后缺字体可正常补装；重复运行保留全机字体原 inode。
+            fs::remove_file(&existing)?;
+            publish_fonts(&[&system, &user], &source, &manifest)?;
+            let installed = system.join(name);
+            assert_eq!(fs::read(&installed)?, font);
+            let inode = fs::metadata(&installed)?.ino();
+            publish_fonts(&[&system, &user], &source, &manifest)?;
+            assert_eq!(fs::metadata(&installed)?.ino(), inode);
+            fs::remove_file(installed)?;
+        }
         Ok(())
     }
     #[test]

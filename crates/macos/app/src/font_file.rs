@@ -80,7 +80,7 @@ fn family_names(table: &[u8]) -> Option<Vec<String>> {
     }
     Some(names)
 }
-/// 文件内全部字面的字族名（含本地化名）；不是字体或已损坏时为空，由调用方当作不存在。
+/// 文件内全部字面的字族名（含本地化名）；元数据可读不代表字体可加载，安装跳过前须另验。
 pub fn families(file: &mut (impl Read + Seek)) -> Vec<String> {
     let mut names = Vec::new();
     for face in faces(file) {
