@@ -56,6 +56,7 @@ Source: "{#Root}\target\release\tigertype_windows_input_method.dll"; DestDir: "{
 Source: "{#Root}\target\i686-pc-windows-msvc\release\tigertype_windows_input_method.dll"; DestDir: "{app}"; DestName: "tigertype_tsf_x86.dll"; Flags: ignoreversion regserver uninsrestartdelete 32bit; BeforeInstall: Retire('tigertype_tsf_x86.dll')
 ; 锁定码表原文，后台启动时逐个核对大小/SHA256 后解析；清单变动须同步此处（打包驱动会核对）。
 Source: "{#Root}\resources\tiger\tiger.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\tigress.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\tigress_ci.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\tigress_simp_ci.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\core2022.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
@@ -64,6 +65,8 @@ Source: "{#Root}\resources\tiger\opencc\hu_cf.txt"; DestDir: "{app}\tiger\opencc
 Source: "{#Root}\resources\tiger\opencc\PYCharacters.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\opencc\STCharacters_Tu.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\opencc\TSCharacters.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\opencc\STPhrases.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\opencc\TSPhrases.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
 ; 字体缺失时才全机安装（各用户与 UWP 宿主可见）：系统已有该字体（全机或当前用户）就跳过，避免同一字体重复注册；已有同名文件不覆盖，卸载不删除。
 Source: "{#Root}\resources\fonts\LXGWWenKaiGBScreen.ttf"; DestDir: "{autofonts}"; FontInstall: "LXGW WenKai GB Screen"; Check: not FontExists('LXGW WenKai GB Screen'); Flags: onlyifdoesntexist uninsneveruninstall
 Source: "{#Root}\resources\fonts\CascadiaMono.ttf"; DestDir: "{autofonts}"; FontInstall: "Cascadia Mono"; Check: not FontExists('Cascadia Mono'); Flags: onlyifdoesntexist uninsneveruninstall

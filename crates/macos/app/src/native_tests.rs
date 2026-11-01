@@ -143,8 +143,8 @@ fn font_coverage(root: &std::path::Path) {
     let singles = chars.len();
     chars.extend(data.phrases.iter().flat_map(|phrase| phrase.text.chars()));
     for mapping in data.simplified.iter().chain(&data.traditional) {
-        chars.insert(mapping.character);
-        chars.extend(&mapping.variants);
+        chars.extend(mapping.text.chars());
+        chars.extend(mapping.variants.iter().flat_map(|text| text.chars()));
     }
     let missing: Vec<_> = chars
         .iter()

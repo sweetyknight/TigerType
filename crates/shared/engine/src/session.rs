@@ -108,8 +108,7 @@ impl<'a> Session<'a> {
     }
     pub fn snapshot(&self) -> InputState {
         let page = self.selected / self.per_page();
-        let show = self.options.typing_mode == tigertype_contracts::TypingMode::Single
-            && (self.options.show_learning || self.mode == InputMode::Pinyin);
+        let show = self.options.show_learning || self.mode == InputMode::Pinyin;
         let candidates: Vec<_> = self
             .candidates
             .iter()
@@ -120,7 +119,8 @@ impl<'a> Session<'a> {
                 let mut candidate = candidate.clone();
                 // 选字标号用阿拉伯数字，与数字键选重一一对应。
                 candidate.label = (index + 1).to_string();
-                if show {
+                // 学习资料按单字组织，词候选不显示拆分与编码。
+                if show && candidate.text.chars().nth(1).is_none() {
                     let info = self
                         .dictionary
                         .learning(candidate.text.chars().next().unwrap());

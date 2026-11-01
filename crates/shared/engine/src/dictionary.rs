@@ -3,7 +3,7 @@ use crate::{Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use tigertype_contracts::{
     Candidate, InputMode, LOOKUP_PAGE_SIZE, LearningInfo, LookupItem, LookupPage,
-    MAX_LEARNING_ITEMS, MAX_PINYIN_BYTES, MAX_QUERY_CHARS, Options, OutputForm,
+    MAX_LEARNING_ITEMS, MAX_PINYIN_BYTES, MAX_QUERY_CHARS, Options, OutputForm, TypingMode,
 };
 
 const MAX_ROWS: usize = 300_000;
@@ -35,14 +35,18 @@ pub struct Detail {
     pub decomposition: Option<String>,
     pub readings: Vec<String>,
 }
+/// 字形映射的键是单字或短语；单字的一对多全部列出，词取整词命中或逐段最长匹配。
 #[derive(Debug, Clone)]
 pub struct Mapping {
-    pub character: char,
-    pub variants: Vec<char>,
+    pub text: String,
+    pub variants: Vec<String>,
 }
 #[derive(Debug, Clone, Default)]
 pub struct Data {
+    /// 单字模式用的 tiger 单字表。
     pub entries: Vec<Entry>,
+    /// 词模式用的 tigress 单字表：字码同上，权重为官方字词混排而定，不能与 entries 互换。
+    pub word_entries: Vec<Entry>,
     /// 小狼毫 tigress_ci 词表；只保留词、权重和最终四码，不加载 Lua 编码器。
     pub phrases: Vec<Phrase>,
     pub common: Vec<char>,
@@ -53,18 +57,43 @@ pub struct Data {
 }
 
 pub struct Dictionary {
-    entries: Vec<Entry>,
     common: BTreeSet<char>,
-    pinyin: Vec<Pronunciation>,
     // 启动时把同码桶整理为按权重顺序的去重字符，输入路径不再扫描整张排序表。
     tiger_buckets: BTreeMap<String, Vec<char>>,
     pinyin_buckets: BTreeMap<String, Vec<char>>,
     phrases: Vec<Phrase>,
+    // 词模式的同码候选：单字与词同桶，查字的词码入口再滤掉单字。
     word_buckets: BTreeMap<String, Vec<String>>,
     learning: Vec<(char, LearningInfo)>,
-    simplified: BTreeMap<char, Vec<char>>,
-    traditional: BTreeMap<char, Vec<char>>,
+    simplified: BTreeMap<String, Vec<String>>,
+    traditional: BTreeMap<String, Vec<String>>,
 }
+
+/// 与官方 core2022_filter 相同的汉字范围（含私用区字根）；范围外的标点等不受常用字过滤。
+const HAN_RANGES: [(u32, u32); 22] = [
+    (0x4e00, 0x9fff),
+    (0x3400, 0x4dbf),
+    (0x20000, 0x2a6df),
+    (0x2a700, 0x2b73f),
+    (0x2b740, 0x2b81f),
+    (0x2b820, 0x2ceaf),
+    (0x2ceb0, 0x2ebef),
+    (0x30000, 0x3134f),
+    (0x31350, 0x323af),
+    (0x2ebf0, 0x2ee5d),
+    (0x323b0, 0x33479),
+    (0x31c0, 0x31ef),
+    (0x2e80, 0x2eff),
+    (0x2f00, 0x2fdf),
+    (0xf900, 0xfadf),
+    (0x2f800, 0x2fa1f),
+    (0x2ff0, 0x2fff),
+    (0x3100, 0x312f),
+    (0x31a0, 0x31bf),
+    (0xe000, 0xf8ff),
+    (0xf0000, 0xffff),
+    (0x100000, 0x10ffff),
+];
 
 pub fn valid_code(code: &str) -> bool {
     (1..=4).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_lowercase())
@@ -74,19 +103,42 @@ fn distinct_push(items: &mut Vec<String>, item: String) {
         items.push(item);
     }
 }
-fn maps(values: Vec<Mapping>) -> Result<BTreeMap<char, Vec<char>>> {
+fn maps(values: Vec<Mapping>) -> Result<BTreeMap<String, Vec<String>>> {
     let mut map = BTreeMap::new();
     for value in values {
         if value.variants.is_empty()
             || value.variants.len() > MAX_VARIANTS
-            || value.character.is_control()
-            || value.variants.iter().any(|c| c.is_control())
-            || map.insert(value.character, value.variants).is_some()
+            || std::iter::once(&value.text)
+                .chain(&value.variants)
+                .any(|text| text.is_empty() || text.chars().any(char::is_control))
+            || map.insert(value.text, value.variants).is_some()
         {
             return Err(Error("简繁映射为空、重复或超限"));
         }
     }
     Ok(map)
+}
+/// 同 OpenCC（经 Rime simplifier）：整词命中列全部字形；否则从左到右取最长键的首选字形，表外字保留。
+fn forms(table: &BTreeMap<String, Vec<String>>, text: &str) -> Vec<String> {
+    if let Some(forms) = table.get(text) {
+        return forms.clone();
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(first) = rest.chars().next() {
+        let longest = std::iter::once(rest.len())
+            .chain(rest.char_indices().rev().map(|(index, _)| index))
+            .filter(|end| *end > 0)
+            .find_map(|end| {
+                table
+                    .get(&rest[..end])
+                    .map(|forms| (end, forms[0].as_str()))
+            });
+        let (end, form) = longest.unwrap_or((first.len_utf8(), &rest[..first.len_utf8()]));
+        output.push_str(form);
+        rest = &rest[end..];
+    }
+    vec![output]
 }
 
 /// 不做声调和模糊纠错；ü/v 仅作为同一个无调输入码。
@@ -106,6 +158,7 @@ impl Dictionary {
         if data.entries.is_empty()
             || [
                 data.entries.len(),
+                data.word_entries.len(),
                 data.phrases.len(),
                 data.common.len(),
                 data.pinyin.len(),
@@ -183,24 +236,32 @@ impl Dictionary {
         // 词候选沿用码表权重顺序，不能用 Hash/BTree 的键序替代排序。
         data.phrases
             .sort_by(|a, b| a.code.cmp(&b.code).then_with(|| b.weight.cmp(&a.weight)));
-        let mut word_buckets = BTreeMap::<String, Vec<String>>::new();
-        for phrase in &data.phrases {
-            if phrase.text.chars().count() < 2
+        if data.phrases.iter().any(|phrase| {
+            phrase.text.chars().count() < 2
                 || phrase.text.chars().any(char::is_control)
                 || !valid_code(&phrase.code)
-            {
-                return Err(Error("词条文本或编码非法"));
-            }
-            word_buckets
-                .entry(phrase.code.clone())
-                .or_default()
-                .push(phrase.text.clone());
+        }) || data
+            .word_entries
+            .iter()
+            .any(|entry| !valid_code(&entry.code) || entry.character.is_control())
+        {
+            return Err(Error("词条文本或编码非法"));
         }
-        for values in word_buckets.values_mut() {
-            values.dedup();
-            if values.len() > MAX_MATCHES {
-                return Err(Error("同码词候选超过有界容量"));
-            }
+        // 同官方 tigress：单字表在前、词表在后，同码按权重降序稳定排序（同权重保持此顺序），再按文本去重。
+        let mut word_rows: Vec<_> = data
+            .word_entries
+            .iter()
+            .map(|entry| (&entry.code, entry.weight, entry.character.to_string()))
+            .chain(
+                data.phrases
+                    .iter()
+                    .map(|phrase| (&phrase.code, phrase.weight, phrase.text.clone())),
+            )
+            .collect();
+        word_rows.sort_by(|a, b| a.0.cmp(b.0).then_with(|| b.1.cmp(&a.1)));
+        let mut word_buckets = BTreeMap::<String, Vec<String>>::new();
+        for (code, _, text) in word_rows {
+            distinct_push(word_buckets.entry(code.clone()).or_default(), text);
         }
         // 稳定排序让同权重候选保留原始顺序，不使用随机哈希序作为排序。
         data.entries
@@ -232,9 +293,7 @@ impl Dictionary {
             }
         }
         let result = Self {
-            entries: data.entries,
             common: data.common.into_iter().collect(),
-            pinyin: data.pinyin,
             tiger_buckets,
             pinyin_buckets,
             phrases: data.phrases,
@@ -244,33 +303,36 @@ impl Dictionary {
             traditional: maps(data.traditional)?,
         };
         // 在加载时拒绝过大的同码桶，不能在查询时截断并悄悄丢掉后部候选。
-        for mode in [InputMode::Tiger, InputMode::Pinyin] {
-            let mut counts = BTreeMap::<&str, usize>::new();
-            let rows: Vec<(&str, char)> = match mode {
-                InputMode::Tiger => result
-                    .entries
-                    .iter()
-                    .map(|e| (e.code.as_str(), e.character))
-                    .collect(),
-                InputMode::Pinyin => result
-                    .pinyin
-                    .iter()
-                    .map(|e| (e.pinyin.as_str(), e.character))
-                    .collect(),
-            };
-            for (code, character) in rows {
-                let count = counts.entry(code).or_default();
-                *count += result
-                    .simplified
-                    .get(&character)
-                    .map_or(1, Vec::len)
-                    .max(result.traditional.get(&character).map_or(1, Vec::len));
-                if *count > MAX_MATCHES {
-                    return Err(Error("同码转换候选超过有界容量"));
-                }
-            }
+        let expansion = |text: &str| {
+            let simplified = result.simplified.get(text).map_or(1, Vec::len);
+            simplified.max(result.traditional.get(text).map_or(1, Vec::len))
+        };
+        let characters = result
+            .tiger_buckets
+            .values()
+            .chain(result.pinyin_buckets.values());
+        if characters
+            .map(|bucket| bucket.iter().map(|c| expansion(&c.to_string())).sum())
+            .chain(
+                result
+                    .word_buckets
+                    .values()
+                    .map(|bucket| bucket.iter().map(|text| expansion(text)).sum()),
+            )
+            .any(|count: usize| count > MAX_MATCHES)
+        {
+            return Err(Error("同码转换候选超过有界容量"));
         }
         Ok(result)
+    }
+    /// 常用字过滤同官方：词中每个汉字都须在常用字集。
+    fn common_text(&self, text: &str) -> bool {
+        text.chars().all(|c| {
+            let han = HAN_RANGES
+                .iter()
+                .any(|(first, last)| (*first..=*last).contains(&(c as u32)));
+            !han || self.common.contains(&c)
+        })
     }
 
     pub fn learning(&self, character: char) -> LearningInfo {
@@ -290,63 +352,56 @@ impl Dictionary {
         if code.is_empty() {
             return Vec::new();
         }
-        if mode == InputMode::Tiger && options.typing_mode == tigertype_contracts::TypingMode::Word
-        {
-            return self
-                .word_buckets
-                .get(code)
-                .into_iter()
-                .flatten()
-                .map(|text| Candidate {
-                    text: text.clone(),
-                    ..Default::default()
-                })
-                .collect();
-        }
-        let characters: Vec<char> = match mode {
-            InputMode::Tiger => self
+        let texts: Vec<String> = match (mode, options.typing_mode) {
+            (InputMode::Tiger, TypingMode::Single) => self
                 .tiger_buckets
                 .get(code)
                 .into_iter()
                 .flatten()
-                .copied()
                 .filter(|character| !options.common_only || self.common.contains(character))
+                .map(char::to_string)
                 .collect(),
-            InputMode::Pinyin => self
+            (InputMode::Tiger, TypingMode::Word) => self
+                .word_buckets
+                .get(code)
+                .into_iter()
+                .flatten()
+                .filter(|text| !options.common_only || self.common_text(text))
+                .cloned()
+                .collect(),
+            (InputMode::Pinyin, _) => self
                 .pinyin_buckets
                 .get(code)
                 .into_iter()
                 .flatten()
-                .copied()
+                .map(char::to_string)
                 .collect(),
         };
-        let conversion = match options.output_form {
-            OutputForm::Original => None,
-            OutputForm::Simplified => Some(&self.simplified),
-            OutputForm::Traditional => Some(&self.traditional),
+        let table = match options.output_form {
+            OutputForm::Original => {
+                // 原字模式的桶已在加载时去重，直接生成候选，避免每个按键重复分配去重树。
+                return texts
+                    .into_iter()
+                    .map(|text| Candidate {
+                        text,
+                        ..Default::default()
+                    })
+                    .collect();
+            }
+            OutputForm::Simplified => &self.simplified,
+            OutputForm::Traditional => &self.traditional,
         };
-        if conversion.is_none() {
-            // 原字模式的桶已在加载时去重，直接生成候选，避免每个按键重复分配去重树。
-            return characters
-                .into_iter()
-                .map(|character| Candidate {
-                    text: character.to_string(),
-                    ..Default::default()
-                })
-                .collect();
-        }
+        // 官方的去重在字形转换之后：不同来源转成同一字形只留首个。
         let mut seen = BTreeSet::new();
         let mut result = Vec::new();
-        for source in characters {
-            let original = [source];
-            let variants = conversion
-                .and_then(|m| m.get(&source))
-                .map_or(original.as_slice(), Vec::as_slice);
-            for &character in variants {
-                if seen.insert(character) {
+        for original in texts {
+            let mut chars = original.chars();
+            let single = chars.next().filter(|_| chars.next().is_none());
+            for text in forms(table, &original) {
+                if seen.insert(text.clone()) {
                     result.push(Candidate {
-                        text: character.to_string(),
-                        source: (source != character).then_some(source),
+                        source: single.filter(|_| text != original),
+                        text,
                         ..Default::default()
                     });
                 }
@@ -373,11 +428,15 @@ impl Dictionary {
             .chars()
             .all(|c| c.is_ascii_alphabetic() || c == 'ü' || c == 'Ü')
         {
-            let mut values = self
+            // 词码入口只列词：单字虎码不作查询入口，字母串同时按拼音查单字。
+            let mut values: Vec<String> = self
                 .word_buckets
                 .get(&query.to_ascii_lowercase())
+                .into_iter()
+                .flatten()
+                .filter(|text| text.chars().nth(1).is_some())
                 .cloned()
-                .unwrap_or_default();
+                .collect();
             values.extend(
                 self.candidates(
                     &normalize_pinyin(query)?,

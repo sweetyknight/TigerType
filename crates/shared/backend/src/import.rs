@@ -13,6 +13,7 @@ const LIMIT: u64 = 128 * 1024 * 1024;
 /// 码表目录内须有的文件（相对路径），即 resources/tiger 与安装目录 tiger 的全部内容。
 pub const SOURCES: &[&str] = &[
     "tiger.dict.yaml",
+    "tigress.dict.yaml",
     "tigress_ci.dict.yaml",
     "tigress_simp_ci.dict.yaml",
     "core2022.dict.yaml",
@@ -21,6 +22,8 @@ pub const SOURCES: &[&str] = &[
     "opencc/PYCharacters.txt",
     "opencc/STCharacters_Tu.txt",
     "opencc/TSCharacters.txt",
+    "opencc/STPhrases.txt",
+    "opencc/TSPhrases.txt",
 ];
 
 fn source_entries() -> Result<Vec<Entry>> {
@@ -80,12 +83,14 @@ fn mappings(text: &str) -> Result<Vec<Mapping>> {
     lines(text)
         .map(|line| {
             let row = fields(line, 2)?;
+            let variants: Vec<_> = row[1].split_whitespace().map(str::to_owned).collect();
+            // 单字只能映射到单字；短语表的键至少两字，值按原文保留。
+            if row[0].chars().nth(1).is_none() {
+                variants.iter().try_for_each(|v| character(v).map(|_| ()))?;
+            }
             Ok(Mapping {
-                character: character(row[0])?,
-                variants: row[1]
-                    .split_whitespace()
-                    .map(character)
-                    .collect::<Result<_>>()?,
+                text: row[0].to_owned(),
+                variants,
             })
         })
         .collect()
@@ -98,6 +103,15 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
             character: character(row[0])?,
             code: row[1].into(),
             weight: row[2].parse()?,
+        });
+    }
+    // 词版单字表的字与码同上，但权重是官方为字词混排另定的；末列 stem 只供造词，可省略。
+    for line in lines(dictionary_body(&files["tigress.dict.yaml"])?) {
+        let row = fields(line, line.split('\t').count().clamp(3, 4))?;
+        data.word_entries.push(tigertype_engine::Entry {
+            character: character(row[0])?,
+            weight: row[1].parse()?,
+            code: row[2].into(),
         });
     }
     // 两张 tigress 词表已包含按虎码编码器生成的词码，导入最终四码而不执行 Lua。
@@ -171,8 +185,13 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
         detail.readings = readings.split_whitespace().map(str::to_owned).collect();
     }
     data.details = details.into_values().collect();
-    data.simplified = mappings(&files["opencc/TSCharacters.txt"])?;
-    data.traditional = mappings(&files["opencc/STCharacters_Tu.txt"])?;
+    // 同官方 t2s.json、st_tu.json 的字典组：短语在前、单字在后，合为一张表。
+    data.simplified = mappings(&files["opencc/TSPhrases.txt"])?;
+    data.simplified
+        .extend(mappings(&files["opencc/TSCharacters.txt"])?);
+    data.traditional = mappings(&files["opencc/STPhrases.txt"])?;
+    data.traditional
+        .extend(mappings(&files["opencc/STCharacters_Tu.txt"])?);
     Ok(data)
 }
 
@@ -197,7 +216,8 @@ mod tests {
         assert!(fields("a\tb\tc", 2).is_err());
         assert!(dictionary_body("没有正文").is_err());
         assert!(mappings("发\t發髮").is_err());
-        assert_eq!(mappings("发\t發 髮").unwrap()[0].variants, vec!['發', '髮']);
+        assert_eq!(mappings("发\t發 髮").unwrap()[0].variants, ["發", "髮"]);
+        assert_eq!(mappings("头发\t頭髮").unwrap()[0].variants, ["頭髮"]);
     }
     #[test]
     fn verified_bytes_reject_corruption_and_keep_original_file() -> Result<()> {

@@ -73,7 +73,7 @@ impl Default for Options {
     }
 }
 
-/// 虎码输入范围。词模式仍复用同一套四码编辑会话，只替换候选来源。
+/// 虎码输入范围。词模式即官方词版：单字与词同表按官方权重混排，编辑会话与单字模式相同。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TypingMode {

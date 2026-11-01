@@ -97,7 +97,7 @@ pub fn render(options: &Options) -> Result<String, serde_json::Error> {
 # 格式有误时保留当前设置，并提示出错的行。
 
 [input]
-# 普通输入的码表："single" 单字 | "word" 词
+# 普通输入的码表："single" 单字 | "word" 词（同官方词版，字词都能打）
 mode = {mode}
 
 # 只出常用字；false 时普通输入也用全字集（查字始终用全字集）

@@ -1,5 +1,5 @@
 //! 合成词表覆盖状态机与学习契约，不读取真实资源、文件或个人输入。
-use tigertype_contracts::{InputMode, Key, Options, OutputForm};
+use tigertype_contracts::{InputMode, InputState, Key, Options, OutputForm, TypingMode};
 use tigertype_engine::{Data, Detail, Dictionary, Entry, Mapping, Phrase, Pronunciation, Session};
 
 fn data() -> Data {
@@ -88,27 +88,22 @@ fn data() -> Data {
                 readings: vec!["fā".into()],
             },
         ],
-        simplified: vec![Mapping {
-            character: '發',
-            variants: vec!['发'],
-        }],
-        traditional: vec![Mapping {
-            character: '发',
-            variants: vec!['發', '髮', '發'],
-        }],
+        simplified: vec![mapping("發", &["发"])],
+        traditional: vec![mapping("发", &["發", "髮", "發"])],
+        ..Default::default()
+    }
+}
+fn mapping(text: &str, variants: &[&str]) -> Mapping {
+    Mapping {
+        text: text.into(),
+        variants: variants.iter().map(|text| (*text).into()).collect(),
     }
 }
 
 #[test]
 fn word_mode_uses_tigress_codes_and_lookup_returns_phrase_text() {
     let dictionary = Dictionary::new(data()).unwrap();
-    let mut session = Session::new(
-        &dictionary,
-        Options {
-            typing_mode: tigertype_contracts::TypingMode::Word,
-            ..Options::default()
-        },
-    );
+    let mut session = Session::new(&dictionary, word_options());
     let outcome = ["tuja".chars().map(Key::Character).collect::<Vec<_>>()]
         .concat()
         .into_iter()
@@ -117,6 +112,235 @@ fn word_mode_uses_tigress_codes_and_lookup_returns_phrase_text() {
         .unwrap();
     assert_eq!(outcome.state.candidates[0].text, "我们");
     assert_eq!(dictionary.lookup("我们", 0).unwrap().items[0].text, "我们");
+}
+
+fn word_options() -> Options {
+    Options {
+        typing_mode: TypingMode::Word,
+        common_only: false,
+        ..Options::default()
+    }
+}
+/// 权重取自官方：单字表与词版单字表故意不同，证明词模式只认词版权重。
+fn word_data() -> Data {
+    let entry = |character, code: &str, weight| Entry {
+        character,
+        code: code.into(),
+        weight,
+    };
+    let phrase = |text: &str, code: &str, weight| Phrase {
+        text: text.into(),
+        code: code.into(),
+        weight,
+    };
+    Data {
+        entries: vec![entry('一', "fi", 4_346_343)],
+        word_entries: vec![
+            entry('的', "u", 10_359_470),
+            entry('一', "fi", 256),
+            entry('治', "kk", 500),
+            entry('他', "je", 2_260_948),
+            entry('我', "tupg", 256),
+            entry('魑', "wr", 485),
+        ],
+        phrases: vec![
+            phrase("工作", "u", 5000),
+            phrase("工作", "ugjw", 36401),
+            phrase("一般", "fi", 485),
+            phrase("渐渐", "kk", 485),
+            phrase("魑魅", "wr", 485),
+            phrase("头发", "wmfy", 900),
+            phrase("喉头发", "wmfy", 800),
+            phrase("甲，乙", "wmfy", 600),
+            phrase("甲乙", "wmfy", 500),
+            phrase("乾隆", "wmfy", 450),
+            phrase("甲乙", "wmfy", 400),
+            phrase("表面", "wmfz", 2),
+            phrase("錶面", "wmfz", 1),
+        ],
+        common: "的一治他我工作般渐头发喉甲乙".chars().collect(),
+        simplified: vec![mapping("乾隆", &["乾隆"]), mapping("乾", &["干", "乾"])],
+        traditional: vec![
+            mapping("头发", &["頭髮"]),
+            mapping("表面", &["表面", "錶面"]),
+            mapping("发", &["發", "髮"]),
+            mapping("头", &["頭"]),
+            mapping("面", &["面", "麵"]),
+        ],
+        ..Default::default()
+    }
+}
+fn type_code_state(session: &mut Session<'_>, code: &str) -> InputState {
+    type_code(session, code);
+    session.snapshot()
+}
+/// 新组合下该码的全部候选（跨页）。
+fn texts(session: &mut Session<'_>, code: &str) -> Vec<String> {
+    session.clear().unwrap();
+    let mut state = type_code_state(session, code);
+    let mut result = Vec::new();
+    loop {
+        result.extend(state.candidates.iter().map(|c| c.text.clone()));
+        if state.is_last_page {
+            return result;
+        }
+        state = session.process(Key::PageDown).unwrap().state;
+    }
+}
+
+#[test]
+fn word_mode_mixes_characters_and_words_by_official_weight() {
+    let dictionary = Dictionary::new(word_data()).unwrap();
+    let mut session = Session::new(&dictionary, word_options());
+    assert_eq!(texts(&mut session, "u"), ["的", "工作"]);
+    // 词版单字权重 256 低于简词 485；单字表的 4346343 会把“一”排回首选。
+    assert_eq!(texts(&mut session, "fi"), ["一般", "一"]);
+    assert_eq!(texts(&mut session, "kk"), ["治", "渐渐"]);
+    // 同权重保持单字表在前，同 librime 的稳定排序。
+    assert_eq!(texts(&mut session, "wr"), ["魑", "魑魅"]);
+    assert_eq!(texts(&mut session, "ugjw"), ["工作"]);
+    // 中间隔着其他词的同码同词也只出现一次。
+    let bucket = texts(&mut session, "wmfy");
+    assert_eq!(bucket.iter().filter(|text| *text == "甲乙").count(), 1);
+    assert_eq!(texts(&mut session, "zz"), Vec::<String>::new());
+}
+
+#[test]
+fn word_mode_commits_single_characters_like_official_word_edition() {
+    let dictionary = Dictionary::new(word_data()).unwrap();
+    let mut session = Session::new(&dictionary, word_options());
+    type_code(&mut session, "u");
+    assert_eq!(
+        session.process(Key::Space).unwrap().commit.as_deref(),
+        Some("的")
+    );
+    type_code(&mut session, "je");
+    assert_eq!(
+        session.process(Key::Space).unwrap().commit.as_deref(),
+        Some("他")
+    );
+    assert!(!session.composing(), "二码单字上屏后不能残留编码接到下一码");
+    // 单字全码后的下一键顶上首选，不能被当作空码清掉。
+    type_code(&mut session, "tupg");
+    let outcome = session.process(Key::Character('u')).unwrap();
+    assert_eq!(outcome.commit.as_deref(), Some("我"));
+    assert_eq!(outcome.state.candidates[0].text, "的");
+}
+
+#[test]
+fn word_mode_applies_common_filter_to_every_character() {
+    let dictionary = Dictionary::new(word_data()).unwrap();
+    let options = Options {
+        common_only: true,
+        ..word_options()
+    };
+    let mut session = Session::new(&dictionary, options);
+    assert_eq!(texts(&mut session, "wr"), Vec::<String>::new());
+    assert_eq!(texts(&mut session, "fi"), ["一般", "一"]);
+    // 含一个非常用字的词被滤掉；标点不是汉字，不参与过滤。
+    assert_eq!(
+        texts(&mut session, "wmfy"),
+        ["头发", "喉头发", "甲，乙", "甲乙"]
+    );
+}
+
+#[test]
+fn word_mode_converts_output_form_like_opencc() {
+    let dictionary = Dictionary::new(word_data()).unwrap();
+    let traditional = Options {
+        output_form: OutputForm::Traditional,
+        ..word_options()
+    };
+    let mut session = Session::new(&dictionary, traditional);
+    // 整词命中用短语，逐字取首选会错成“頭發”；未收录的词逐段取最长键的首选字形。
+    let bucket = texts(&mut session, "wmfy");
+    assert_eq!(bucket[0], "頭髮");
+    assert_eq!(bucket[1], "喉頭髮");
+    // 整词多字形全部列出；转换后与其他候选重复的只留首个。
+    assert_eq!(texts(&mut session, "wmfz"), ["表面", "錶面"]);
+    // 来源标注只属于单字。
+    session.clear().unwrap();
+    assert!(
+        type_code_state(&mut session, "wmfy").candidates[0]
+            .source
+            .is_none()
+    );
+    let simplified = Options {
+        output_form: OutputForm::Simplified,
+        ..word_options()
+    };
+    let mut session = Session::new(&dictionary, simplified);
+    assert!(texts(&mut session, "wmfy").contains(&"乾隆".to_owned()));
+}
+
+#[test]
+fn word_mode_shows_learning_for_characters_and_pinyin_only() {
+    let mut data = word_data();
+    data.details = vec![Detail {
+        character: '的',
+        full_codes: vec!["unid".into()],
+        decomposition: Some("白勹丶".into()),
+        readings: Vec::new(),
+    }];
+    data.entries.push(Entry {
+        character: '的',
+        code: "u".into(),
+        weight: 1,
+    });
+    data.pinyin = vec![Pronunciation {
+        character: '的',
+        pinyin: "de".into(),
+        weight: 1,
+    }];
+    let dictionary = Dictionary::new(data).unwrap();
+    let mut session = Session::new(
+        &dictionary,
+        Options {
+            show_learning: true,
+            ..word_options()
+        },
+    );
+    let state = type_code_state(&mut session, "u");
+    assert_eq!(state.candidates[0].comment, "〔白勹丶 · u〕");
+    assert_eq!(state.candidates[1].comment, "");
+    // 词模式下的拼音反查同样要给出虎码，否则反查失去意义。
+    let mut session = Session::new(&dictionary, word_options());
+    session.process(Key::Character('`')).unwrap();
+    let state = type_code_state(&mut session, "de");
+    assert_eq!(state.candidates[0].comment, "〔白勹丶 · u〕");
+}
+
+#[test]
+fn lookup_by_word_code_lists_words_but_not_single_characters() {
+    let dictionary = Dictionary::new(word_data()).unwrap();
+    let page = dictionary.lookup("u", 0).unwrap();
+    let items: Vec<_> = page.items.iter().map(|item| item.text.as_str()).collect();
+    assert_eq!(items, ["工作"]);
+}
+
+#[test]
+fn word_tables_reject_invalid_rows_and_oversized_buckets() {
+    let mut bad = word_data();
+    bad.word_entries[0].code = "toolong".into();
+    assert!(Dictionary::new(bad).is_err());
+    let mut bad = word_data();
+    bad.phrases[0].text = "一".into();
+    assert!(Dictionary::new(bad).is_err());
+    // 单字一对多展开后超过上限时，须在加载时拒绝而不是查询时截断。
+    let mut bad = word_data();
+    bad.word_entries = (0..4000)
+        .map(|index| Entry {
+            character: char::from_u32(0x4E00 + index).unwrap(),
+            code: "u".into(),
+            weight: 1,
+        })
+        .collect();
+    bad.traditional = bad
+        .word_entries
+        .iter()
+        .map(|entry| mapping(&entry.character.to_string(), &["甲", "乙", "丙"]))
+        .collect();
+    assert!(Dictionary::new(bad).is_err());
 }
 
 #[test]

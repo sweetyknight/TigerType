@@ -1,7 +1,7 @@
 {
   "format_version": 1,
   "source_label": "虎码秃版 小狼毫（Win）",
-  "source": "虎码官网盘 https://huma.ysepan.com/ 下载的“虎码秃版 小狼毫（Win）”方案包；只取所需 9 项，按包内原相对路径存放，未作修改",
+  "source": "虎码官网盘 https://huma.ysepan.com/ 下载的“虎码秃版 小狼毫（Win）”方案包；只取所需 12 项，按包内原相对路径存放，未作修改",
   "dictionary_version": "2026.08.14",
   "license_status": "unconfirmed-personal-use-only",
   "files": [
@@ -9,6 +9,11 @@
       "path": "tiger.dict.yaml",
       "size": 1500362,
       "sha256": "154ca47606e0c1ec884af1832521635ebccc5e9c317df2649d6630f6a8fdc086"
+    },
+    {
+      "path": "tigress.dict.yaml",
+      "size": 1500268,
+      "sha256": "21126f7f64d4d0e7711620dd55437f365bf4d9d33166c825e5a5424496759ffa"
     },
     {
       "path": "tigress_ci.dict.yaml",
@@ -49,6 +54,16 @@
       "path": "opencc/TSCharacters.txt",
       "size": 35147,
       "sha256": "c05bd622590489f9ca6101d3d22a898d37f2f5d1a0447257077e865ec022c005"
+    },
+    {
+      "path": "opencc/STPhrases.txt",
+      "size": 1002641,
+      "sha256": "23a781cca80c62eb6efe294ff19ce4de0d5719252826f20f3d3f860928ca9f1f"
+    },
+    {
+      "path": "opencc/TSPhrases.txt",
+      "size": 5098,
+      "sha256": "e107872f3faecb37449f9ff0c95c2ea8ebdd235fc130d87d9bde69cd3e25e0ff"
     }
   ]
 }
