@@ -1,7 +1,7 @@
 //! 宿主进程内候选窗：TSF 线程惰性创建、停用时销毁；以上下文视图窗口为 owner，与宿主处于同一 z-order 层级。
 //! 自绘与命中测试，不建标准控件，避免同线程控件取得焦点而终止组合；窗口创建时临时启用逐显示器 DPI，避免系统位图缩放文字。
 //! 窗口过程只经本线程登记表以弱引用找回候选窗，窗口数据里不存业务指针。
-//! 配色与字体随快照中的选项切换；Win11 由 DWM 画圆角与边框，Win10 退回直角自绘外框。
+//! 配色与字体随快照中的选项切换；圆角与描边自绘，位图和尺寸经 UpdateLayeredWindow 一次交给系统。
 use crate::uia;
 use std::{
     cell::{Cell, RefCell},
@@ -17,13 +17,7 @@ use windows::{
             COLORREF, E_FAIL, E_INVALIDARG, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT,
             POINT, RECT, SIZE, WPARAM,
         },
-        Graphics::{
-            Dwm::{
-                DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE,
-                DWMWCP_ROUND, DwmSetWindowAttribute,
-            },
-            Gdi::*,
-        },
+        Graphics::Gdi::*,
         System::Threading::GetCurrentThreadId,
         UI::{
             Accessibility::{
@@ -46,6 +40,9 @@ use windows::{
 /// 窗口过程投递给自己的点击通知：WPARAM 为展示编号，LPARAM 为当前页内序号。
 const CLICK: u32 = WM_APP + 0x54;
 const CLASS: PCWSTR = w!("TigerType.Candidate");
+/// 圆角半径与描边宽度（96 DPI 下），与 Win11 系统窗口一致。
+const CORNER: f32 = 8.0;
+const STROKE: f32 = 1.0;
 pub(crate) const UI_FACE: &str = "Microsoft YaHei UI";
 /// 候选字体的 Windows 字体名；未安装时由 create_font 回退到界面字体。
 pub(crate) const fn font_face(font: CandidateFont) -> &'static str {
@@ -317,6 +314,54 @@ pub(crate) fn fill(dc: HDC, rect: &RECT, color: COLORREF) {
         FillRect(dc, rect, HBRUSH(GetStockObject(DC_BRUSH).0));
     }
 }
+/// 把不透明内容裁成带描边的圆角：GDI 不写 alpha，这里统一补上。边缘按覆盖率抗锯齿并预乘，
+/// 内部保持完全不透明，ClearType 文字不受影响。
+pub(crate) fn frame(pixels: &mut [u32], width: i32, radius: f32, stroke: f32, border: COLORREF) {
+    let columns = width.max(1) as usize;
+    let rows = pixels.len() / columns;
+    let (half_w, half_h) = (columns as f32 / 2.0, rows as f32 / 2.0);
+    let [red, green, blue, _] = border.0.to_le_bytes();
+    let line = [f32::from(blue), f32::from(green), f32::from(red)];
+    let shade = |x: usize, y: usize, pixel: &mut u32| {
+        // 到圆角矩形边缘的有符号距离，内部为负。
+        let qx = (x as f32 + 0.5 - half_w).abs() - (half_w - radius);
+        let qy = (y as f32 + 0.5 - half_h).abs() - (half_h - radius);
+        let outside = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
+        if outside + stroke < -0.5 {
+            *pixel |= 0xFF00_0000;
+            return;
+        }
+        let shape = (0.5 - outside).clamp(0.0, 1.0);
+        let inner = (0.5 - outside - stroke).clamp(0.0, 1.0);
+        let content = pixel.to_le_bytes();
+        let mix = |at: usize| {
+            let color = line[at] + (f32::from(content[at]) - line[at]) * inner;
+            (color * shape).round() as u8
+        };
+        *pixel = u32::from_le_bytes([mix(0), mix(1), mix(2), (shape * 255.0).round() as u8]);
+    };
+    // 每行两端需要逐像素算距离的宽度：贴上下沿的行整行都要，圆角范围内是圆角半径，直边只有描边宽度。
+    // 中间只补 alpha，逐键重绘不为窗口内部算距离。
+    let (line_width, corner) = (stroke.ceil() as usize + 1, radius.ceil() as usize + 1);
+    for (y, row) in pixels.chunks_exact_mut(columns).enumerate() {
+        let depth = y.min(rows - 1 - y);
+        let side = match depth {
+            depth if depth < line_width => columns,
+            depth if depth < corner => corner,
+            _ => line_width,
+        };
+        let (head, rest) = row.split_at_mut(side.min(columns.div_ceil(2)));
+        let (middle, tail) = rest.split_at_mut(rest.len().saturating_sub(head.len()));
+        middle.iter_mut().for_each(|pixel| *pixel |= 0xFF00_0000);
+        for (x, pixel) in head.iter_mut().enumerate() {
+            shade(x, y, pixel);
+        }
+        let start = columns - tail.len();
+        for (x, pixel) in tail.iter_mut().enumerate() {
+            shade(start + x, y, pixel);
+        }
+    }
+}
 /// 圆角矩形：fill 为 Some 时实心填充，否则只描边。
 pub(crate) fn round(dc: HDC, rect: &RECT, radius: i32, fill: Option<COLORREF>, line: COLORREF) {
     // SAFETY: 只选入库存画刷/画笔，绘制后还原。
@@ -454,10 +499,6 @@ pub struct Popup {
     pub(crate) hwnd: HWND,
     pub(crate) view: RefCell<View>,
     fonts: Cell<Fonts>,
-    /// DWM 接受圆角（Win11）时由系统画边框，否则自绘直角外框。
-    rounded: bool,
-    /// 已交给 DWM 的边框颜色，变化时才重设。
-    border: Cell<Option<COLORREF>>,
     click: Box<dyn Fn(u32, u8)>,
     root: RefCell<Option<IRawElementProviderSimple>>,
     /// 测试保持隐藏，不在桌面显示窗口；其余行为不变。
@@ -520,7 +561,7 @@ impl Popup {
         // SAFETY: NOACTIVATE/TOOLWINDOW 不抢宿主焦点、不进任务栏；未传入创建参数指针。
         let hwnd = unsafe {
             let result = CreateWindowExW(
-                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
                 CLASS,
                 w!("TigerType 候选"),
                 WS_POPUP,
@@ -539,23 +580,10 @@ impl Popup {
             }
             result?
         };
-        let preference = DWMWCP_ROUND;
-        // SAFETY: 只设置本窗口属性，参数为本地值；Win10 不支持圆角时返回失败。
-        let rounded = unsafe {
-            DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_WINDOW_CORNER_PREFERENCE,
-                (&preference as *const DWM_WINDOW_CORNER_PREFERENCE).cast(),
-                size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
-            )
-        }
-        .is_ok();
         let popup = Rc::new(Self {
             hwnd,
             view: RefCell::default(),
             fonts: Cell::new(Fonts::default()),
-            rounded,
-            border: Cell::new(None),
             click: Box::new(click),
             root: RefCell::new(None),
             quiet,
@@ -581,7 +609,6 @@ impl Popup {
             }
         }
         match message {
-            WM_PAINT => self.paint(),
             WM_LBUTTONDOWN => {
                 let row = self.hit(point(l));
                 self.view.try_borrow_mut().ok()?.pressed = row;
@@ -646,41 +673,82 @@ impl Popup {
             }
         }
     }
-    fn paint(&self) {
-        let mut paint = PAINTSTRUCT::default();
-        // SAFETY: WM_PAINT 内配对 BeginPaint/EndPaint；内存 DC 与位图在本次绘制结束前还原并删除。
+    /// 画到内存位图后，把位图和尺寸一次交给系统。尺寸与内容分两步时 DWM 会先合成新窗口框、
+    /// 下一帧才有内容，屏幕上就是一闪而过的空白描边；一次提交后 DWM 只会看到完整的一帧。
+    /// 位置不走这里：UpdateLayeredWindow 只认物理坐标，DPI 不感知的宿主给的是虚拟化坐标。
+    fn present(&self, place: &Rect, border: COLORREF) -> Result<()> {
+        let (width, height) = (place.right - place.left, place.bottom - place.top);
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                // 负高度为自顶向下，像素顺序与窗口坐标一致。
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let scale = self.fonts.get().dpi.max(96) as f32 / 96.0;
+        // SAFETY: 屏幕 DC、内存 DC 与位图都在本函数内配对释放；位图选入期间像素缓冲有效，
+        // GdiFlush 后才直接改写，长度由同一宽高算出。
         unsafe {
-            let dc = BeginPaint(self.hwnd, &mut paint);
-            let mut client = RECT::default();
-            let _ = GetClientRect(self.hwnd, &mut client);
-            // 先画到内存位图再一次拷贝，逐键刷新不闪烁；建不出缓冲时直接画。
-            let memory = CreateCompatibleDC(Some(dc));
-            let bitmap = CreateCompatibleBitmap(dc, client.right, client.bottom);
-            if memory.is_invalid() || bitmap.is_invalid() {
-                self.draw(dc, &client);
-            } else {
-                let old = SelectObject(memory, bitmap.into());
-                self.draw(memory, &client);
-                let _ = BitBlt(
-                    dc,
-                    0,
-                    0,
-                    client.right,
-                    client.bottom,
-                    Some(memory),
-                    0,
-                    0,
-                    SRCCOPY,
-                );
-                SelectObject(memory, old);
-            }
-            if !bitmap.is_invalid() {
-                let _ = DeleteObject(bitmap.into());
-            }
+            let screen = GetDC(None);
+            let memory = CreateCompatibleDC(Some(screen));
+            let mut bits = std::ptr::null_mut();
+            let result =
+                match CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+                    Ok(bitmap) if !memory.is_invalid() => {
+                        let old = SelectObject(memory, bitmap.into());
+                        let client = RECT {
+                            right: width,
+                            bottom: height,
+                            ..Default::default()
+                        };
+                        self.draw(memory, &client);
+                        let _ = GdiFlush();
+                        let pixels = std::slice::from_raw_parts_mut(
+                            bits.cast::<u32>(),
+                            width as usize * height as usize,
+                        );
+                        frame(pixels, width, CORNER * scale, STROKE * scale, border);
+                        let blend = BLENDFUNCTION {
+                            BlendOp: AC_SRC_OVER as u8,
+                            SourceConstantAlpha: 255,
+                            AlphaFormat: AC_SRC_ALPHA as u8,
+                            ..Default::default()
+                        };
+                        let result = UpdateLayeredWindow(
+                            self.hwnd,
+                            Some(screen),
+                            None,
+                            Some(&SIZE {
+                                cx: width,
+                                cy: height,
+                            }),
+                            Some(memory),
+                            Some(&POINT::default()),
+                            COLORREF(0),
+                            Some(&blend),
+                            ULW_ALPHA,
+                        );
+                        SelectObject(memory, old);
+                        let _ = DeleteObject(bitmap.into());
+                        result
+                    }
+                    Ok(bitmap) => {
+                        let _ = DeleteObject(bitmap.into());
+                        Err(E_FAIL.into())
+                    }
+                    Err(error) => Err(error),
+                };
             if !memory.is_invalid() {
                 let _ = DeleteDC(memory);
             }
-            let _ = EndPaint(self.hwnd, &paint);
+            ReleaseDC(None, screen);
+            result
         }
     }
     /// 按设计稿绘制：高亮行为圆角底色加左侧指示条（无底色主题只换字色），注释列对齐，页脚以分隔线隔开。
@@ -698,9 +766,6 @@ impl Popup {
         let Some(state) = &view.state else {
             return;
         };
-        if !self.rounded {
-            round(dc, client, 0, None, c.border);
-        }
         let (fonts, s, layout) = (self.fonts.get(), |v| self.scale(v), &view.layout);
         // SAFETY: 记下原字体，绘制结束前还原。
         let old = unsafe {
@@ -953,9 +1018,11 @@ impl Popup {
         };
         let size = view.layout.size;
         let mut current = RECT::default();
+        let place = position(caret, work, size.cx, size.cy);
+        // 只比位置：DPI 不感知的宿主读到的窗口尺寸是虚拟化的，与物理布局尺寸不可比；同快照尺寸不变。
         // SAFETY: 只读本窗口矩形，输出为本地值。
         unsafe { GetWindowRect(self.hwnd, &mut current) }.is_ok()
-            && portable(current) == position(caret, work, size.cx, size.cy)
+            && (current.left, current.top) == (place.left, place.top)
     }
     /// 显示或刷新：owner 取视图窗口（空则取焦点窗口），按组合位置放在工作区内，不激活。
     pub fn show(self: &Rc<Self>, state: &InputState, caret: Rect, owner: HWND) -> Result<()> {
@@ -1041,29 +1108,17 @@ impl Popup {
         };
         let size = layout.size;
         let border = colors(state.options.palette()).border;
-        if self.rounded && self.border.get() != Some(border) {
-            // SAFETY: 只设置本窗口的 DWM 边框颜色，避免系统按强调色描边；失败时保留系统默认。
-            let set = unsafe {
-                DwmSetWindowAttribute(
-                    self.hwnd,
-                    DWMWA_BORDER_COLOR,
-                    (&border as *const COLORREF).cast(),
-                    size_of::<COLORREF>() as u32,
-                )
-            };
-            self.border.set(set.is_ok().then_some(border));
-        }
         let place = position(caret, work, size.cx, size.cy);
-        // SAFETY: 工作区夹取后的位置与尺寸；不激活、不改 z 序。
+        // SAFETY: 工作区夹取后的位置，按调用线程的坐标系解释；尺寸随位图一起交付。不激活、不改 z 序。
         unsafe {
             SetWindowPos(
                 self.hwnd,
                 None,
                 place.left,
                 place.top,
-                place.right - place.left,
-                place.bottom - place.top,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             )?;
         }
         let shown = {
@@ -1082,10 +1137,8 @@ impl Popup {
             }
             shown
         };
-        // SAFETY: 先显示再立即处理 WM_PAINT；否则 DWM 会先呈现空白边框，宿主回调结束后才补画文字。
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
+        // 内容先于显示交付，外部通知发出时首帧已在系统手里。
+        self.present(&place, border)?;
         if !self.quiet {
             // SAFETY: 每次显式显示并提到原层前面，不激活、不全局置顶；不用 ShowWindow，避免启动标志覆盖。
             unsafe {
@@ -1099,11 +1152,6 @@ impl Popup {
                     SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                 )?;
             }
-        }
-        // 先画首帧再通知外部监听者；读屏器或宿主 hook 变慢时不能把空白边框留在屏幕上。
-        // SAFETY: 句柄属于本线程候选窗，UpdateWindow 只同步处理该窗口的无状态 WM_PAINT。
-        unsafe {
-            let _ = UpdateWindow(self.hwnd);
         }
         if shown && visible {
             self.notify(EVENT_OBJECT_IME_CHANGE);
@@ -1141,7 +1189,7 @@ impl Popup {
             Err(_) => false,
         };
         if shown && self.alive() {
-            // SAFETY: 原子隐藏并收为零面积，避免 DWM 留下旧圆角边框；不激活、不改位置或 z 序。
+            // SAFETY: 原子隐藏并收为零面积；不激活、不改位置或 z 序。
             // 窗口与字体缓存保留，下一次 show 会按新快照重新布局；隐藏测试也核对真实窗口尺寸。
             unsafe {
                 let _ = SetWindowPos(

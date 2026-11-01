@@ -200,9 +200,20 @@ fn system_hidden_or_covered_popup_recovers_without_stealing_focus() {
         *popup.before_notify.borrow_mut() = Some(Box::new(move |event| {
             if matches!(event, EVENT_OBJECT_IME_SHOW | EVENT_OBJECT_IME_CHANGE) {
                 let popup = watched.upgrade().unwrap();
-                // SAFETY: 仅检查私有桌面测试窗口，发送通知时必须已无待绘制区域。
-                let dirty = unsafe { GetUpdateRect(popup.hwnd, None, false) }.as_bool();
-                assert!(!dirty, "外部通知不能先于首帧绘制");
+                let mut rect = RECT::default();
+                // SAFETY: 仅查询私有桌面测试窗口；临时换到窗口自身的 DPI 上下文才读得到物理尺寸。
+                unsafe {
+                    let thread =
+                        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+                    GetWindowRect(popup.hwnd, &mut rect).unwrap();
+                    SetThreadDpiAwarenessContext(thread);
+                }
+                let size = popup.view.borrow().layout.size;
+                assert_eq!(
+                    (rect.right - rect.left, rect.bottom - rect.top),
+                    (size.cx, size.cy),
+                    "外部通知不能先于首帧位图交付"
+                );
             }
         }));
         let mut sample = state(2, 0);
@@ -370,6 +381,39 @@ fn layout_growth_that_keeps_the_placement_does_not_touch_the_window() {
     assert_eq!(popup.anchor(), Some(wider), "退路位置仍要跟上最新组合矩形");
     assert_eq!(popup.view.borrow().serial, serial);
     popup.hide();
+}
+
+#[test]
+fn frame_rounds_corners_without_touching_the_opaque_interior() {
+    let (width, height) = (40, 30);
+    let content = 0x00_12_34_56;
+    let border = COLORREF(0x00_33_22_11);
+    let mut pixels = vec![content; (width * height) as usize];
+    frame(&mut pixels, width, 8.0, 1.0, border);
+    let at = |x: i32, y: i32| pixels[(y * width + x) as usize];
+    // 内部：GDI 不写 alpha，必须补成完全不透明，颜色原样保留（ClearType 文字依赖这一点）。
+    assert_eq!(at(20, 15), 0xFF00_0000 | content);
+    // 四角之外完全透明，点击也能穿透到宿主。
+    for (x, y) in [(0, 0), (39, 0), (0, 29), (39, 29)] {
+        assert_eq!(at(x, y), 0, "角 ({x},{y})");
+    }
+    // 边线在直边中段：不透明，颜色为描边色（GDI 0x00BBGGRR 转成位图 0xAARRGGBB）。
+    assert_eq!(at(20, 0), 0xFF11_2233);
+    assert_eq!(at(0, 15), 0xFF11_2233);
+    assert_eq!(at(39, 15), 0xFF11_2233);
+    assert_eq!(at(20, 29), 0xFF11_2233);
+    // 圆角过渡必须是预乘 alpha：任一通道都不能超过 alpha，否则系统合成时发亮。
+    for pixel in &pixels {
+        let [blue, green, red, alpha] = pixel.to_le_bytes();
+        assert!(
+            blue <= alpha && green <= alpha && red <= alpha,
+            "{pixel:#x}"
+        );
+    }
+    assert!(
+        pixels.iter().any(|p| (1..255).contains(&(p >> 24))),
+        "圆角必须有半透明过渡，否则边缘有锯齿"
+    );
 }
 
 /// 只取出本窗口的点击通知并按系统流程派发，不处理其他消息。
@@ -591,6 +635,9 @@ fn missing_font_falls_back_to_the_next_face_in_priority_order() {
 
 #[test]
 fn hidden_popup_lays_out_rows_and_turns_matching_press_release_into_one_stamped_click() {
+    // 布局是物理尺寸；本线程取窗口自身的 DPI 上下文，核对的才是同一坐标系。
+    // SAFETY: 只改本测试线程的 DPI 上下文，线程随测试结束。
+    unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let clicks = Rc::new(RefCell::new(Vec::new()));
     let sink = clicks.clone();
     let popup = Popup::new(
@@ -684,8 +731,10 @@ fn popup_refresh_pressure_stays_within_input_budget() {
         "candidate popup pressure: n=1000 total={elapsed:?} per={:?}",
         elapsed / 1_000
     );
+    // 未优化构建下逐像素补 alpha 明显更慢；release 实测约 0.8ms/次，单次预算 50ms。
+    let limit = if cfg!(debug_assertions) { 3 } else { 1 };
     assert!(
-        elapsed <= std::time::Duration::from_secs(1),
+        elapsed <= std::time::Duration::from_secs(limit),
         "候选窗刷新过慢: {elapsed:?}"
     );
 }
