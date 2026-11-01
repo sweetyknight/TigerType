@@ -21,6 +21,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 // 所有权绑定当前产品；改名后不接管旧产品目录，也不改写旧标记。
 const MARKER: &[u8] = b"TigerType native data v2\n";
 const MAX_CONFIG: u64 = 1024 * 1024;
+const ERROR_SHARING_VIOLATION: i32 = 32;
 
 /// 固定每一级目录对象，防止检查后被换成目录联接或重命名到工作区之外。
 struct Directories(Vec<File>);
@@ -120,7 +121,15 @@ impl Data {
             .write(true)
             .share_mode(0)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(root.join("lease"))?;
+            .open(root.join("lease"))
+            // 租约只有后台持有；后台还在加载、管道未建时也走到这里，比探测管道更早更准。
+            .map_err(|error| -> Box<dyn std::error::Error> {
+                if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+                    "后台已在运行，无需重复启动".into()
+                } else {
+                    error.into()
+                }
+            })?;
         let info = information(&lease)?;
         if info.dwFileAttributes & (0x400 | 0x10) != 0 || info.nNumberOfLinks != 1 {
             return Err("数据租约文件不安全".into());
@@ -227,13 +236,18 @@ mod tests {
         let root = root()?;
         let data = Data::create(&root)?;
         assert!(Data::create(&root).is_err());
-        assert!(Data::open(&root).is_err());
+        let held = Data::open(&root).err().unwrap().to_string();
+        assert_eq!(held, "后台已在运行，无需重复启动");
         drop(data);
         assert_eq!(
             fs::read(root.join("ownership"))?,
             b"TigerType native data v2\n"
         );
         drop(Data::open(&root)?);
+        // 反例：租约文件缺失是数据损坏，不能说成“已在运行”，否则用户查不到真实原因。
+        fs::remove_file(root.join("lease"))?;
+        let missing = Data::open(&root).err().unwrap().to_string();
+        assert!(!missing.contains("已在运行"), "{missing}");
         fs::write(root.join("ownership"), b"another application")?;
         assert!(Data::open(&root).is_err());
         Ok(())
