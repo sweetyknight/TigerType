@@ -1,9 +1,10 @@
 //! 全机安装边界；只允许 root 操作固定目录，复制已校验字节，不自动启用输入法或触碰用户数据。
-use crate::bundle;
+use crate::{bundle, font_file};
 use std::{
+    collections::BTreeMap,
     ffi::{CStr, CString, OsStr},
     fs,
-    io::Write,
+    io::{Cursor, Write},
     os::{
         fd::AsRawFd,
         unix::{
@@ -216,11 +217,65 @@ fn publish_font(directory: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     fs::File::open(directory)?.sync_all()?;
     Ok(())
 }
-/// 源包已经完整校验；安装清单中的全部字体，避免只发布文楷而遗漏生僻字回退。
-fn publish_fonts(directory: &Path, source: &Path, manifest: &bundle::Manifest) -> Result<()> {
+/// 以 root 读用户目录：不跟随链接、不在 FIFO 上阻塞，结果只决定是否跳过安装。
+fn open_font(path: &Path) -> Result<fs::File> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err("不是普通文件".into());
+    }
+    Ok(file)
+}
+/// 已有字体的字族与所在文件；读不出字族的文件当作不存在，中断残留的隐藏暂存不算已安装。
+fn existing_fonts(directories: &[&Path]) -> BTreeMap<String, Vec<PathBuf>> {
+    let mut fonts: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for directory in directories {
+        // shortcut: 只看目录第一层，字体册不建子目录；手动放进子目录的字体被漏判时再改递归。
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            let hidden = path
+                .file_name()
+                .is_some_and(|name| name.as_bytes().starts_with(b"."));
+            let Some(mut file) = (!hidden).then(|| open_font(&path).ok()).flatten() else {
+                continue;
+            };
+            for family in font_file::families(&mut file) {
+                fonts.entry(family).or_default().push(path.clone());
+            }
+        }
+    }
+    fonts
+}
+/// 已有同字族就不再安装，避免同一字体在全机和用户目录各注册一份；缺失才从已校验的包里发布。
+/// directories 首项为发布目标，其余只参与判重；生僻字回退依赖全部字体，不能只发布文楷。
+fn publish_fonts(directories: &[&Path], source: &Path, manifest: &bundle::Manifest) -> Result<()> {
+    let existing = existing_fonts(directories);
+    // 字根是私用区字形，缺了拆分只显示方块；在此拦下，不留到输入法启动时无声退出。
+    for path in existing
+        .get(font_file::LEARNING_FAMILY)
+        .into_iter()
+        .flatten()
+    {
+        let rooted = open_font(path)
+            .is_ok_and(|mut file| font_file::covers(&mut file, &font_file::LEARNING_ROOTS));
+        if !rooted {
+            let path = path.display();
+            return Err(format!("已有文楷缺少虎码字根，请先移除后重新安装：{path}").into());
+        }
+    }
     for entry in &manifest.files {
         if let Some(name) = entry.path.strip_prefix("Contents/Resources/Fonts/") {
-            publish_font(directory, name, &bundle::read(source, entry)?)?;
+            let bytes = bundle::read(source, entry)?;
+            let families = font_file::families(&mut Cursor::new(&bytes));
+            if families.iter().any(|family| existing.contains_key(family)) {
+                println!("已有字体，未改动：{name}");
+                continue;
+            }
+            publish_font(directories[0], name, &bytes)?;
         }
     }
     Ok(())
@@ -233,7 +288,8 @@ pub fn install(source: &Path) -> Result<()> {
     if source == target {
         return Err("请从新构建包运行 install，不在现用包内自替换".into());
     }
-    bundle::check_user_copy(&caller_home()?)?;
+    let home = caller_home()?;
+    bundle::check_user_copy(&home)?;
     let manifest = bundle::inspect(source)?;
     let stage = resources::new_directory(&parent, "TigerType-new")?;
     fs::set_permissions(&stage, fs::Permissions::from_mode(0o755))?;
@@ -279,7 +335,12 @@ pub fn install(source: &Path) -> Result<()> {
     if backup.try_exists()? {
         return Err("旧恢复目录已存在，请先核对安装状态；未停止现用输入法".into());
     }
-    publish_fonts(Path::new("/Library/Fonts"), &stage, &manifest)?;
+    let user_fonts = home.join("Library/Fonts");
+    publish_fonts(
+        &[Path::new("/Library/Fonts"), &user_fonts],
+        &stage,
+        &manifest,
+    )?;
     stop(&target)?;
     bundle::replace(&stage, &target, &backup)?;
     if backup.try_exists()? {
@@ -362,15 +423,15 @@ mod tests {
                 manifest.files.push(bundle::entry(&entry.path, bytes));
             }
         }
-        publish_fonts(&target, &source, &manifest)?;
+        publish_fonts(&[&target], &source, &manifest)?;
         assert_eq!(fs::read_dir(&target)?.count(), manifest.files.len());
         for entry in &manifest.files {
             let name = Path::new(&entry.path).file_name().unwrap();
             assert_eq!(fs::read(target.join(name))?, entry.path.as_bytes());
         }
-        publish_fonts(&target, &source, &manifest)?;
+        publish_fonts(&[&target], &source, &manifest)?;
         fs::write(source.join(&manifest.files[0].path), b"corrupted")?;
-        assert!(publish_fonts(&target, &source, &manifest).is_err());
+        assert!(publish_fonts(&[&target], &source, &manifest).is_err());
         for name in [
             "../outside.ttf",
             "/outside.ttf",
@@ -380,6 +441,41 @@ mod tests {
             assert!(publish_font(&target, name, b"synthetic").is_err());
         }
         assert!(!root.join("outside.ttf").exists());
+        Ok(())
+    }
+    #[test]
+    fn fonts_already_present_anywhere_are_skipped_by_family() -> Result<()> {
+        use crate::font_file::tests::{face, name_table};
+        let root = resources::new_directory(
+            &std::env::temp_dir().canonicalize()?,
+            "tigertype-font-family",
+        )?;
+        let (system, user, source) = (root.join("system"), root.join("user"), root.join("source"));
+        let path = "Contents/Resources/Fonts/CascadiaMono.ttf";
+        fs::create_dir_all(source.join("Contents/Resources/Fonts"))?;
+        fs::create_dir(&system)?;
+        fs::create_dir(&user)?;
+        let font = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../resources/fonts/CascadiaMono.ttf"),
+        )?;
+        fs::write(source.join(path), &font)?;
+        let manifest = bundle::Manifest {
+            files: vec![bundle::entry(path, &font)],
+        };
+        let directories: [&Path; 2] = [&system, &user];
+        // 字体册放在用户目录且改过文件名：看字族而不是路径，不再装第二份。
+        fs::write(user.join("renamed.ttf"), &font)?;
+        publish_fonts(&directories, &source, &manifest)?;
+        assert_eq!(fs::read_dir(&system)?.count(), 0);
+        // 中断残留的隐藏暂存不算已安装。
+        fs::rename(user.join("renamed.ttf"), user.join(".partial.tmp"))?;
+        publish_fonts(&directories, &source, &manifest)?;
+        assert_eq!(fs::read_dir(&system)?.count(), 1);
+        // 同字族但缺字根的文楷必须在安装时拒绝，否则输入法启动才失败且用户看不到原因。
+        let plain = face(0, b"name", &name_table(font_file::LEARNING_FAMILY));
+        fs::write(user.join("official.ttf"), plain)?;
+        let error = publish_fonts(&directories, &source, &manifest).unwrap_err();
+        assert!(error.to_string().contains("缺少虎码字根"), "{error}");
         Ok(())
     }
     #[test]

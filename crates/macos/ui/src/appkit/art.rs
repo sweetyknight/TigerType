@@ -127,10 +127,10 @@ pub(super) fn candidate_font(o: Options, size: f64) -> Retained<NSFont> {
         .find_map(|n| NSFont::fontWithName_size(&NSString::from_str(n), size))
         .unwrap_or_else(|| ui(size))
 }
-/// 组装层先私有加载经校验的文楷，拆分禁止静默采用不确定的系统字体。
+/// 组装层启动时已核对系统文楷与字根，拆分禁止静默采用其他字体。
 fn learning_font(size: f64) -> Retained<NSFont> {
     NSFont::fontWithName_size(&NSString::from_str("LXGW WenKai GB Screen"), size)
-        .expect("随包字根字体尚未私有加载")
+        .expect("系统文楷不可用")
 }
 /// 关于区印章：与 Windows 印章同为琥珀底、米白文楷“虎”，40 点以下不画虎纹，不随主题变色。
 const SEAL: u32 = 0xB45309;

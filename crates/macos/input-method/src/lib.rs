@@ -4,7 +4,9 @@ mod keyboard;
 mod presentation;
 mod text;
 pub use keyboard::{KeyAction, Keyboard};
-pub use presentation::{Action, Location, MenuAction, NativeRect, Presentation, Screen, Selection};
+pub use presentation::{
+    Action, Location, MenuAction, NativeRect, Presentation, RECHECK, Screen, Selection,
+};
 pub use text::marked_selection;
 #[cfg(target_os = "macos")]
 pub mod appkit;

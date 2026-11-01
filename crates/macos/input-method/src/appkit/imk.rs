@@ -1,6 +1,6 @@
 //! IMK 系统适配：所有回调截住 Rust panic，Server 持有依赖，控制器只持有自己的会话和客户端。
 use super::{CandidatePanel, Menu, callback, key_event, marked_text};
-use crate::{Action, KeyAction, Keyboard, Location, MenuAction, NativeRect};
+use crate::{Action, KeyAction, Keyboard, Location, MenuAction, NativeRect, RECHECK};
 use objc2::{
     AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class,
     msg_send,
@@ -18,7 +18,7 @@ use std::{
     rc::{Rc, Weak},
     time::{Duration, Instant},
 };
-use tigertype_contracts::{Key, KeyOutcome, MAX_TEXT_BYTES, protocol::Panel};
+use tigertype_contracts::{InputState, Key, KeyOutcome, MAX_TEXT_BYTES, protocol::Panel};
 use tigertype_input_client::{Channel, Host};
 const BUDGET: Duration = Duration::from_millis(50);
 // 重入保护在异常展开时也恢复，不能留下永远阻挡输入的 busy 位。
@@ -93,6 +93,7 @@ impl Environment {
                     session.process(key, deadline);
                 }
             },
+            Action::Reanchor { owner } if owner == session.id.get() => session.reanchor(),
             _ => {}
         }
     }
@@ -104,6 +105,8 @@ struct Session {
     host: RefCell<Host<Box<dyn Channel>>>,
     keyboard: RefCell<Keyboard>,
     location: RefCell<Location>,
+    /// 本次组合已用掉的 RECHECK 项。
+    rechecks: Cell<usize>,
     active: Cell<bool>,
     busy: Cell<bool>,
     epoch: Cell<u64>,
@@ -302,22 +305,55 @@ impl Session {
         } else {
             self.clear_marked();
         }
-        if self.active.get() && epoch == self.epoch.get() {
-            let anchor = self.anchor(0, deadline);
-            let caret = if anchor.is_none() {
-                self.anchor(selection.location, deadline)
-            } else {
-                None
-            };
-            let _ = self.environment.panel.show(
+        if self.active.get()
+            && epoch == self.epoch.get()
+            && self.place(outcome.state, selection.location, deadline)
+        {
+            self.schedule(0);
+        }
+        true
+    }
+    /// 按最新坐标摆放快照；内容没变时面板不重画。
+    fn place(&self, state: InputState, caret: usize, deadline: Instant) -> bool {
+        let anchor = self.anchor(0, deadline);
+        let caret = if anchor.is_none() {
+            self.anchor(caret, deadline)
+        } else {
+            None
+        };
+        self.environment
+            .panel
+            .show(
                 self.id.get(),
-                outcome.state,
+                state,
                 &mut self.location.borrow_mut(),
                 anchor,
                 caret,
-            );
+            )
+            .unwrap_or(false)
+    }
+    fn schedule(&self, attempt: usize) {
+        if let Some(delay) = RECHECK.get(attempt) {
+            self.rechecks.set(attempt);
+            self.environment.panel.recheck(*delay);
         }
-        true
+    }
+    /// 宿主没有布局通知，组合刚写入时拿到的坐标可能还是旧的；下一键之前补查，纠正位置。
+    fn reanchor(&self) {
+        if self.busy.get() {
+            return;
+        }
+        let Ok(host) = self.host.try_borrow() else {
+            return;
+        };
+        let state = host.state().clone();
+        drop(host);
+        let Ok((_, selection)) = marked_text(&state.composition) else {
+            return;
+        };
+        if self.place(state, selection.location, Instant::now() + BUDGET) {
+            self.schedule(self.rechecks.get() + 1);
+        }
     }
     fn anchor(&self, index: usize, deadline: Instant) -> Option<NativeRect> {
         if Instant::now() >= deadline {
@@ -583,6 +619,7 @@ pub(super) mod tests {
             host: RefCell::new(Host::new(Box::<Offline>::default())),
             keyboard: RefCell::new(Keyboard::default()),
             location: RefCell::new(Location::default()),
+            rechecks: Cell::new(0),
             active: Cell::new(false),
             busy: Cell::new(false),
             epoch: Cell::new(0),
@@ -791,7 +828,7 @@ define_class!(
                 let client = client?;
                 if !text_client(client) { return None; }
                 let host = Host::new((environment.factory)());
-                let session = Rc::new(Session { id: Cell::new(0), environment, client: RefCell::new(client.retain()), host: RefCell::new(host), keyboard: RefCell::new(Keyboard::default()), location: RefCell::new(Location::default()), active: Cell::new(false), busy: Cell::new(false), epoch: Cell::new(0), marked: RefCell::new(String::new()) });
+                let session = Rc::new(Session { id: Cell::new(0), environment, client: RefCell::new(client.retain()), host: RefCell::new(host), keyboard: RefCell::new(Keyboard::default()), location: RefCell::new(Location::default()), rechecks: Cell::new(0), active: Cell::new(false), busy: Cell::new(false), epoch: Cell::new(0), marked: RefCell::new(String::new()) });
                 let this = this.set_ivars(session);
                 // SAFETY: 参数原样转交 IMK 指定初始化器；Rust ivars 已初始化，失败由引用计数清理。
                 unsafe { msg_send![super(this), initWithServer: server, delegate: delegate, client: client] }

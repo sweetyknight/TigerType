@@ -1,6 +1,25 @@
-//! 启动前校验随包字体并从同一份字节注册；不安装全机字体，不让 CoreText 再按可变路径读取。
+//! 输入法只用安装器发布的系统字体，启动时核对；进程私有注册只给打包绘图标与预览用，
+//! 这些场景不能要求机器先装好字体，且不让 CoreText 再按可变路径读取。
+use crate::font_file::{LEARNING_FAMILY, LEARNING_ROOTS};
+use objc2_app_kit::NSFont;
+use objc2_foundation::NSString;
 use std::{ffi::c_void, path::Path, ptr};
 use tigertype_backend::{Result, resources, storage};
+
+/// 接 IMK 回调前核对文楷与关键字根：字根是私用区字形，任何替代字体都只显示方块。
+pub fn ensure_learning_font() -> Result<()> {
+    let name = NSString::from_str(LEARNING_FAMILY);
+    let rooted = NSFont::fontWithName_size(&name, 20.0).is_some_and(|font| {
+        let covered = font.coveredCharacterSet();
+        LEARNING_ROOTS
+            .iter()
+            .all(|root| covered.longCharacterIsMember(*root))
+    });
+    if rooted {
+        return Ok(());
+    }
+    Err(format!("系统缺少含虎码字根的 {LEARNING_FAMILY}，请重新运行安装").into())
+}
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -81,12 +100,7 @@ pub fn load(directory: &Path) -> Result<Vec<PrivateFont>> {
         fonts.push(PrivateFont::new(&bytes)?);
     }
     // 在接收 IMK/UI 回调前确认 AppKit 能选择它，不把注册成功等同于名称可用。
-    if objc2_app_kit::NSFont::fontWithName_size(
-        &objc2_foundation::NSString::from_str("LXGW WenKai GB Screen"),
-        20.0,
-    )
-    .is_none()
-    {
+    if NSFont::fontWithName_size(&NSString::from_str(LEARNING_FAMILY), 20.0).is_none() {
         return Err("私有文楷已注册但 AppKit 无法选择".into());
     }
     Ok(fonts)

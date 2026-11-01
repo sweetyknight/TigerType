@@ -49,17 +49,23 @@ pub struct Screen {
     pub visible: NativeRect,
 }
 
+/// 宿主没有布局通知，显示时拿到的坐标可能还是旧的；组合写入后按这些延迟（秒）补查，
+/// 覆盖 Chromium 系宿主布局完成的实测范围（6–38ms，繁忙时更长）。
+pub const RECHECK: [f64; 2] = [0.03, 0.12];
+
 /// 每个控制器独占，禁止把其他应用的历史位置作为本控制器的退路。
 #[derive(Debug, Default)]
 pub struct Location {
     last: Option<NativeRect>,
 }
 impl Location {
-    /// 只使用包含锚点的屏幕；宿主不给坐标且无历史时不猜位置。
+    /// 只使用包含锚点的屏幕；宿主不给坐标且本控制器无历史时退到鼠标位置，只是近似，
+    /// 但候选窗不能不出现。之后保存为历史，鼠标再动候选窗也不跟着跑。
     pub fn place(
         &mut self,
         composition: Option<NativeRect>,
         caret: Option<NativeRect>,
+        pointer: Option<NativeRect>,
         screens: &[Screen],
         size: (i32, i32),
     ) -> Option<NativeRect> {
@@ -67,7 +73,7 @@ impl Location {
             return None;
         }
         // 位置有界但已离开所有屏幕时仍应继续退路，不能挡住有效的光标或历史锚点。
-        let (anchor, work) = [composition, caret, self.last]
+        let (anchor, work) = [composition, caret, self.last, pointer]
             .into_iter()
             .flatten()
             .filter_map(NativeRect::rect)
@@ -149,6 +155,10 @@ pub enum Action {
     Menu {
         owner: u64,
         action: MenuAction,
+    },
+    /// 一次性补查组合坐标；控制器已换时直接作废。
+    Reanchor {
+        owner: u64,
     },
 }
 
@@ -306,8 +316,14 @@ mod tests {
         };
         let mut loc = Location::default();
         assert!(
-            loc.place(Some(NativeRect::default()), None, &[screen], (300, 200))
-                .is_none()
+            loc.place(
+                Some(NativeRect::default()),
+                None,
+                None,
+                &[screen],
+                (300, 200)
+            )
+            .is_none()
         );
         assert!(
             NativeRect {
@@ -326,12 +342,15 @@ mod tests {
             .is_none()
         );
         let pos = loc
-            .place(Some(anchor), None, &[screen], (300, 200))
+            .place(Some(anchor), None, None, &[screen], (300, 200))
             .unwrap();
         assert_eq!(pos.x, -300.0);
         assert_eq!(pos.y, -170.0);
-        assert_eq!(loc.place(None, None, &[screen], (300, 200)), Some(pos));
-        assert!(loc.place(None, None, &[], (300, 200)).is_none());
+        assert_eq!(
+            loc.place(None, None, None, &[screen], (300, 200)),
+            Some(pos)
+        );
+        assert!(loc.place(None, None, None, &[], (300, 200)).is_none());
         let dock = Screen {
             bounds: work,
             visible: NativeRect {
@@ -341,9 +360,73 @@ mod tests {
             },
         };
         assert!(
-            loc.place(Some(anchor), None, &[dock], (300, 200)).is_some(),
+            loc.place(Some(anchor), None, None, &[dock], (300, 200))
+                .is_some(),
             "Dock 不改变屏幕归属"
         );
+    }
+    #[test]
+    fn pointer_is_only_the_last_resort_and_does_not_drag_the_panel_afterwards() {
+        let bounds = NativeRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        };
+        let screen = Screen {
+            bounds,
+            visible: bounds,
+        };
+        let at = |x, y| NativeRect {
+            x,
+            y,
+            width: 0.0,
+            height: 0.0,
+        };
+        let size = (200, 100);
+        let caret = NativeRect {
+            x: 500.0,
+            y: 300.0,
+            width: 1.0,
+            height: 20.0,
+        };
+        // 宿主什么坐标都不给、本控制器也无历史：候选窗仍要出现。
+        let mut location = Location::default();
+        let first = location
+            .place(None, None, Some(at(100.0, 400.0)), &[screen], size)
+            .expect("没有坐标时候选窗不能不出现");
+        assert_eq!((first.x, first.y), (100.0, 300.0));
+        // 鼠标移开后下一键留在原处，不跟着鼠标跑。
+        let moved = at(900.0, 700.0);
+        assert_eq!(
+            location.place(None, None, Some(moved), &[screen], size),
+            Some(first)
+        );
+        // 宿主补上真实坐标后立刻以它为准，鼠标不抢真实位置。
+        let real = location
+            .place(None, Some(caret), Some(moved), &[screen], size)
+            .unwrap();
+        assert_eq!(real.x, 500.0);
+        // 屏幕外的鼠标位置同样无效，不能把窗口摆到屏幕外。
+        let mut fresh = Location::default();
+        assert!(
+            fresh
+                .place(None, None, Some(at(5000.0, 0.0)), &[screen], size)
+                .is_none()
+        );
+        // 坐标原点是无效的默认值，宿主返回全零时不当作鼠标位置。
+        assert!(
+            fresh
+                .place(None, None, Some(at(0.0, 0.0)), &[screen], size)
+                .is_none()
+        );
+    }
+    #[test]
+    fn rechecks_are_bounded_and_ascending() {
+        // 空闲不得有周期唤醒：补查次数固定，且按时间递增。
+        assert!(RECHECK.len() <= 3);
+        assert!(RECHECK.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(RECHECK.iter().all(|delay| *delay > 0.0 && *delay < 0.5));
     }
     #[test]
     fn invalid_snapshots_clear_pending_clicks_before_rendering() {
@@ -383,7 +466,7 @@ mod tests {
         let mut location = Location::default();
         assert!(
             location
-                .place(Some(offscreen), Some(caret), &[screen], (200, 100))
+                .place(Some(offscreen), Some(caret), None, &[screen], (200, 100))
                 .is_some()
         );
         let invalid = Screen {
@@ -395,7 +478,7 @@ mod tests {
         };
         assert!(
             location
-                .place(Some(caret), None, &[invalid], (200, 100))
+                .place(Some(caret), None, None, &[invalid], (200, 100))
                 .is_none()
         );
     }

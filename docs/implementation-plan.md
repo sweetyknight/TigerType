@@ -175,11 +175,11 @@ DLL 传输的首版安全策略采用显式进程期驻留：默认 `Runtime::ne
 - 系统调用 `commitComposition`（切换应用、点击别处等）时取消未上屏组合并清空引擎会话，不把编码上屏，同 Windows“焦点切换取消组合”。
 
 候选面板：
-- 每进程一个非激活 `NSPanel`：无边框、`nonactivatingPanel`、不成为 key/main 窗口，层级高于普通窗口，集合行为含 `canJoinAllSpaces` 与 `fullScreenAuxiliary`，以覆盖全屏应用；首次需要时创建。自绘 NSView、CoreText 排版，只在快照变化时重绘；`CTFont` 按字体与字号缓存；Retina 由系统按缩放倍数处理。
+- 每进程一个非激活 `NSPanel`：无边框、`nonactivatingPanel`、不成为 key/main 窗口，层级高于普通窗口，集合行为含 `canJoinAllSpaces` 与 `fullScreenAuxiliary`，以覆盖全屏应用；首次需要时创建。自绘 NSView、CoreText 排版，只在快照变化时重绘；内容画完才显示，几何与绘制一起提交，内容变化后重算透明窗口的阴影；`CTFont` 按字体与字号缓存；Retina 由系统按缩放倍数处理。
 - 外观：数据取自回复中的 `InputState`（选项随带，不读盘），竖排，由 input-client 视图模型决定行、页脚与“仅多页显示翻页”，圆角与阴影由图层实现。只用主题色；“增强对比度”开启时改用系统颜色（同 Windows 高对比度例外）。
-- 字体：锁定清单中的六个原件随包放在 `Contents/Resources/Fonts`，天珩 P0/P1/P2 补文楷未收录的基本区及扩展汉字。Mac 组装层在 IMK 启动前逐个安全读取并核对大小/SHA256，从同一份字节创建 CGFont，以 CTFontManagerRegisterGraphicsFont 注册到当前进程；不使用 ATSApplicationFontsPath 隐式加载，避免绕过字节校验或重复注册。加载失败/名称不可用立即报错；所有显示对象销毁后注销。拆分仅用私有文楷，不采用系统回退；候选汉字楷体选项、界面 PingFang SC 和独立编码 Cascadia Mono/Menlo 不变。
-- 上屏字形由宿主绘制，进程私有字体不能补齐宿主缺字，CGFont 内存注册也不进入系统自动回退。安装器默认将清单全部字体安装到 `/Library/Fonts`，供候选窗及其他应用回退；不更改宿主字体设置。原生测试校验完整码表输出覆盖，并在进程内 URL 注册模拟安装后的字体发现，检查现场缺字的实际回退与 glyph；不承诺未收录的全部 Unicode 字形或任意宿主。
-- 位置：以 `attributes(forCharacterIndex:lineHeightRectangle:)` 取组合起点（索引 0）的行矩形（屏幕全局坐标、左下原点），全零视为宿主不知道；退路依次为光标处索引、面板正在显示时的原位置、本控制器上次的位置，都没有则不显示。macOS 没有布局变化通知，也不读系统光标或其他进程界面。macOS input-method 把左下原点坐标换算后交给 input-client 的同一摆放规则，限制在锚点所在屏幕的 `visibleFrame` 内。
+- 字体：锁定清单中的六个原件随包放在 `Contents/Resources/Fonts`，作为安装来源，天珩 P0/P1/P2 补文楷未收录的基本区及扩展汉字。输入法进程只用安装器发布的系统字体，不读字体文件、不做私有注册（六份合计约 90MB，常驻内存且与系统字体重复）；IMK 启动前用 AppKit 核对文楷与关键字根，不通过即报错退出。打包绘制图标与离屏预览不能要求机器已装字体，才逐个安全读取并核对大小/SHA256，从同一份字节创建 CGFont 注册到当前进程，用后注销；不使用 ATSApplicationFontsPath 隐式加载。拆分不采用其他字体替代；候选汉字楷体选项、界面 PingFang SC 和独立编码 Cascadia Mono/Menlo 不变。
+- 上屏字形由宿主绘制，进程私有字体不能补齐宿主缺字，CGFont 内存注册也不进入系统自动回退。安装器默认将清单全部字体安装到 `/Library/Fonts`，供候选窗及其他应用回退；全机或调用者用户目录已有同字族时跳过，避免同一字体重复注册。判重直接读字体文件的 name 表：sudo 下 CoreText 看不到用户字体，而字体册默认装到用户目录。已有文楷缺少虎码字根时拒绝安装，不留到输入法启动时无声退出。不更改宿主字体设置。原生测试校验完整码表输出覆盖，并在进程内 URL 注册模拟安装后的字体发现，检查现场缺字的实际回退与 glyph；不承诺未收录的全部 Unicode 字形或任意宿主。
+- 位置：以 `attributes(forCharacterIndex:lineHeightRectangle:)` 取组合起点（索引 0）的行矩形（屏幕全局坐标、左下原点），全零视为宿主不知道；退路依次为光标处索引、面板正在显示时的原位置、本控制器上次的位置，都没有则退到鼠标位置，只是近似，但候选窗不能不出现。macOS 没有布局变化通知，组合写入后按固定延迟有界补查两次坐标，新按键或收起时取消，空闲不唤醒；不读系统光标或其他进程界面。macOS input-method 把左下原点坐标换算后交给 input-client 的同一摆放规则，限制在锚点所在屏幕的 `visibleFrame` 内。
 - 点击：面板不取焦点；按下与抬起落在同一行才选字，直接经进程内通道发 `Select`（绑定展示编号与快照，过期即拒绝），回复在主线程写入宿主，无需 Windows 的异步编辑会话。
 - 无障碍：面板视图实现 NSAccessibility 列表，候选项为子元素（标签为候选字与注释）；高亮变化时发送 `selectedChildrenChanged`，VoiceOver 运行时另发朗读请求；只在 VoiceOver 开启时构造子元素。
 

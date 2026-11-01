@@ -13,7 +13,7 @@ impl Drop for Graphics {
 pub fn render(repository: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
     let mtm = MainThreadMarker::new().ok_or("图标绘制须在主线程")?;
     let _app = NSApplication::sharedApplication(mtm);
-    // 打包与输入法复用已校验字节的私有注册；失败拒绝出包，绘制结束配对注销。
+    // 打包不能要求本机已装字体，用已校验字节私有注册；失败拒绝出包，绘制结束配对注销。
     let _fonts = crate::fonts::load(&repository.join("resources/fonts"))?;
     let mut body = Vec::new();
     for (size, kind) in [

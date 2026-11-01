@@ -42,6 +42,16 @@ fn color(rgb: u32) -> Retained<NSColor> {
 fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
 }
+/// 宿主什么坐标都不给时的最后退路；鼠标位置不属于任何进程的界面。
+fn pointer() -> Option<NativeRect> {
+    let at = NSEvent::mouseLocation();
+    Some(NativeRect {
+        x: at.x,
+        y: at.y,
+        width: 0.0,
+        height: 0.0,
+    })
+}
 fn native(r: NSRect) -> NativeRect {
     NativeRect {
         x: r.origin.x,
@@ -218,12 +228,12 @@ impl Fonts {
                 &["Cascadia Mono", "Menlo"],
                 m::SMALL_POINT as f64 * 4.0 / 3.0,
             ),
-            // 组装层已从校验后的字节私有加载；拆分不能静默退到系统字形。
+            // 组装层启动时已核对系统文楷；拆分不能静默退到其他字形。
             comment: NSFont::fontWithName_size(
                 &NSString::from_str("LXGW WenKai GB Screen"),
                 m::SMALL_POINT as f64 * 4.0 / 3.0,
             )
-            .expect("随包字根字体尚未私有加载"),
+            .expect("系统文楷不可用"),
         }
     }
 }
@@ -245,6 +255,11 @@ define_class!(
     impl CandidateView {
         #[unsafe(method(dismissToast:))]
         fn dismiss_toast(&self,_:Option<&NSObject>){callback(||{if let Some(window)=self.window(){window.orderOut(None);}*self.ivars().drawing.borrow_mut()=None;});}
+        #[unsafe(method(reanchor:))]
+        fn reanchor(&self,_:Option<&NSObject>){callback(||{
+            let owner=self.ivars().presentation.borrow().owner();
+            (self.ivars().action)(Action::Reanchor{owner});
+        });}
         #[unsafe(method(displayOptionsChanged:))]
         fn display_options(&self,_:&NSNotification){callback(||{
             if let Some(state)=self.ivars().presentation.borrow().state(){*self.ivars().drawing.borrow_mut()=Some(Drawing::new(state,&self.ivars().fonts.borrow()));}
@@ -468,7 +483,7 @@ impl CandidatePanel {
         }
         Self { window, view }
     }
-    /// composition/caret 由控制器查询；无坐标时使用同控制器历史，绝不访问其他进程界面。
+    /// composition/caret 由控制器查询；无坐标时用同控制器历史，再退到鼠标位置，绝不访问其他进程界面。
     pub fn show(
         &self,
         owner: u64,
@@ -477,7 +492,7 @@ impl CandidatePanel {
         composition: Option<NativeRect>,
         caret: Option<NativeRect>,
     ) -> Result<bool, &'static str> {
-        self.cancel_toast();
+        self.cancel_pending();
         if !state.composing || state.candidates.is_empty() {
             self.hide();
             return Ok(false);
@@ -519,6 +534,7 @@ impl CandidatePanel {
         let placed = location.place(
             composition,
             caret,
+            pointer(),
             &screens,
             (d.width as i32, d.height as i32),
         );
@@ -528,17 +544,35 @@ impl CandidatePanel {
             self.window.orderOut(None);
             return Ok(false);
         };
-        self.window
-            .setFrame_display(rect(placed.x, placed.y, placed.width, placed.height), false);
-        if changed || !self.window.isVisible() {
-            self.view.setNeedsDisplay(true);
-        }
+        self.reveal(placed, changed || !self.window.isVisible());
         self.view.accessibility(changed);
-        self.window.orderFrontRegardless();
         Ok(true)
     }
+    /// 内容画完才显示：setFrame 的 display 让 AppKit 把几何和绘制一起提交，
+    /// 屏幕上不出现“窗口已到、内容未到”的帧。透明窗口的阴影按内容形状计算，内容变了要重算。
+    fn reveal(&self, placed: NativeRect, redraw: bool) {
+        if redraw {
+            self.view.setNeedsDisplay(true);
+        }
+        let frame = rect(placed.x, placed.y, placed.width, placed.height);
+        self.window.setFrame_display(frame, redraw);
+        if redraw {
+            // 尺寸和位置都没变时 setFrame 不绘制，这里兜住。
+            self.window.displayIfNeeded();
+            self.window.invalidateShadow();
+        }
+        self.window.orderFrontRegardless();
+    }
+    /// 新展示或收起时由 cancel_pending 取消；系统持有 target 到触发或取消，没有循环定时器。
+    pub fn recheck(&self, delay: f64) {
+        // SAFETY: selector 对应 reanchor:，无参数对象。
+        unsafe {
+            self.view
+                .performSelector_withObject_afterDelay(sel!(reanchor:), None, delay);
+        }
+    }
     pub fn hide(&self) {
-        self.cancel_toast();
+        self.cancel_pending();
         self.view.ivars().presentation.borrow_mut().hide();
         *self.view.ivars().drawing.borrow_mut() = None;
         self.window.orderOut(None);
@@ -547,14 +581,14 @@ impl CandidatePanel {
     pub fn accepts(&self, selection: Selection) -> bool {
         self.window.isVisible() && self.view.ivars().presentation.borrow().accepts(selection)
     }
-    fn cancel_toast(&self) {
-        // SAFETY: 只取消本 view 的一次性隐藏，不影响其他 UI 或输入定时行为。
+    fn cancel_pending(&self) {
+        // SAFETY: 只取消本 view 的一次性隐藏与补查，不影响其他 UI 或输入定时行为。
         unsafe {
-            NSObject::cancelPreviousPerformRequestsWithTarget_selector_object(
-                &self.view,
-                sel!(dismissToast:),
-                None,
-            );
+            for selector in [sel!(dismissToast:), sel!(reanchor:)] {
+                NSObject::cancelPreviousPerformRequestsWithTarget_selector_object(
+                    &self.view, selector, None,
+                );
+            }
         }
     }
     /// 中英、全半角切换提示使用同一非激活面板；新快照/失焦立即取消一次性隐藏，空闲没有周期唤醒。
@@ -588,13 +622,10 @@ impl CandidatePanel {
                 visible: native(s.visibleFrame()),
             })
             .collect();
-        let Some(r) = location.place(anchor, None, &screens, (48, 40)) else {
+        let Some(r) = location.place(anchor, None, pointer(), &screens, (48, 40)) else {
             return Ok(false);
         };
-        self.window
-            .setFrame_display(rect(r.x, r.y, r.width, r.height), false);
-        self.view.setNeedsDisplay(true);
-        self.window.orderFrontRegardless();
+        self.reveal(r, true);
         // SAFETY: selector 对应 dismissToast:；系统持有 target 到触发或取消，无循环定时器。
         unsafe {
             self.view
@@ -771,6 +802,20 @@ pub mod tests {
         assert!(Menu::forwarded(17, Some(sel!(invoke:)), Some(&info)).is_none());
         let _status = CandidatePanel::status;
         let _accepts = CandidatePanel::accepts;
+        // 宿主没给任何坐标时退到鼠标位置，候选窗不能不出现；内容必须在显示时已经画完。
+        state.revision += 1;
+        assert!(
+            panel
+                .show(1, state.clone(), &mut Location::default(), None, None)
+                .unwrap()
+        );
+        assert!(panel.window.isVisible());
+        assert!(!panel.view.needsDisplay(), "显示时内容必须已画完");
+        // 补查经 Action 交给控制器核对身份，不在 view 里直接碰宿主。
+        // SAFETY: 走真实 selector 分发，与 performSelector 触发时相同；参数未被使用。
+        let _: () = unsafe { msg_send![&*panel.view, reanchor: None::<&NSObject>] };
+        assert_eq!(clicks.borrow().last(), Some(&Action::Reanchor { owner: 1 }));
+        panel.hide();
         assert!(
             !panel
                 .show(

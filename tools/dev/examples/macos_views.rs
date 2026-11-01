@@ -18,7 +18,7 @@ fn main() {
     };
     let mtm = MainThreadMarker::new().expect("预览必须在主线程启动");
     let app = NSApplication::sharedApplication(mtm);
-    // 预览与产品共用校验/私有注册入口，不要求系统事先安装字体。
+    // 预览用校验后的私有注册，不要求系统事先安装字体。
     let _fonts = tigertype_macos_app::fonts::load(
         &tigertype_dev::project_root()
             .unwrap()
@@ -119,6 +119,8 @@ fn main() {
                 s.ascii_mode, s.full_shape, s.ascii_punctuation
             );
         }
+        // 预览没有宿主，不存在要补查的组合坐标。
+        Action::Reanchor { .. } => {}
     });
     let candidate = CandidatePanel::new(mtm, action.clone());
     let mut location = Location::default();
