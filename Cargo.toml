@@ -42,3 +42,9 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+# 整程序优化换更小的程序和 DLL（DLL 映射进每个宿主）。panic 保持默认的 unwind：回调靠 catch_unwind
+# 挡住 panic，abort 会直接杀死宿主。不设 strip：Mac 上它会在链接后改写可执行文件。
+[profile.release]
+lto = "fat"
+codegen-units = 1

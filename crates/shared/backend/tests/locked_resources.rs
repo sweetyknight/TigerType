@@ -54,10 +54,13 @@ fn verify_word_mode(dictionary: &Dictionary, data: &Data) -> Result<()> {
     );
     let code = data.phrases.iter().find(|p| p.text == "头发").unwrap();
     let traditional = options(true, OutputForm::Traditional);
-    assert!(first_page(&code.code, traditional)?.contains(&"頭髮".to_owned()));
+    assert!(first_page(code.code, traditional)?.contains(&"頭髮".to_owned()));
 
     let pairs = |rows: &[tigertype_backend::Entry]| {
-        let mut pairs: Vec<_> = rows.iter().map(|e| (e.code.clone(), e.character)).collect();
+        let mut pairs: Vec<_> = rows
+            .iter()
+            .map(|e| (e.code.to_owned(), e.character))
+            .collect();
         pairs.sort();
         pairs.dedup();
         pairs
@@ -83,7 +86,8 @@ fn verify_word_mode(dictionary: &Dictionary, data: &Data) -> Result<()> {
 fn verify(root: &std::path::Path) -> Result<serde_json::Value> {
     // 与后台启动同一路径：核对锁定清单、解析原文、建立词表。
     let started = Instant::now();
-    let data = import::load(&root.join("resources/tiger"))?;
+    let sources = import::load(&root.join("resources/tiger"))?;
+    let data = sources.data()?;
     let dictionary = Dictionary::new(data.clone())?;
     let load_ms = started.elapsed().as_millis();
     let mut missing_full_codes = 0;
@@ -93,7 +97,8 @@ fn verify(root: &std::path::Path) -> Result<serde_json::Value> {
             dictionary
                 .learning(entry.character)
                 .codes
-                .contains(&entry.code)
+                .iter()
+                .any(|code| code == entry.code)
         );
     }
     for detail in &data.details {
@@ -101,7 +106,7 @@ fn verify(root: &std::path::Path) -> Result<serde_json::Value> {
         missing_full_codes += detail
             .full_codes
             .iter()
-            .filter(|code| !codes.contains(code))
+            .filter(|code| !codes.iter().any(|known| known == *code))
             .count();
     }
     for code in ["u", "uni", "unid"] {
@@ -156,6 +161,31 @@ fn verify(root: &std::path::Path) -> Result<serde_json::Value> {
             .items
             .iter()
             .any(|item| item.text == "我们")
+    );
+    // 拼音反查查词：同一词在词表里才有拼音行，查到后要给出词码；拼音表没有的词查不到。
+    for (keys, word) in [("`nihao", "你好"), ("`xian", "西安")] {
+        let code = data.phrases.iter().find(|p| p.text == word).unwrap().code;
+        let mut session = Session::new(&dictionary, Options::default());
+        for character in keys.chars() {
+            session.process(Key::Character(character))?;
+        }
+        let mut state = session.snapshot();
+        let found = loop {
+            match state.candidates.iter().find(|c| c.text == word) {
+                Some(candidate) => break candidate.clone(),
+                None => {
+                    assert!(!state.is_last_page, "{word} 查不到");
+                    state = session.process(Key::PageDown)?.state;
+                }
+            }
+        };
+        assert!(found.comment.contains(code), "{word} {}", found.comment);
+    }
+    let typable: std::collections::HashSet<_> = data.phrases.iter().map(|p| p.text).collect();
+    assert!(
+        data.word_pinyin
+            .iter()
+            .all(|w| !w.pinyin.contains(' ') && typable.contains(w.text))
     );
     verify_word_mode(&dictionary, &data)?;
     assert!(!dictionary.learning('𠀀').codes.is_empty());

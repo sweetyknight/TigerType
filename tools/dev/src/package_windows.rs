@@ -88,7 +88,8 @@ fn run() -> Result<()> {
         }
     }
     // 与后台启动走同一加载与词表校验，坏码表不进安装包。
-    let data = import::load(&root.join("resources").join(TABLES))?;
+    let sources = import::load(&root.join("resources").join(TABLES))?;
+    let data = sources.data()?;
     let (entries, phrases) = (data.entries.len(), data.phrases.len());
     Dictionary::new(data)?;
     println!("码表校验通过：{entries} 条单字编码，{phrases} 条词编码。");

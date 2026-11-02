@@ -138,7 +138,8 @@ fn font_coverage(root: &std::path::Path) {
                 .coveredCharacterSet()
         })
         .collect();
-    let data = tigertype_backend::import::load(&root.join("resources/tiger")).unwrap();
+    let sources = tigertype_backend::import::load(&root.join("resources/tiger")).unwrap();
+    let data = sources.data().unwrap();
     let mut chars: BTreeSet<_> = data.entries.iter().map(|entry| entry.character).collect();
     let singles = chars.len();
     chars.extend(data.phrases.iter().flat_map(|phrase| phrase.text.chars()));

@@ -404,7 +404,7 @@ impl<'a> Server<'a> {
 pub fn run(tables: &Path, directory: &Path, show: bool) -> Result<()> {
     // 引擎接请求前核对系统字体；失败立即退出，不留下拆分显示方块的半就绪后台。
     crate::fonts::ensure_learning_font()?;
-    let dictionary = Dictionary::new(import::load(tables)?)?;
+    let dictionary = Dictionary::new(import::load(tables)?.data()?)?;
     // 受管目录租约归查字工作线程，在后台运行期间保持，退出后才释放。
     let data = if directory.try_exists()? {
         Data::open(directory)?
@@ -518,7 +518,7 @@ mod tests {
         let dictionary = Dictionary::new(EngineData {
             entries: vec![Entry {
                 character: '的',
-                code: "u".into(),
+                code: "u",
                 weight: 1,
             }],
             common: vec!['的'],

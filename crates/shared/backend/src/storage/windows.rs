@@ -68,7 +68,8 @@ pub fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
     if info.dwFileAttributes & (0x400 | 0x10) != 0 || info.nNumberOfLinks != 1 {
         return Err("配置文件不得为链接、硬链接或目录".into());
     }
-    let mut bytes = Vec::new();
+    // 先按实际大小留足容量：码表文件大，边读边翻倍会多占近一倍内存。
+    let mut bytes = Vec::with_capacity(file.metadata()?.len().min(limit) as usize + 1);
     file.take(limit + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
         return Err("配置文件长度超限".into());

@@ -337,7 +337,7 @@ mod tests {
         Dictionary::new(Data {
             entries: vec![Entry {
                 character: '虎',
-                code: "ab".into(),
+                code: "ab",
                 weight: 1,
             }],
             common: vec!['虎'],

@@ -97,7 +97,7 @@ fn run(args: &[std::ffi::OsString]) -> Result<()> {
             }
         }
         (Some("lookup" | "demo-input"), 3) => {
-            let dictionary = Dictionary::new(import::load(Path::new(&args[1]))?)?;
+            let dictionary = Dictionary::new(import::load(Path::new(&args[1]))?.data()?)?;
             let query = args[2].to_str().ok_or("查询不是有效 Unicode")?;
             if args[0] == "lookup" {
                 println!(

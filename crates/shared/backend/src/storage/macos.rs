@@ -113,7 +113,8 @@ impl Directory {
     }
 }
 fn read(file: File, limit: u64) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
+    // 先按实际大小留足容量：码表文件大，边读边翻倍会多占近一倍内存。
+    let mut bytes = Vec::with_capacity(file.metadata()?.len().min(limit) as usize + 1);
     file.take(limit.checked_add(1).ok_or("读取上限溢出")?)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {

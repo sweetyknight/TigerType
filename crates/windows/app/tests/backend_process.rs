@@ -38,7 +38,7 @@ fn dictionary() -> Dictionary {
     Dictionary::new(Data {
         entries: vec![Entry {
             character: '的',
-            code: "u".into(),
+            code: "u",
             weight: 1,
         }],
         common: vec!['的'],

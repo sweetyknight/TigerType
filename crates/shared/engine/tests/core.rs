@@ -1,91 +1,95 @@
 //! 合成词表覆盖状态机与学习契约，不读取真实资源、文件或个人输入。
-use tigertype_contracts::{InputMode, InputState, Key, Options, OutputForm, TypingMode};
-use tigertype_engine::{Data, Detail, Dictionary, Entry, Mapping, Phrase, Pronunciation, Session};
+use tigertype_contracts::{
+    InputMode, InputState, Key, MAX_PINYIN_BYTES, Options, OutputForm, TypingMode,
+};
+use tigertype_engine::{
+    Data, Detail, Dictionary, Entry, Mapping, Phrase, Pronunciation, Session, WordPinyin,
+};
 
-fn data() -> Data {
+fn data() -> Data<'static> {
     Data {
         entries: vec![
             Entry {
                 character: '的',
-                code: "u".into(),
+                code: "u",
                 weight: 100,
             },
             Entry {
                 character: '的',
-                code: "unid".into(),
+                code: "unid",
                 weight: 1,
             },
             Entry {
                 character: '发',
-                code: "srid".into(),
+                code: "srid",
                 weight: 100,
             },
             Entry {
                 character: '發',
-                code: "hbrs".into(),
+                code: "hbrs",
                 weight: 50,
             },
             Entry {
                 character: '髮',
-                code: "peni".into(),
+                code: "peni",
                 weight: 40,
             },
             Entry {
                 character: '行',
-                code: "px".into(),
+                code: "px",
                 weight: 30,
             },
             Entry {
                 character: '女',
-                code: "bn".into(),
+                code: "bn",
                 weight: 20,
             },
             Entry {
                 character: '𠀀',
-                code: "fgfa".into(),
+                code: "fgfa",
                 weight: 0,
             },
         ],
         phrases: vec![Phrase {
-            text: "我们".into(),
-            code: "tuja".into(),
+            text: "我们",
+            code: "tuja",
             weight: 10,
         }],
         common: vec!['的', '发', '女', '行'],
         pinyin: vec![
             Pronunciation {
                 character: '行',
-                pinyin: "xing".into(),
+                pinyin: "xing",
                 weight: 8,
             },
             Pronunciation {
                 character: '行',
-                pinyin: "hang".into(),
+                pinyin: "hang",
                 weight: 5,
             },
             Pronunciation {
                 character: '女',
-                pinyin: "nv".into(),
+                pinyin: "nv",
                 weight: 6,
             },
             Pronunciation {
                 character: '𠀀',
-                pinyin: "he".into(),
+                pinyin: "he",
                 weight: 1,
             },
         ],
         details: vec![
             Detail {
                 character: '的',
-                full_codes: vec!["unid".into()],
-                decomposition: Some("白勹丶".into()),
-                readings: vec!["de".into()],
+                full_codes: vec!["unid"],
+                decomposition: Some("白勹丶"),
+                readings: vec!["de"],
             },
             Detail {
                 character: '發',
-                full_codes: vec!["hbrs".into()],
-                decomposition: Some("癶弓殳".into()),
-                readings: vec!["fā".into()],
+                full_codes: vec!["hbrs"],
+                decomposition: Some("癶弓殳"),
+                readings: vec!["fā"],
             },
         ],
         simplified: vec![mapping("發", &["发"])],
@@ -93,10 +97,10 @@ fn data() -> Data {
         ..Default::default()
     }
 }
-fn mapping(text: &str, variants: &[&str]) -> Mapping {
+fn mapping<'a>(text: &'a str, variants: &[&'a str]) -> Mapping<'a> {
     Mapping {
-        text: text.into(),
-        variants: variants.iter().map(|text| (*text).into()).collect(),
+        text,
+        variants: variants.to_vec(),
     }
 }
 
@@ -122,17 +126,13 @@ fn word_options() -> Options {
     }
 }
 /// 权重取自官方：单字表与词版单字表故意不同，证明词模式只认词版权重。
-fn word_data() -> Data {
-    let entry = |character, code: &str, weight| Entry {
+fn word_data() -> Data<'static> {
+    let entry = |character, code: &'static str, weight| Entry {
         character,
-        code: code.into(),
+        code,
         weight,
     };
-    let phrase = |text: &str, code: &str, weight| Phrase {
-        text: text.into(),
-        code: code.into(),
-        weight,
-    };
+    let phrase = |text: &'static str, code: &'static str, weight| Phrase { text, code, weight };
     Data {
         entries: vec![entry('一', "fi", 4_346_343)],
         word_entries: vec![
@@ -278,18 +278,18 @@ fn word_mode_shows_learning_for_characters_and_pinyin_only() {
     let mut data = word_data();
     data.details = vec![Detail {
         character: '的',
-        full_codes: vec!["unid".into()],
-        decomposition: Some("白勹丶".into()),
+        full_codes: vec!["unid"],
+        decomposition: Some("白勹丶"),
         readings: Vec::new(),
     }];
     data.entries.push(Entry {
         character: '的',
-        code: "u".into(),
+        code: "u",
         weight: 1,
     });
     data.pinyin = vec![Pronunciation {
         character: '的',
-        pinyin: "de".into(),
+        pinyin: "de",
         weight: 1,
     }];
     let dictionary = Dictionary::new(data).unwrap();
@@ -321,24 +321,24 @@ fn lookup_by_word_code_lists_words_but_not_single_characters() {
 #[test]
 fn word_tables_reject_invalid_rows_and_oversized_buckets() {
     let mut bad = word_data();
-    bad.word_entries[0].code = "toolong".into();
+    bad.word_entries[0].code = "toolong";
     assert!(Dictionary::new(bad).is_err());
     let mut bad = word_data();
-    bad.phrases[0].text = "一".into();
+    bad.phrases[0].text = "一";
     assert!(Dictionary::new(bad).is_err());
     // 单字一对多展开后超过上限时，须在加载时拒绝而不是查询时截断。
     let mut bad = word_data();
     bad.word_entries = (0..4000)
         .map(|index| Entry {
             character: char::from_u32(0x4E00 + index).unwrap(),
-            code: "u".into(),
+            code: "u",
             weight: 1,
         })
         .collect();
     bad.traditional = bad
         .word_entries
         .iter()
-        .map(|entry| mapping(&entry.character.to_string(), &["甲", "乙", "丙"]))
+        .map(|entry| mapping(entry.character.to_string().leak(), &["甲", "乙", "丙"]))
         .collect();
     assert!(Dictionary::new(bad).is_err());
 }
@@ -408,7 +408,7 @@ fn large_code_bucket_rebuild_stays_bounded_under_pressure() {
     let entries: Vec<_> = (0..MATCHES)
         .map(|index| Entry {
             character: char::from_u32(0x4E00 + index as u32).unwrap(),
-            code: "u".into(),
+            code: "u",
             weight: index as u64,
         })
         .collect();
@@ -710,7 +710,13 @@ fn lookup_is_read_only_handles_missing_and_multiple_characters_and_bounds() {
     assert_eq!(results.items[0].learning.full_codes, vec!["unid"]);
     assert_eq!(session.snapshot(), before);
     assert!(dictionary.lookup(&"的".repeat(65), 0).is_err());
-    assert!(dictionary.lookup("nihaoma", 0).is_err());
+    // 连写是合法的词拼音，查不到只是空结果；超过连写上限才算输入错误。
+    assert!(dictionary.lookup("nihaoma", 0).unwrap().items.is_empty());
+    assert!(
+        dictionary
+            .lookup(&"a".repeat(MAX_PINYIN_BYTES + 1), 0)
+            .is_err()
+    );
     assert!(dictionary.lookup("han", usize::MAX).is_err());
 }
 #[test]
@@ -745,7 +751,7 @@ fn pagination_selection_and_stale_snapshots_are_checked() {
         let character = char::from_u32(0x4e10 + index).unwrap();
         data.entries.push(Entry {
             character,
-            code: "a".into(),
+            code: "a",
             weight: 100 - index as u64,
         });
         data.common.push(character);
@@ -828,10 +834,10 @@ fn pagination_selection_and_stale_snapshots_are_checked() {
 #[test]
 fn malformed_data_is_rejected_before_sessions_and_initialization_is_repeatable() {
     let mut bad = data();
-    bad.entries[0].code = "toolong".into();
+    bad.entries[0].code = "toolong";
     assert!(Dictionary::new(bad).is_err());
     let mut bad = data();
-    bad.pinyin[0].pinyin = "xi ng".into();
+    bad.pinyin[0].pinyin = "xi ng";
     assert!(Dictionary::new(bad).is_err());
     let mut bad = data();
     bad.traditional[0].variants.clear();
@@ -845,12 +851,12 @@ fn stable_weight_order_dedup_and_common_filter_do_not_enable_learning() {
     let mut data = data();
     data.entries.push(Entry {
         character: '甲',
-        code: "u".into(),
+        code: "u",
         weight: 100,
     });
     data.entries.push(Entry {
         character: '的',
-        code: "u".into(),
+        code: "u",
         weight: 90,
     });
     let dictionary = Dictionary::new(data).unwrap();
@@ -875,4 +881,89 @@ fn stable_weight_order_dedup_and_common_filter_do_not_enable_learning() {
     assert!(state.candidates.iter().all(|c| c.learning.is_none()));
     session.process(Key::ToggleLearning).unwrap();
     assert!(session.snapshot().candidates[0].learning.is_some());
+}
+
+#[test]
+fn pinyin_lookup_finds_words_and_shows_their_codes() {
+    let word = |text, pinyin: &str, weight| WordPinyin {
+        text,
+        pinyin: pinyin.to_owned(),
+        weight,
+    };
+    let phrase = |text, code, weight| Phrase { text, code, weight };
+    let source = Data {
+        entries: vec![Entry {
+            character: '先',
+            code: "xi",
+            weight: 1,
+        }],
+        pinyin: vec![Pronunciation {
+            character: '先',
+            pinyin: "xian",
+            weight: 500,
+        }],
+        phrases: vec![
+            phrase("西安", "xaan", 9),
+            phrase("头发", "tofa", 9),
+            phrase("嘀嘀", "didi", 9),
+        ],
+        word_pinyin: vec![
+            word("西安", "xian", 900),
+            word("头发", "toufa", 10),
+            word("嘀嘀", "didi", 5),
+        ],
+        traditional: vec![mapping("头发", &["頭髮"])],
+        ..Default::default()
+    };
+    let dictionary = Dictionary::new(source.clone()).unwrap();
+    let typed = |options, keys: &str| {
+        let mut session = Session::new(&dictionary, options);
+        for key in keys.chars() {
+            session.process(Key::Character(key)).unwrap();
+        }
+        session
+    };
+    // 同一拼音串字词按权重混排，词带词码，单字仍是拆分和编码。
+    let mut session = typed(Options::default(), "`xian");
+    let state = session.snapshot();
+    let texts: Vec<_> = state.candidates.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(texts, ["西安", "先"]);
+    assert_eq!(state.candidates[0].comment, "〔xaan〕");
+    assert_eq!(state.candidates[1].comment, "〔xi〕");
+    assert_eq!(
+        session.process(Key::Space).unwrap().commit.as_deref(),
+        Some("西安")
+    );
+    // 繁体模式上屏转换后的词，词码仍按原词查到。
+    let traditional = Options {
+        output_form: OutputForm::Traditional,
+        ..Default::default()
+    };
+    let state = typed(traditional, "`toufa").snapshot();
+    assert_eq!(state.candidates[0].text, "頭髮");
+    assert_eq!(state.candidates[0].comment, "〔tofa〕");
+    // 只反查时才显示：打词的候选不带编码，查字窗走同一张表。
+    let words = Options {
+        typing_mode: TypingMode::Word,
+        auto_commit_four: false,
+        common_only: false,
+        ..Default::default()
+    };
+    assert_eq!(typed(words, "tofa").snapshot().candidates[0].comment, "");
+    let page = dictionary.lookup("toufa", 0).unwrap();
+    assert_eq!(page.items[0].text, "头发");
+    assert_eq!(page.items[0].learning.codes, ["tofa"]);
+    // 词码和拼音恰好同串时，查字结果不重复。
+    assert_eq!(dictionary.lookup("didi", 0).unwrap().items.len(), 1);
+    // 连写上限内的键都进组合，超出的不再加入。
+    let long = typed(
+        Options::default(),
+        &format!("`{}", "a".repeat(MAX_PINYIN_BYTES + 3)),
+    );
+    assert_eq!(long.snapshot().composition.text.len(), MAX_PINYIN_BYTES + 1);
+    for bad in [word("西安", "xi an", 1), word("西", "xi", 1)] {
+        let mut data = source.clone();
+        data.word_pinyin = vec![bad];
+        assert!(Dictionary::new(data).is_err());
+    }
 }

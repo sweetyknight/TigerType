@@ -54,7 +54,10 @@ impl Runtime {
             } else {
                 Data::create(&root)?
             };
-            Ok((Arc::new(Dictionary::new(import::load(&tables)?)?), data))
+            Ok((
+                Arc::new(Dictionary::new(import::load(&tables)?.data()?)?),
+                data,
+            ))
         })
     }
     /// 租约从引擎加载期直接移交工作线程，不曾释放再重新争抢；词表只读共享。
@@ -186,7 +189,7 @@ mod tests {
                 Arc::new(Dictionary::new(EngineData {
                     entries: vec![Entry {
                         character: '虎',
-                        code: "ab".into(),
+                        code: "ab",
                         weight: 1,
                     }],
                     common: vec!['虎'],

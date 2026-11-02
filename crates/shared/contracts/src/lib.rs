@@ -11,7 +11,8 @@ pub const MAX_CANDIDATES: usize = 9;
 /// 查字窗每页字数；输入候选的每页数量由 [`Options::page_size`] 决定。
 pub const LOOKUP_PAGE_SIZE: usize = 9;
 pub const MAX_QUERY_CHARS: usize = 64;
-pub const MAX_PINYIN_BYTES: usize = 6;
+/// 拼音连写上限：反查的词音节连写，官方表里最长 35 字母。
+pub const MAX_PINYIN_BYTES: usize = 36;
 pub const MAX_LEARNING_ITEMS: usize = 64;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

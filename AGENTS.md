@@ -5,7 +5,7 @@
 ## 产品与架构
 - 源码一级按 shared/windows/macos，二级按职责；input-client 是宿主侧共享逻辑，input-method 是平台系统适配，ui/ui-model 只指查字/设置。产品不得反向依赖 tools/dev（含 dev/build），两平台产品不互相引用；具体允许边与目录归属由方案和架构测试同步维护，不保留旧包转发壳。
 - Windows 10/11 x64、x86 宿主；macOS 13+ 本机架构按方案分阶段实施（IMK 输入法进程，管理员安装到 `/Library/Input Methods`，仅个人使用、不做代码签名）；Linux 只预留，暂不开发。专用 Rust 虎码单字/词引擎，不依赖 librime、Lua、OpenCC 运行库或 Rime 配置生态。
-- 正式代码、开发工具和测试使用 Rust；不引入 Python、Electron、WebView、云服务、遥测、自动更新或常驻看门狗。Windows 安装包经用户批准由 Inno Setup 编译，`.iss` 只含声明与停后台、登记/改名/清理占用旧文件的少量 Pascal，打包驱动仍为 Rust。macOS 打包、安装、升级与卸载全由 Rust 完成，不用 pkgbuild/productbuild/codesign/lipo/iconutil，链接后不改写可执行文件。
+- 正式代码、开发工具和测试使用 Rust。Windows 安装包经用户批准由 Inno Setup 编译，`.iss` 只含声明与停后台、登记/改名/清理占用旧文件的少量 Pascal，打包驱动仍为 Rust。macOS 打包、安装、升级与卸载全由 Rust 完成，不用 pkgbuild/productbuild/codesign/lipo/iconutil，链接后不改写可执行文件。
 - 资源占用从低：不引入异步运行时、通用界面框架；空闲零定时唤醒。热点先剖析，确需时依次用 `core::arch`、`asm!`，只放在允许 unsafe 的平台边界，并有与安全实现的对照测试。
 - 只建立有实现的 crate。依赖边界由 Rust 架构测试检查；新增成员/依赖须同步方案、调用方与测试，不增加通配豁免。
 - contracts/engine/input-client/ui-model 禁止 unsafe 和任何平台依赖；engine 不做文件、进程或窗口操作。backend 共享业务不依赖平台组件，文件系统原语只放内部 storage 系统边界。UI 不调用 engine/backend；input-method 不依赖 engine/backend/ui-model/UI、不加载词表；候选窗归 input-method。分层与禁止边以方案“多平台架构”为准。
@@ -17,7 +17,6 @@
 - 输入路径不读文件/配置、部署、遍历词表、同步启动程序或逐键日志。队列、查询、缓存有界，按键/提交不得静默丢弃。
 - 校验协议版本、长度、会话、序号、代次和快照。故障取消未上屏组合、放行原键；不修改已上屏文字、重放不确定按键或接受迟到提交。
 - 单后台故障由用户重新启动；线程超时不等于线程已终止。IPC 运行时默认拒绝 DLL，DLL 只走进程期驻留入口 `new_process_resident`，不支持热卸载。
-- `D:\虎码秃版 小狼毫（Win）`、`D:\Projects\weasel` 只读。不读取个人词库，不自动注册或切换输入法。
 - 正式数据独立存放 `%APPDATA%\TigerType`（macOS 为 `~/Library/Application Support/TigerType`）；测试只用新建合成临时目录，不接管旧目录或共享现用数据库。
 - 原件锁定只读；导入验证来源、大小/hash、格式、路径。失败不覆盖旧文件；拒绝越界、链接/目录联接。
 - Cargo/资源锁定；下载使用官方 HTTPS 并验证 hash。递归删除/移动先验证绝对目标；不得修改防护软件、全局 Git 配置或个人数据权限。

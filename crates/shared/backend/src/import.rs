@@ -6,8 +6,11 @@ use crate::{
     storage,
 };
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, path::Path};
-use tigertype_engine::{Data, Detail, Mapping, Phrase, Pronunciation};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
+use tigertype_engine::{Data, Detail, Mapping, Phrase, Pronunciation, WordPinyin};
 
 const LIMIT: u64 = 128 * 1024 * 1024;
 /// 码表目录内须有的文件（相对路径），即 resources/tiger 与安装目录 tiger 的全部内容。
@@ -52,7 +55,7 @@ fn verified(root: &Path, entry: &Entry) -> Result<String> {
     if bytes.len() as u64 != entry.size || format!("{:x}", Sha256::digest(&bytes)) != entry.sha256 {
         return Err(format!("资源校验失败: {}", entry.path).into());
     }
-    Ok(String::from_utf8(bytes)?.replace("\r\n", "\n"))
+    Ok(String::from_utf8(bytes)?)
 }
 fn lines(text: &str) -> impl Iterator<Item = &str> {
     text.lines()
@@ -60,16 +63,30 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
         .filter(|s| !s.is_empty() && !s.starts_with('#'))
 }
 fn dictionary_body(text: &str) -> Result<&str> {
-    text.split_once("\n...\n")
+    // 锁定文件 LF 与 CRLF 都有；原地定位，不为换行复制整个文件。
+    ["\n...\n", "\n...\r\n"]
+        .iter()
+        .find_map(|mark| text.split_once(mark))
         .map(|(_, body)| body)
         .ok_or_else(|| "缺少锁定词表正文分隔符".into())
 }
-fn fields(line: &str, count: usize) -> Result<Vec<&str>> {
-    let fields: Vec<_> = line.split('\t').collect();
-    if fields.len() != count {
-        return Err(format!("数据列数应为 {count}，实际 {}", fields.len()).into());
+/// 切成至多 N 列、至少 least 列，缺的末列留空；每行都走这里，不分配。
+fn columns<const N: usize>(line: &str, least: usize) -> Result<[&str; N]> {
+    let mut row = [""; N];
+    let mut count = 0;
+    for field in line.split('\t') {
+        if let Some(slot) = row.get_mut(count) {
+            *slot = field;
+        }
+        count += 1;
     }
-    Ok(fields)
+    if !(least..=N).contains(&count) {
+        return Err(format!("数据列数应为 {N}，实际 {count}").into());
+    }
+    Ok(row)
+}
+fn fields<const N: usize>(line: &str) -> Result<[&str; N]> {
+    columns(line, N)
 }
 fn character(text: &str) -> Result<char> {
     let mut chars = text.chars();
@@ -79,86 +96,102 @@ fn character(text: &str) -> Result<char> {
     }
     Ok(value)
 }
-fn mappings(text: &str) -> Result<Vec<Mapping>> {
+fn mappings(text: &str) -> Result<Vec<Mapping<'_>>> {
     lines(text)
         .map(|line| {
-            let row = fields(line, 2)?;
-            let variants: Vec<_> = row[1].split_whitespace().map(str::to_owned).collect();
+            let row = fields::<2>(line)?;
+            let variants: Vec<_> = row[1].split_whitespace().collect();
             // 单字只能映射到单字；短语表的键至少两字，值按原文保留。
             if row[0].chars().nth(1).is_none() {
                 variants.iter().try_for_each(|v| character(v).map(|_| ()))?;
             }
             Ok(Mapping {
-                text: row[0].to_owned(),
+                text: row[0],
                 variants,
             })
         })
         .collect()
 }
-fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
+/// 资料以 &nbsp; 作空格，按它和普通空白切开，直接借用原文。
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split("&nbsp;").flat_map(str::split_whitespace)
+}
+fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
     let mut data = Data::default();
     for line in lines(dictionary_body(&files["tiger.dict.yaml"])?) {
-        let row = fields(line, 3)?;
+        let row = fields::<3>(line)?;
         data.entries.push(tigertype_engine::Entry {
             character: character(row[0])?,
-            code: row[1].into(),
+            code: row[1],
             weight: row[2].parse()?,
         });
     }
     // 词版单字表的字与码同上，但权重是官方为字词混排另定的；末列 stem 只供造词，可省略。
     for line in lines(dictionary_body(&files["tigress.dict.yaml"])?) {
-        let row = fields(line, line.split('\t').count().clamp(3, 4))?;
+        let row = columns::<4>(line, 3)?;
         data.word_entries.push(tigertype_engine::Entry {
             character: character(row[0])?,
             weight: row[1].parse()?,
-            code: row[2].into(),
+            code: row[2],
         });
     }
     // 两张 tigress 词表已包含按虎码编码器生成的词码，导入最终四码而不执行 Lua。
     for name in ["tigress_ci.dict.yaml", "tigress_simp_ci.dict.yaml"] {
         for line in lines(dictionary_body(&files[name])?) {
             // 锁定词表正文实际省略 stem 列，只保留文本、权重和最终词码。
-            let row = fields(line, 3)?;
+            let row = fields::<3>(line)?;
             data.phrases.push(Phrase {
-                text: row[0].to_owned(),
+                text: row[0],
                 weight: row[1].parse()?,
-                code: row[2].to_owned(),
+                code: row[2],
             });
         }
     }
     for line in lines(dictionary_body(&files["core2022.dict.yaml"])?) {
-        let row = fields(line, 2)?;
+        let row = fields::<2>(line)?;
         if row[1] != "t" {
             return Err("常用字集标记不符".into());
         }
         data.common.push(character(row[0])?);
     }
+    // 原表近 80 万行词组大多是全拼方案用的；只有词表里的词才有虎码可查，其余不进内存。
+    let typable: HashSet<&str> = data.phrases.iter().map(|phrase| phrase.text).collect();
     for line in lines(dictionary_body(&files["PY_c.dict.yaml"])?) {
-        let row = fields(line, 3)?;
-        // 原表包含词组，只导入单字；没有把被排除词组当成拼音解析错误忽略。
+        let row = fields::<3>(line)?;
         if row[0].chars().count() != 1 {
+            if typable.contains(row[0]) {
+                data.word_pinyin.push(WordPinyin {
+                    text: row[0],
+                    pinyin: row[1].replace(' ', ""),
+                    weight: row[2].parse()?,
+                });
+            }
             continue;
         }
         data.pinyin.push(Pronunciation {
             character: character(row[0])?,
-            pinyin: row[1].into(),
+            pinyin: row[1],
             weight: row[2].parse()?,
         });
     }
     let mut details = BTreeMap::<char, Detail>::new();
     for line in lines(&files["opencc/hu_cf.txt"]) {
-        let row = fields(line, 2)?;
+        let row = fields::<2>(line)?;
         let ch = character(row[0])?;
-        let value = row[1].replace("&nbsp;", " ");
-        let inner = value
+        let inner = row[1]
             .strip_prefix('〔')
             .and_then(|s| s.strip_suffix('〕'))
             .ok_or("拆分括号格式不符")?;
         let (parts, codes) = inner.split_once('·').ok_or("拆分缺少编码分隔符")?;
+        let parts = parts.trim_end_matches("&nbsp;").trim();
+        // 拆分整段借用，&nbsp; 只应出现在分隔符前；内部出现时不能原样显示给用户。
+        if parts.contains("&nbsp;") {
+            return Err("拆分内含未处理的转义".into());
+        }
         let detail = Detail {
             character: ch,
-            full_codes: codes.split_whitespace().map(str::to_owned).collect(),
-            decomposition: Some(parts.trim().into()),
+            full_codes: words(codes).collect(),
+            decomposition: Some(parts),
             readings: Vec::new(),
         };
         if detail.full_codes.is_empty() || details.insert(ch, detail).is_some() {
@@ -166,10 +199,9 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
         }
     }
     for line in lines(&files["opencc/PYCharacters.txt"]) {
-        let row = fields(line, 2)?;
+        let row = fields::<2>(line)?;
         let ch = character(row[0])?;
-        let value = row[1].replace("&nbsp;", " ");
-        let readings = value
+        let readings = row[1]
             .strip_prefix('（')
             .and_then(|s| s.strip_suffix('）'))
             .ok_or("读音括号格式不符")?;
@@ -182,7 +214,7 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
         if !detail.readings.is_empty() {
             return Err("读音资料重复".into());
         }
-        detail.readings = readings.split_whitespace().map(str::to_owned).collect();
+        detail.readings = words(readings).collect();
     }
     data.details = details.into_values().collect();
     // 同官方 t2s.json、st_tu.json 的字典组：短语在前、单字在后，合为一张表。
@@ -195,15 +227,24 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data> {
     Ok(data)
 }
 
+/// 核对过的码表原文；Data 直接借用它，解析和建表期间须保持存活。
+pub struct Sources(BTreeMap<String, String>);
+
+impl Sources {
+    pub fn data(&self) -> Result<Data<'_>> {
+        parse_data(&self.0).map_err(|e| format!("码表解析失败: {e}").into())
+    }
+}
+
 /// 后台、查字与打包共用：码表目录（开发为 resources/tiger，安装版为程序目录下的 tiger）须与锁定清单逐字节一致；
 /// 词表的结构约束由调用方 Dictionary::new 检查。
-pub fn load(tables: &Path) -> Result<Data> {
+pub fn load(tables: &Path) -> Result<Sources> {
     let mut files = BTreeMap::new();
     for entry in source_entries()? {
         let text = verified(tables, &entry)?;
         files.insert(entry.path, text);
     }
-    parse_data(&files).map_err(|e| format!("码表解析失败: {e}").into())
+    Ok(Sources(files))
 }
 
 #[cfg(test)]
@@ -213,7 +254,12 @@ mod tests {
     fn parsers_reject_ambiguous_or_malformed_records() {
         assert!(character("你好").is_err());
         assert_eq!(character("𠀀").unwrap(), '𠀀');
-        assert!(fields("a\tb\tc", 2).is_err());
+        assert!(fields::<2>("a\tb\tc").is_err());
+        assert!(fields::<3>("a\tb").is_err());
+        assert_eq!(columns::<4>("a\tb\tc", 3).unwrap(), ["a", "b", "c", ""]);
+        assert!(columns::<4>("a\tb\tc\td\te", 3).is_err());
+        assert_eq!(dictionary_body("x\r\n...\r\nbody").unwrap(), "body");
+        assert_eq!(dictionary_body("x\n...\nbody").unwrap(), "body");
         assert!(dictionary_body("没有正文").is_err());
         assert!(mappings("发\t發髮").is_err());
         assert_eq!(mappings("发\t發 髮").unwrap()[0].variants, ["發", "髮"]);

@@ -89,7 +89,7 @@ mod tests {
         Ok(Dictionary::new(EngineData {
             entries: vec![Entry {
                 character: '𠀀',
-                code: "ab".into(),
+                code: "ab",
                 weight: 1,
             }],
             ..Default::default()

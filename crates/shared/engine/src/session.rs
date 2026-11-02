@@ -263,7 +263,7 @@ impl<'a> Session<'a> {
                             commit = self.commit(self.selected);
                         }
                     }
-                    // 拼音单音节最长 6 字母，再多的键不加入组合。
+                    // 拼音连写有上限，再多的键不加入组合。
                     if self.mode != InputMode::Pinyin || self.buffer.len() < MAX_PINYIN_BYTES {
                         self.buffer.push(if c == 'ü' { 'v' } else { c });
                         self.rebuild();
