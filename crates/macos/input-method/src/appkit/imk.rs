@@ -315,21 +315,44 @@ impl Session {
     }
     /// 按最新坐标摆放快照；内容没变时面板不重画。
     fn place(&self, state: InputState, caret: usize, deadline: Instant) -> bool {
+        let (owner, epoch) = (self.id.get(), self.epoch.get());
+        let current = || {
+            self.active.get()
+                && self.current()
+                && self.id.get() == owner
+                && self.epoch.get() == epoch
+                && Instant::now() < deadline
+        };
+        if !current() {
+            return false;
+        }
+        let client = self.client.borrow().clone();
         let anchor = self.anchor(0, deadline);
+        if !current() {
+            return false;
+        }
         let caret = if anchor.is_none() {
             self.anchor(caret, deadline)
         } else {
             None
         };
+        if !current() {
+            return false;
+        }
+        // 同步宿主查询可重入失焦/结束组合；返回后核对原身份和标记范围，不能复活旧快照。
+        let marked = !state.composing || Self::matches_marked(&client, &state.composition.text);
+        if !current() {
+            return false;
+        }
+        if !marked {
+            self.marked.borrow_mut().clear();
+            self.host.borrow_mut().discard();
+            self.environment.panel.hide();
+            return false;
+        }
         self.environment
             .panel
-            .show(
-                self.id.get(),
-                state,
-                &mut self.location.borrow_mut(),
-                anchor,
-                caret,
-            )
+            .show(owner, state, &mut self.location.borrow_mut(), anchor, caret)
             .unwrap_or(false)
     }
     fn schedule(&self, attempt: usize) {
@@ -340,9 +363,10 @@ impl Session {
     }
     /// 宿主没有布局通知，组合刚写入时拿到的坐标可能还是旧的；下一键之前补查，纠正位置。
     fn reanchor(&self) {
-        if self.busy.get() {
+        if !self.active.get() || !self.current() || self.busy.replace(true) {
             return;
         }
+        let _busy = Busy(&self.busy);
         let Ok(host) = self.host.try_borrow() else {
             return;
         };
@@ -440,6 +464,7 @@ pub(super) mod tests {
         committed: RefCell<String>,
         cached: RefCell<Option<String>>,
         offset: Cell<usize>,
+        on_anchor: RefCell<Option<Box<dyn FnOnce()>>>,
     }
     define_class!(
         // SAFETY: 合成客户端只实现测试实际使用的 IMK 文本方法，不连接或注入真实应用。
@@ -465,7 +490,11 @@ pub(super) mod tests {
                 NSAttributedString::initWithString(NSAttributedString::alloc(), &NSString::from_str(&text))
             }) }
             #[unsafe(method(attributesForCharacterIndex:lineHeightRectangle:))]
-            fn attributes(&self, _: usize, _: *mut NSRect) -> *mut NSDictionary { callback(std::ptr::null_mut).unwrap_or(std::ptr::null_mut()) }
+            fn attributes(&self, _: usize, _: *mut NSRect) -> *mut NSDictionary { callback(|| {
+                let action = self.ivars().on_anchor.borrow_mut().take();
+                if let Some(action) = action { action(); }
+                std::ptr::null_mut()
+            }).unwrap_or(std::ptr::null_mut()) }
         }
     );
     #[derive(Default)]
@@ -738,6 +767,7 @@ pub(super) mod tests {
         assert_eq!(&*other.ivars().committed.borrow(), "新");
         session.activate(&NSObject::new());
         assert!(!session.active.get());
+        reanchor_regressions(&session, &client, outcome("ab", None));
         drop(session);
         assert_eq!(&*client.ivars().committed.borrow(), "虎");
         let native = server.native.clone();
@@ -750,6 +780,98 @@ pub(super) mod tests {
         assert!(refused.is_none());
         println!("IMK 服务实际初始化、控制器代理与离线按键放行通过（独立测试连接）");
         lifetime
+    }
+    fn reanchor_regressions(session: &Rc<Session>, client: &Client, mut reply: KeyOutcome) {
+        struct Ready(KeyOutcome, Rc<Cell<usize>>);
+        impl Channel for Ready {
+            fn ensure(&mut self, _: Instant) -> Result<bool, Error> {
+                Ok(false)
+            }
+            fn request(&mut self, _: u64, _: Command, _: Instant) -> Result<Reply, Error> {
+                self.1.set(self.1.get() + 1);
+                Ok(Reply::Key(self.0.clone()))
+            }
+            fn show(&mut self, _: Panel, _: Instant) -> Result<(), Error> {
+                Ok(())
+            }
+            fn indicate(&mut self, _: bool, _: Instant) -> Result<(), Error> {
+                Ok(())
+            }
+            fn cancel(&mut self) {}
+        }
+        reply.state.revision = 10;
+        reply.state.highlighted = Some(0);
+        reply.state.candidates = vec![tigertype_contracts::Candidate {
+            text: "虎".into(),
+            label: "1".into(),
+            ..Default::default()
+        }];
+        let requests = Rc::new(Cell::new(0));
+        let start = || {
+            session.activate(client);
+            *session.host.borrow_mut() =
+                Host::new(Box::new(Ready(reply.clone(), requests.clone())));
+            assert!(session.process(Key::Character('a'), Instant::now() + BUDGET));
+            assert!(session.environment.panel.window.isVisible());
+        };
+        start();
+        session.reanchor();
+        assert!(
+            session.environment.panel.window.isVisible(),
+            "有效组合正常补查"
+        );
+        assert_eq!(session.rechecks.get(), 1);
+        // 首次定位与延迟补查共享边界；坐标查询中的失焦、重激活、结束组合均不得复活旧候选。
+        for delayed in [false, true] {
+            for action in 0..4 {
+                start();
+                let weak = Rc::downgrade(session);
+                let client: Retained<Client> = Retained::from(client);
+                *client.ivars().on_anchor.borrow_mut() = Some(Box::new({
+                    let client = client.clone();
+                    move || {
+                        let session = weak.upgrade().unwrap();
+                        match action {
+                            0 => session.deactivate(),
+                            1 => session.activate(&client),
+                            2 => session.fail(),
+                            _ => client.ivars().marked.borrow_mut().clear(),
+                        }
+                    }
+                }));
+                if delayed {
+                    session.reanchor();
+                } else {
+                    session.process(Key::Character('b'), Instant::now() + BUDGET);
+                }
+                assert!(
+                    !session.environment.panel.window.isVisible(),
+                    "delayed={delayed}, action={action}"
+                );
+                assert!(!session.busy.get(), "重入保护须恢复");
+                assert_eq!(session.rechecks.get(), 0, "旧组合不得继续补查");
+            }
+        }
+        // 坐标查询期间嵌套的新键和补查都被挡住，不碰后台或覆盖当前快照。
+        start();
+        let before = requests.get();
+        let weak = Rc::downgrade(session);
+        let nested = Rc::new(Cell::new(None));
+        let observed = nested.clone();
+        *client.ivars().on_anchor.borrow_mut() = Some(Box::new(move || {
+            let session = weak.upgrade().unwrap();
+            observed.set(Some((
+                session.busy.get(),
+                session.process(Key::Character('b'), Instant::now() + BUDGET),
+            )));
+            session.reanchor();
+        }));
+        session.reanchor();
+        assert_eq!(nested.get(), Some((true, false)));
+        assert_eq!(requests.get(), before);
+        assert!(!session.busy.get());
+        assert!(session.environment.panel.window.isVisible());
+        session.deactivate();
     }
 }
 impl Server {
