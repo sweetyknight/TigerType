@@ -33,21 +33,22 @@ pub struct Pronunciation<'a> {
 #[derive(Debug, Clone)]
 pub struct WordPinyin<'a> {
     pub text: &'a str,
-    pub pinyin: String,
+    pub pinyin: &'a str,
     pub weight: u64,
 }
 #[derive(Debug, Clone)]
 pub struct Detail<'a> {
     pub character: char,
-    pub full_codes: Vec<&'a str>,
+    // 解析后不再追加，精确长度切片避免每字保留 Vec 的增长余量。
+    pub full_codes: Box<[&'a str]>,
     pub decomposition: Option<&'a str>,
-    pub readings: Vec<&'a str>,
+    pub readings: Box<[&'a str]>,
 }
 /// 字形映射的键是单字或短语；单字的一对多全部列出，词取整词命中或逐段最长匹配。
 #[derive(Debug, Clone)]
 pub struct Mapping<'a> {
     pub text: &'a str,
-    pub variants: Vec<&'a str>,
+    pub variants: Box<[&'a str]>,
 }
 #[derive(Debug, Clone, Default)]
 pub struct Data<'a> {
@@ -341,17 +342,20 @@ fn forms(table: &Table, text: &str) -> Vec<String> {
 /// 不做声调和模糊纠错；ü/v 仅作为同一个无调输入码。
 pub fn normalize_pinyin(text: &str) -> Result<String> {
     let normalized = text.trim().to_lowercase().replace('ü', "v");
-    if normalized.is_empty()
-        || normalized.len() > MAX_PINYIN_BYTES
-        || !normalized.bytes().all(|b| b.is_ascii_lowercase())
-    {
+    if !valid_pinyin(&normalized) {
         return Err(Error("请输入无调全拼（ü 可输入 v）"));
     }
     Ok(normalized)
 }
+// 建表输入已规范化，直接校验，避免逐条分配临时小写/替换字符串。
+fn valid_pinyin(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= MAX_PINYIN_BYTES
+        && text.bytes().all(|b| b.is_ascii_lowercase())
+}
 
 impl Dictionary {
-    pub fn new(data: Data<'_>) -> Result<Self> {
+    pub fn new(mut data: Data<'_>) -> Result<Self> {
         if data.entries.is_empty()
             || [
                 data.entries.len(),
@@ -380,12 +384,12 @@ impl Dictionary {
             return Err(Error("单字编码或字符非法"));
         }
         for entry in &data.pinyin {
-            if normalize_pinyin(entry.pinyin)? != entry.pinyin || entry.character.is_control() {
+            if !valid_pinyin(entry.pinyin) || entry.character.is_control() {
                 return Err(Error("拼音数据必须为规范化全拼"));
             }
         }
         for word in &data.word_pinyin {
-            if normalize_pinyin(&word.pinyin)? != word.pinyin
+            if !valid_pinyin(word.pinyin)
                 || word.text.chars().count() < 2
                 || word.text.chars().any(char::is_control)
             {
@@ -408,6 +412,7 @@ impl Dictionary {
                 return Err(Error("学习资料重复或格式非法"));
             }
         }
+        drop(details);
         if data.phrases.iter().any(|phrase| {
             phrase.text.chars().count() < 2
                 || phrase.text.chars().any(char::is_control)
@@ -419,7 +424,7 @@ impl Dictionary {
         {
             return Err(Error("词条文本或编码非法"));
         }
-        let learning = learning_table(&data)?;
+        let phrase_count = data.phrases.len();
         // 同官方 tigress：单字表在前、词表在后，同权重保持此顺序。
         let word_buckets = buckets(
             data.word_entries
@@ -431,11 +436,17 @@ impl Dictionary {
                         .map(|p| (p.code, p.weight, Text::Word(p.text))),
                 ),
         )?;
+        // 词桶不再借用解析记录；先释放它们，再建立临时行较多的学习资料表。
+        drop(std::mem::take(&mut data.word_entries));
+        drop(std::mem::take(&mut data.phrases));
+        let learning = learning_table(&data)?;
+        drop(data.details);
         let tiger_buckets = buckets(
             data.entries
                 .iter()
                 .map(|e| (e.code, e.weight, Text::Character(e.character))),
         )?;
+        drop(data.entries);
         let pinyin_buckets = buckets(
             data.pinyin
                 .iter()
@@ -443,10 +454,12 @@ impl Dictionary {
                 .chain(
                     data.word_pinyin
                         .iter()
-                        .map(|w| (w.pinyin.as_str(), w.weight, Text::Word(w.text))),
+                        .map(|w| (w.pinyin, w.weight, Text::Word(w.text))),
                 ),
         )?;
-        let mut word_order = Vec::with_capacity(data.phrases.len());
+        drop(data.pinyin);
+        drop(data.word_pinyin);
+        let mut word_order = Vec::with_capacity(phrase_count);
         for key in 0..word_buckets.keys.len() {
             for segment in word_buckets.value_segments(key) {
                 if word_buckets.segment(segment).chars().nth(1).is_some() {
@@ -792,15 +805,15 @@ mod tests {
             details: vec![
                 Detail {
                     character: '甲',
-                    full_codes: vec!["abcd"],
+                    full_codes: Box::new(["abcd"]),
                     decomposition: None,
-                    readings: vec!["jiǎ", "jia"],
+                    readings: Box::new(["jiǎ", "jia"]),
                 },
                 Detail {
                     character: '乙',
-                    full_codes: Vec::new(),
+                    full_codes: Box::default(),
                     decomposition: Some("乙 乙"),
-                    readings: Vec::new(),
+                    readings: Box::default(),
                 },
             ],
             ..Default::default()

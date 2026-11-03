@@ -62,7 +62,7 @@ fn run() -> Result<()> {
     bundle::assemble(&root, &program, &stage, &icon, &menu)?;
     let manifest = bundle::inspect(&stage)?;
     if target.try_exists()? {
-        bundle::inspect_existing(&target)?;
+        bundle::inspect(&target)?;
     }
     bundle::replace(&stage, &target, &backup)?;
     if backup.try_exists()? {

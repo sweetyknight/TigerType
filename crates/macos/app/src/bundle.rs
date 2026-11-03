@@ -140,8 +140,19 @@ pub fn executable(bytes: &[u8]) -> Result<()> {
     }
     Ok(())
 }
+/// 开发期只接受当前包契约；新来源、已有包和卸载共用完整资源校验。
 pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
-    let names = validate_existing_manifest(manifest)?;
+    let mut names = BTreeSet::new();
+    for file in &manifest.files {
+        resources::relative(&file.path)?;
+        if !names.insert(file.path.clone())
+            || file.size > 128 * 1024 * 1024
+            || file.sha256.len() != 64
+            || !file.sha256.bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err("应用包摘要、大小或重复路径不符".into());
+        }
+    }
     if names != expected()? {
         return Err("应用包文件集合不符".into());
     }
@@ -156,30 +167,6 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
     }
     Ok(())
 }
-/// 更新字体清单后旧包仍可安全替换；仅允许已知资源，必需程序/码表不缺项，字体按旧包自身摘要检查。
-fn validate_existing_manifest(manifest: &Manifest) -> Result<BTreeSet<String>> {
-    let mut names = BTreeSet::new();
-    for file in &manifest.files {
-        resources::relative(&file.path)?;
-        if !names.insert(file.path.clone())
-            || file.size > 128 * 1024 * 1024
-            || file.sha256.len() != 64
-            || !file.sha256.bytes().all(|c| c.is_ascii_hexdigit())
-        {
-            return Err("应用包摘要、大小或重复路径不符".into());
-        }
-    }
-    let allowed = expected()?;
-    let required: BTreeSet<_> = allowed
-        .iter()
-        .filter(|name| !name.starts_with("Contents/Resources/Fonts/"))
-        .cloned()
-        .collect();
-    if !names.is_subset(&allowed) || !required.is_subset(&names) || names.len() == required.len() {
-        return Err("已有包的程序、码表或字体集合不符".into());
-    }
-    Ok(names)
-}
 /// 校验与复制共用同一份读取字节；安装器不能先检查再用 fs::copy 重新打开来源。
 pub fn read(root: &Path, file: &File) -> Result<Vec<u8>> {
     let bytes = storage::read_file(&root.join(resources::relative(&file.path)?), file.size)?;
@@ -192,8 +179,12 @@ pub fn read(root: &Path, file: &File) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 pub fn inspect(root: &Path) -> Result<Manifest> {
-    let manifest = inspect_existing(root)?;
+    let manifest: Manifest =
+        serde_json::from_slice(&storage::read_file(&root.join(MANIFEST), 64 * 1024)?)?;
     validate_manifest(&manifest)?;
+    for file in &manifest.files {
+        read(root, file)?;
+    }
     let info = manifest
         .files
         .iter()
@@ -201,16 +192,6 @@ pub fn inspect(root: &Path) -> Result<Manifest> {
         .unwrap();
     if read(root, info)? != INFO.as_bytes() {
         return Err("Info.plist 与产品契约不符".into());
-    }
-    Ok(manifest)
-}
-/// 旧包按自身完整摘要校验；升级不能要求旧声明已等于新声明，来源包仍用 inspect 严格检查。
-pub fn inspect_existing(root: &Path) -> Result<Manifest> {
-    let manifest: Manifest =
-        serde_json::from_slice(&storage::read_file(&root.join(MANIFEST), 64 * 1024)?)?;
-    validate_existing_manifest(&manifest)?;
-    for file in &manifest.files {
-        read(root, file)?;
     }
     Ok(manifest)
 }
@@ -445,13 +426,10 @@ mod tests {
         )?;
         assert_eq!(inspect(&target)?.files.len(), expected()?.len());
         assert!(assemble(&repository, &binary, &target, b"x", b"x").is_err());
-        // 旧版声明保持自身摘要一致即可被替换，但不能作为新版来源安装。
+        // 旧声明即便重算摘要也拒绝；恢复当前声明后再验证其他损坏，避免前一错误遮住断言。
         let previous_info = INFO.replace("<string>0.1.0</string>", "<string>0.0.1</string>");
         fs::write(target.join("Contents/Info.plist"), &previous_info)?;
-        assert!(
-            inspect_existing(&target).is_err(),
-            "未更新摘要的旧包必须拒绝"
-        );
+        assert!(inspect(&target).is_err());
         let mut manifest: Manifest = serde_json::from_slice(&fs::read(target.join(MANIFEST))?)?;
         *manifest
             .files
@@ -459,26 +437,21 @@ mod tests {
             .find(|f| f.path == "Contents/Info.plist")
             .unwrap() = entry("Contents/Info.plist", previous_info.as_bytes());
         fs::write(target.join(MANIFEST), serde_json::to_vec_pretty(&manifest)?)?;
-        inspect_existing(&target)?;
         assert!(inspect(&target).is_err());
-        // 新增字体不能阻断旧包升级；旧清单仍逐字节核对，但不能作为完整的新包来源。
-        let added = manifest
+        fs::write(target.join("Contents/Info.plist"), INFO)?;
+        *manifest
             .files
-            .iter()
-            .position(|f| f.path.ends_with("TH-Tshyn-P1.ttf"))
-            .unwrap();
-        let removed = manifest.files.remove(added);
-        fs::remove_file(target.join(&removed.path))?;
+            .iter_mut()
+            .find(|f| f.path == "Contents/Info.plist")
+            .unwrap() = entry("Contents/Info.plist", INFO.as_bytes());
         fs::write(target.join(MANIFEST), serde_json::to_vec_pretty(&manifest)?)?;
-        inspect_existing(&target)?;
-        assert!(inspect(&target).is_err());
+        inspect(&target)?;
         // 只破坏刚复制的合成包，仓库原始码表始终只读。
         fs::OpenOptions::new()
             .append(true)
             .open(target.join("Contents/Resources/tiger/tiger.dict.yaml"))?
             .write_all(b"corrupt")?;
         assert!(inspect(&target).is_err());
-        assert!(inspect_existing(&target).is_err());
         println!(
             "完整锁定资源复制与损坏拒绝通过；非可安装包：{}",
             target.display()
@@ -495,43 +468,24 @@ mod tests {
         }
         let manifest = Manifest { files };
         validate_manifest(&manifest).unwrap();
-        let mut previous = manifest.files.clone();
-        previous.retain(|f| !f.path.contains("TH-Tshyn-"));
-        let previous = Manifest { files: previous };
-        validate_existing_manifest(&previous).unwrap();
-        assert!(validate_manifest(&previous).is_err());
-        for missing in [
-            EXECUTABLE,
-            "Contents/Info.plist",
-            "Contents/Resources/tiger/tiger.dict.yaml",
-        ] {
-            let files = previous
+        // 每项资源都必需，不为旧版缺少的码表或字体保留例外。
+        for missing in &manifest.files {
+            let files = manifest
                 .files
                 .iter()
-                .filter(|f| f.path != missing)
+                .filter(|f| f.path != missing.path)
                 .cloned()
                 .collect();
-            assert!(validate_existing_manifest(&Manifest { files }).is_err());
+            assert!(validate_manifest(&Manifest { files }).is_err());
         }
-        let files = previous
-            .files
-            .iter()
-            .filter(|f| !f.path.starts_with("Contents/Resources/Fonts/"))
-            .cloned()
-            .collect();
-        assert!(validate_existing_manifest(&Manifest { files }).is_err());
         for path in ["../escape", "Contents/Info.plist", "Contents/Other"] {
             let mut files = manifest.files.clone();
             files[0].path = path.into();
             let invalid = Manifest { files };
-            assert!(validate_existing_manifest(&invalid).is_err());
             assert!(validate_manifest(&invalid).is_err());
         }
         let mut files = manifest.files.clone();
         files[0].sha256 = "0".repeat(64);
-        assert!(validate_manifest(&Manifest { files }).is_err());
-        let mut files = manifest.files;
-        files.pop();
         assert!(validate_manifest(&Manifest { files }).is_err());
     }
 }

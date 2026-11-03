@@ -20,6 +20,7 @@ pub struct Session<'a> {
     // 组合中收到的热重载设置：等本次组合结束（含顶屏的旧字上屏、新字开始之间）再换上。
     pending: Option<Options>,
 }
+
 impl<'a> Session<'a> {
     pub fn new(dictionary: &'a Dictionary, options: Options) -> Self {
         Self {
@@ -64,7 +65,8 @@ impl<'a> Session<'a> {
         self.buffer.clear();
         self.mode = InputMode::Tiger;
         self.settle();
-        self.candidates.clear();
+        // rebuild 会换入新数组，保留旧容量没有复用价值。
+        self.candidates = Vec::new();
         self.selected = 0;
     }
     pub fn clear(&mut self) -> Result<InputState> {
@@ -370,4 +372,46 @@ fn punctuation(c: char) -> Option<String> {
         }
         .into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Data, Entry};
+
+    #[test]
+    fn ending_composition_releases_candidates_that_rebuild_does_not_reuse() {
+        let dictionary = Dictionary::new(Data {
+            entries: (0..128)
+                .map(|i| Entry {
+                    character: char::from_u32('一' as u32 + i).unwrap(),
+                    code: "ab",
+                    weight: 128 - u64::from(i),
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut session = Session::new(
+            &dictionary,
+            Options {
+                common_only: false,
+                ..Default::default()
+            },
+        );
+        // 提交和取消都释放整桶容量；下次输入仍从字典正常重建。
+        for end in [Key::Space, Key::Escape] {
+            for c in "ab".chars() {
+                session.process(Key::Character(c)).unwrap();
+            }
+            assert_eq!(session.candidates.len(), 128);
+            let outcome = session.process(end).unwrap();
+            assert_eq!(
+                outcome.commit.as_deref(),
+                (end == Key::Space).then_some("一")
+            );
+            assert!(!outcome.state.composing);
+            assert_eq!(session.candidates.capacity(), 0);
+        }
+    }
 }

@@ -92,7 +92,7 @@ cargo run --locked --offline -p tigertype-dev --example package
 sudo target/package/TigerType.app/Contents/MacOS/tigertype install
 ```
 
-首次安装后注销并重新登录，再到“系统设置 → 键盘 → 文本输入 → 编辑”中添加“TigerType 虎码”。升级使用同一条安装命令。
+首次安装后注销并重新登录，再到“系统设置 → 键盘 → 文本输入 → 编辑”中添加“TigerType 虎码”。升级使用同一条安装命令；开发期不兼容旧版安装包，若提示已有包不符，请先用下方命令卸载已安装版本，再安装新版。
 
 安装会补齐缺失字体，保留已有的有效字体。如果提示已有字体损坏或文楷缺少虎码字根，请先核对提示中的文件，移除冲突字体后重新安装；安装器不会覆盖这些文件。
 

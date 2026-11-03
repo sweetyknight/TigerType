@@ -346,10 +346,10 @@ pub fn install(source: &Path) -> Result<()> {
     fix_directories(&stage)?;
     safe_tree(&stage, &mut 0)?;
     bundle::inspect(&stage)?;
-    // 旧包必须仍是安全的受管布局；失败时保留旧包和 staging 证据。
+    // 已有包也须符合当前契约和安全布局；失败时保留原包与 staging。
     if target.try_exists()? {
         safe_tree(&target, &mut 0)?;
-        bundle::inspect_existing(&target)?;
+        bundle::inspect(&target)?;
     }
     let backup = parent.join(format!("TigerType-old-{}", std::process::id()));
     if backup.try_exists()? {
@@ -376,7 +376,7 @@ pub fn install(source: &Path) -> Result<()> {
 pub fn uninstall() -> Result<()> {
     let parent = privileged()?;
     let target = parent.join(NAME);
-    bundle::inspect_existing(&target)?;
+    bundle::inspect(&target)?;
     stop(&target)?;
     remove(&parent, &target)?;
     println!("已卸载程序，保留用户数据与供其他应用使用的字体；请手动移除系统设置中的输入法条目。");

@@ -81,15 +81,15 @@ fn data() -> Data<'static> {
         details: vec![
             Detail {
                 character: '的',
-                full_codes: vec!["unid"],
+                full_codes: Box::new(["unid"]),
                 decomposition: Some("白勹丶"),
-                readings: vec!["de"],
+                readings: Box::new(["de"]),
             },
             Detail {
                 character: '發',
-                full_codes: vec!["hbrs"],
+                full_codes: Box::new(["hbrs"]),
                 decomposition: Some("癶弓殳"),
-                readings: vec!["fā"],
+                readings: Box::new(["fā"]),
             },
         ],
         simplified: vec![mapping("發", &["发"])],
@@ -100,7 +100,7 @@ fn data() -> Data<'static> {
 fn mapping<'a>(text: &'a str, variants: &[&'a str]) -> Mapping<'a> {
     Mapping {
         text,
-        variants: variants.to_vec(),
+        variants: variants.into(),
     }
 }
 
@@ -278,9 +278,9 @@ fn word_mode_shows_learning_for_characters_and_pinyin_only() {
     let mut data = word_data();
     data.details = vec![Detail {
         character: '的',
-        full_codes: vec!["unid"],
+        full_codes: Box::new(["unid"]),
         decomposition: Some("白勹丶"),
-        readings: Vec::new(),
+        readings: Box::default(),
     }];
     data.entries.push(Entry {
         character: '的',
@@ -840,7 +840,7 @@ fn malformed_data_is_rejected_before_sessions_and_initialization_is_repeatable()
     bad.pinyin[0].pinyin = "xi ng";
     assert!(Dictionary::new(bad).is_err());
     let mut bad = data();
-    bad.traditional[0].variants.clear();
+    bad.traditional[0].variants = Box::default();
     assert!(Dictionary::new(bad).is_err());
     for _ in 0..100 {
         assert!(Dictionary::new(data()).is_ok());
@@ -885,11 +885,13 @@ fn stable_weight_order_dedup_and_common_filter_do_not_enable_learning() {
 
 #[test]
 fn pinyin_lookup_finds_words_and_shows_their_codes() {
-    let word = |text, pinyin: &str, weight| WordPinyin {
-        text,
-        pinyin: pinyin.to_owned(),
-        weight,
-    };
+    fn word<'a>(text: &'a str, pinyin: &'a str, weight: u64) -> WordPinyin<'a> {
+        WordPinyin {
+            text,
+            pinyin,
+            weight,
+        }
+    }
     let phrase = |text, code, weight| Phrase { text, code, weight };
     let source = Data {
         entries: vec![Entry {

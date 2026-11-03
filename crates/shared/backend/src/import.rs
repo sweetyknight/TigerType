@@ -100,7 +100,7 @@ fn mappings(text: &str) -> Result<Vec<Mapping<'_>>> {
     lines(text)
         .map(|line| {
             let row = fields::<2>(line)?;
-            let variants: Vec<_> = row[1].split_whitespace().collect();
+            let variants: Box<[_]> = row[1].split_whitespace().collect();
             // 单字只能映射到单字；短语表的键至少两字，值按原文保留。
             if row[0].chars().nth(1).is_none() {
                 variants.iter().try_for_each(|v| character(v).map(|_| ()))?;
@@ -116,9 +116,30 @@ fn mappings(text: &str) -> Result<Vec<Mapping<'_>>> {
 fn words(text: &str) -> impl Iterator<Item = &str> {
     text.split("&nbsp;").flat_map(str::split_whitespace)
 }
+/// 只在通过 hash 校验的内存副本里删去词音节间的空格，供解析记录借用，不逐词分配 String。
+fn join_word_pinyin(text: &mut String) {
+    let mut field = 0;
+    let mut characters = 0;
+    text.retain(|c| {
+        match c {
+            '\n' => {
+                field = 0;
+                characters = 0;
+            }
+            '\t' => field += 1,
+            _ if field == 0 => characters += 1,
+            _ => {}
+        }
+        // 单字读音保持原样，非法空格仍由引擎拒绝；文本列和权重列也不改写。
+        !(field == 1 && characters > 1 && c == ' ')
+    });
+}
 fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
     let mut data = Data::default();
-    for line in lines(dictionary_body(&files["tiger.dict.yaml"])?) {
+    let single = dictionary_body(&files["tiger.dict.yaml"])?;
+    // 已校验原文可廉价计行，避免刚越过容量边界就保留近一倍空位。
+    data.entries.reserve_exact(lines(single).count());
+    for line in lines(single) {
         let row = fields::<3>(line)?;
         data.entries.push(tigertype_engine::Entry {
             character: character(row[0])?,
@@ -127,7 +148,9 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
         });
     }
     // 词版单字表的字与码同上，但权重是官方为字词混排另定的；末列 stem 只供造词，可省略。
-    for line in lines(dictionary_body(&files["tigress.dict.yaml"])?) {
+    let word = dictionary_body(&files["tigress.dict.yaml"])?;
+    data.word_entries.reserve_exact(lines(word).count());
+    for line in lines(word) {
         let row = columns::<4>(line, 3)?;
         data.word_entries.push(tigertype_engine::Entry {
             character: character(row[0])?,
@@ -136,8 +159,14 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
         });
     }
     // 两张 tigress 词表已包含按虎码编码器生成的词码，导入最终四码而不执行 Lua。
-    for name in ["tigress_ci.dict.yaml", "tigress_simp_ci.dict.yaml"] {
-        for line in lines(dictionary_body(&files[name])?) {
+    let phrases = [
+        dictionary_body(&files["tigress_ci.dict.yaml"])?,
+        dictionary_body(&files["tigress_simp_ci.dict.yaml"])?,
+    ];
+    data.phrases
+        .reserve_exact(phrases.iter().map(|text| lines(text).count()).sum());
+    for text in phrases {
+        for line in lines(text) {
             // 锁定词表正文实际省略 stem 列，只保留文本、权重和最终词码。
             let row = fields::<3>(line)?;
             data.phrases.push(Phrase {
@@ -147,7 +176,9 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
             });
         }
     }
-    for line in lines(dictionary_body(&files["core2022.dict.yaml"])?) {
+    let common = dictionary_body(&files["core2022.dict.yaml"])?;
+    data.common.reserve_exact(lines(common).count());
+    for line in lines(common) {
         let row = fields::<2>(line)?;
         if row[1] != "t" {
             return Err("常用字集标记不符".into());
@@ -156,13 +187,16 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
     }
     // 原表近 80 万行词组大多是全拼方案用的；只有词表里的词才有虎码可查，其余不进内存。
     let typable: HashSet<&str> = data.phrases.iter().map(|phrase| phrase.text).collect();
-    for line in lines(dictionary_body(&files["PY_c.dict.yaml"])?) {
+    let pinyin = dictionary_body(&files["PY_c.dict.yaml"])?;
+    // 用已有词数预留，避免为精确计数再扫描大拼音表；多音词照常增长，解析后收紧。
+    data.word_pinyin.reserve_exact(typable.len());
+    for line in lines(pinyin) {
         let row = fields::<3>(line)?;
         if row[0].chars().count() != 1 {
             if typable.contains(row[0]) {
                 data.word_pinyin.push(WordPinyin {
                     text: row[0],
-                    pinyin: row[1].replace(' ', ""),
+                    pinyin: row[1],
                     weight: row[2].parse()?,
                 });
             }
@@ -174,6 +208,9 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
             weight: row[2].parse()?,
         });
     }
+    drop(typable);
+    data.pinyin.shrink_to_fit();
+    data.word_pinyin.shrink_to_fit();
     let mut details = BTreeMap::<char, Detail>::new();
     for line in lines(&files["opencc/hu_cf.txt"]) {
         let row = fields::<2>(line)?;
@@ -192,7 +229,7 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
             character: ch,
             full_codes: words(codes).collect(),
             decomposition: Some(parts),
-            readings: Vec::new(),
+            readings: Box::default(),
         };
         if detail.full_codes.is_empty() || details.insert(ch, detail).is_some() {
             return Err("拆分缺码或重复".into());
@@ -207,9 +244,9 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
             .ok_or("读音括号格式不符")?;
         let detail = details.entry(ch).or_insert(Detail {
             character: ch,
-            full_codes: Vec::new(),
+            full_codes: Box::default(),
             decomposition: None,
-            readings: Vec::new(),
+            readings: Box::default(),
         });
         if !detail.readings.is_empty() {
             return Err("读音资料重复".into());
@@ -227,7 +264,7 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
     Ok(data)
 }
 
-/// 核对过的码表原文；Data 直接借用它，解析和建表期间须保持存活。
+/// 核对过的码表内存副本，词的拼音已连写；Data 借用它，解析和建表期间须保持存活。
 pub struct Sources(BTreeMap<String, String>);
 
 impl Sources {
@@ -241,7 +278,11 @@ impl Sources {
 pub fn load(tables: &Path) -> Result<Sources> {
     let mut files = BTreeMap::new();
     for entry in source_entries()? {
-        let text = verified(tables, &entry)?;
+        let mut text = verified(tables, &entry)?;
+        if entry.path == "PY_c.dict.yaml" {
+            join_word_pinyin(&mut text);
+            text.shrink_to_fit();
+        }
         files.insert(entry.path, text);
     }
     Ok(Sources(files))
@@ -250,6 +291,22 @@ pub fn load(tables: &Path) -> Result<Sources> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn joining_word_pinyin_preserves_text_single_readings_columns_and_unicode() {
+        let mut source = String::from(
+            "# header with spaces\r\n...\r\n𠀀\the a\t1\r\n你好\tni hao\t2\r\n大 空\t da kong \t3\r\n西安\txi\tan\t4\n",
+        );
+        join_word_pinyin(&mut source);
+        assert_eq!(
+            source,
+            "# header with spaces\r\n...\r\n𠀀\the a\t1\r\n你好\tnihao\t2\r\n大 空\tdakong\t3\r\n西安\txi\tan\t4\n"
+        );
+        // 重复处理不继续改写，额外列仍可被原有格式校验拒绝。
+        let joined = source.clone();
+        join_word_pinyin(&mut source);
+        assert_eq!(source, joined);
+        assert!(fields::<3>("西安\txi\tan\t4").is_err());
+    }
     #[test]
     fn parsers_reject_ambiguous_or_malformed_records() {
         assert!(character("你好").is_err());
@@ -262,8 +319,14 @@ mod tests {
         assert_eq!(dictionary_body("x\n...\nbody").unwrap(), "body");
         assert!(dictionary_body("没有正文").is_err());
         assert!(mappings("发\t發髮").is_err());
-        assert_eq!(mappings("发\t發 髮").unwrap()[0].variants, ["發", "髮"]);
-        assert_eq!(mappings("头发\t頭髮").unwrap()[0].variants, ["頭髮"]);
+        assert_eq!(
+            mappings("发\t發 髮").unwrap()[0].variants.as_ref(),
+            ["發", "髮"]
+        );
+        assert_eq!(
+            mappings("头发\t頭髮").unwrap()[0].variants.as_ref(),
+            ["頭髮"]
+        );
     }
     #[test]
     fn verified_bytes_reject_corruption_and_keep_original_file() -> Result<()> {
