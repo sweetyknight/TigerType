@@ -41,9 +41,9 @@ fn center(rect: &RECT) -> LPARAM {
 }
 
 #[test]
-fn destroyed_owner_invalidates_candidates_even_while_rust_references_survive() {
-    // Win32 会随 owner 销毁候选窗，Rc 存活不代表 HWND 仍归本对象所有。
-    let popup = Popup::new(|_, _| {}, true).unwrap();
+fn owner_is_fixed_at_creation_and_its_destruction_invalidates_candidates() {
+    // 沉浸式宿主拒绝事后改 owner，创建那一刻就必须挂上；Win32 会随 owner 销毁候选窗，
+    // Rc 存活不代表 HWND 仍归本对象所有。
     // SAFETY: 只创建隐藏的合成宿主，下面显式销毁，不操作用户窗口。
     let owner = unsafe {
         CreateWindowExW(
@@ -62,8 +62,12 @@ fn destroyed_owner_invalidates_candidates_even_while_rust_references_survive() {
         )
     }
     .unwrap();
+    let popup = Popup::new(|_, _| {}, true, owner).unwrap();
+    assert_eq!(popup.owner, owner);
+    // SAFETY: 只读本测试候选窗的 owner。
+    assert_eq!(unsafe { GetWindow(popup.hwnd, GW_OWNER) }.unwrap(), owner);
     let sample = state(2, 0);
-    popup.show(&sample, CARET, owner).unwrap();
+    popup.show(&sample, CARET).unwrap();
     let serial = popup.view.borrow().serial;
     let item = uia::item(&popup, 0).unwrap();
     let root = popup.root();
@@ -72,54 +76,18 @@ fn destroyed_owner_invalidates_candidates_even_while_rust_references_survive() {
         DestroyWindow(owner).unwrap();
         assert!(!IsWindow(Some(popup.hwnd)).as_bool());
     }
+    assert!(
+        Popup::new(|_, _| {}, true, owner).is_err(),
+        "已销毁的 owner 不得创建出无主候选窗"
+    );
     assert!(!popup.showing(serial), "销毁后旧展示不能仍可点击");
     assert!(popup.anchor().is_none());
     assert!(popup.selectable(serial, 0).is_none());
     assert!(name(&item).is_err(), "旧 UIA 元素不得继续报告候选");
     // SAFETY: 旧根提供者不得把已销毁或复用的句柄交给 UIA。
     assert!(unsafe { root.HostRawElementProvider() }.is_err());
-    assert!(popup.show(&sample, CARET, HWND::default()).is_err());
+    assert!(popup.show(&sample, CARET).is_err());
     popup.hide();
-}
-
-#[test]
-fn unchanged_snapshot_still_rebinds_a_different_owner() {
-    // 对话框/二级输入窗口变化时，候选与坐标不变也不能沿用旧 owner。
-    let popup = Popup::new(|_, _| {}, true).unwrap();
-    let make = || {
-        // SAFETY: 仅创建隐藏测试窗口，测试末尾统一销毁。
-        unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                w!("STATIC"),
-                None,
-                WS_POPUP,
-                100,
-                100,
-                200,
-                100,
-                None,
-                None,
-                None,
-                None,
-            )
-        }
-        .unwrap()
-    };
-    let (first, second) = (make(), make());
-    let sample = state(2, 0);
-    popup.show(&sample, CARET, first).unwrap();
-    let serial = popup.view.borrow().serial;
-    popup.show(&sample, CARET, second).unwrap();
-    // SAFETY: 只读取/销毁本测试窗口，owner 更换不作废同一快照。
-    unsafe {
-        assert_eq!(GetWindow(popup.hwnd, GW_OWNER).unwrap(), second);
-        assert_eq!(popup.view.borrow().serial, serial);
-        DestroyWindow(first).unwrap();
-        assert!(IsWindow(Some(popup.hwnd)).as_bool());
-        popup.hide();
-        DestroyWindow(second).unwrap();
-    }
 }
 
 #[test]
@@ -195,7 +163,7 @@ fn system_hidden_or_covered_popup_recovers_without_stealing_focus() {
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(owner));
             assert_eq!(GetFocus(), owner);
         }
-        let popup = Popup::new(|_, _| {}, false).unwrap();
+        let popup = Popup::new(|_, _| {}, false, owner).unwrap();
         let watched = Rc::downgrade(&popup);
         *popup.before_notify.borrow_mut() = Some(Box::new(move |event| {
             if matches!(event, EVENT_OBJECT_IME_SHOW | EVENT_OBJECT_IME_CHANGE) {
@@ -217,7 +185,7 @@ fn system_hidden_or_covered_popup_recovers_without_stealing_focus() {
             }
         }));
         let mut sample = state(2, 0);
-        popup.show(&sample, CARET, owner).unwrap();
+        popup.show(&sample, CARET).unwrap();
         let serial = popup.view.borrow().serial;
         assert_eq!(popup.selectable(serial, 0), Some(sample.revision));
         for updated in [false, true] {
@@ -238,7 +206,7 @@ fn system_hidden_or_covered_popup_recovers_without_stealing_focus() {
             if updated {
                 sample.revision += 1;
             }
-            popup.show(&sample, CARET, owner).unwrap();
+            popup.show(&sample, CARET).unwrap();
             // SAFETY: 仅查询私有桌面中的测试窗口，重新显示不得抢走宿主焦点。
             unsafe {
                 assert!(
@@ -282,7 +250,7 @@ fn system_hidden_or_covered_popup_recovers_without_stealing_focus() {
             false
         };
         assert!(above(covering, popup.hwnd));
-        popup.show(&sample, CARET, owner).unwrap();
+        popup.show(&sample, CARET).unwrap();
         assert!(
             above(popup.hwnd, covering),
             "刷新候选必须高于同宿主的遮挡浮层"
@@ -324,20 +292,18 @@ fn visible_update_never_passes_through_the_raw_composition_position() {
     // SAFETY: 只改本测试线程的 DPI 上下文，线程随测试结束。
     unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let work = primary_work();
-    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let popup = Popup::new(|_, _| {}, true, HWND::default()).unwrap();
     let caret = |left| Rect {
         left,
         top: work.bottom - 30,
         right: left + 10,
         bottom: work.bottom - 10,
     };
-    popup
-        .show(&state(3, 0), caret(200), HWND::default())
-        .unwrap();
+    popup.show(&state(3, 0), caret(200)).unwrap();
     popup.moves.borrow_mut().clear();
     let mut next = state(2, 0);
     next.revision += 1;
-    popup.show(&next, caret(230), HWND::default()).unwrap();
+    popup.show(&next, caret(230)).unwrap();
     let moves = popup.moves.borrow().clone();
     assert!(!moves.is_empty(), "新位置必须真正移动");
     let height = popup.view.borrow().layout.size.cy;
@@ -354,7 +320,7 @@ fn visible_update_never_passes_through_the_raw_composition_position() {
         bottom: 320,
     };
     next.revision += 1;
-    popup.show(&next, edge, HWND::default()).unwrap();
+    popup.show(&next, edge).unwrap();
     let width = popup.view.borrow().layout.size.cx;
     for (x, _) in popup.moves.borrow().iter() {
         assert_eq!(*x, work.right - width, "不得越出工作区再夹回");
@@ -365,9 +331,9 @@ fn visible_update_never_passes_through_the_raw_composition_position() {
 #[test]
 fn layout_growth_that_keeps_the_placement_does_not_touch_the_window() {
     // 组合变长只改矩形右缘，候选窗位置不变：宿主每次布局通知都重摆重画只是浪费宿主 UI 线程。
-    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let popup = Popup::new(|_, _| {}, true, HWND::default()).unwrap();
     let sample = state(3, 0);
-    popup.show(&sample, CARET, HWND::default()).unwrap();
+    popup.show(&sample, CARET).unwrap();
     let serial = popup.view.borrow().serial;
     let notified = Rc::new(Cell::new(0));
     let counter = notified.clone();
@@ -376,7 +342,7 @@ fn layout_growth_that_keeps_the_placement_does_not_touch_the_window() {
         right: CARET.right + 40,
         ..CARET
     };
-    popup.show(&sample, wider, HWND::default()).unwrap();
+    popup.show(&sample, wider).unwrap();
     assert_eq!(notified.get(), 0, "位置未变不重画、不发外部通知");
     assert_eq!(popup.anchor(), Some(wider), "退路位置仍要跟上最新组合矩形");
     assert_eq!(popup.view.borrow().serial, serial);
@@ -471,11 +437,11 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
             assert!(without_blue(value), "{theme:?} {color:?}");
         }
     }
-    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let popup = Popup::new(|_, _| {}, true, HWND::default()).unwrap();
     let mut shown = state(3, 1);
     shown.options.theme = Theme::Bamboo;
     shown.is_last_page = true;
-    popup.show(&shown, CARET, HWND::default()).unwrap();
+    popup.show(&shown, CARET).unwrap();
     let layout = popup.view.borrow().layout.clone();
     assert!(layout.footer.is_none());
     // 无提示行：窗口高度恰为候选行加上下内边距。
@@ -496,7 +462,7 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
         );
         // 玫红主题高亮行无底色、无指示条，只把字染成玫红。
         shown.options.theme = Theme::Rose;
-        popup.show(&shown, CARET, HWND::default()).unwrap();
+        popup.show(&shown, CARET).unwrap();
         let layout = popup.view.borrow().layout.clone();
         let c = themed(shown.options.palette());
         let pixel = render(&popup, layout.size);
@@ -515,19 +481,19 @@ fn rendering_uses_theme_colors_in_gdi_byte_order_and_shows_footer_only_when_need
     }
     // 还有下一页或拼音反查时才出现页脚。
     shown.is_last_page = false;
-    popup.show(&shown, CARET, HWND::default()).unwrap();
+    popup.show(&shown, CARET).unwrap();
     assert!(popup.view.borrow().layout.footer.is_some());
     assert!(footer(&shown).is_some_and(|footer| footer.pager.is_some()));
     // 拼音反查只有一页时页脚只留标签，不画翻页指示。
     shown.is_last_page = true;
     shown.mode = InputMode::Pinyin;
-    popup.show(&shown, CARET, HWND::default()).unwrap();
+    popup.show(&shown, CARET).unwrap();
     assert!(popup.view.borrow().layout.footer.is_some());
     assert!(footer(&shown).is_some_and(|footer| footer.pager.is_none()));
     // 候选文字来自后台进程：为空时不得把空 Vec 的悬空指针交给 DrawTextW 而让宿主崩溃。
     shown.candidates[0].text.clear();
     shown.candidates[0].label.clear();
-    popup.show(&shown, CARET, HWND::default()).unwrap();
+    popup.show(&shown, CARET).unwrap();
     let size = popup.view.borrow().layout.size;
     let _ = render(&popup, size);
 }
@@ -551,7 +517,7 @@ pub(crate) fn register_test_font() {
 #[test]
 fn learning_font_keeps_private_roots_when_candidate_font_changes() {
     register_test_font();
-    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let popup = Popup::new(|_, _| {}, true, HWND::default()).unwrap();
     let mut shown = state(4, 0);
     shown.is_last_page = true;
     for (candidate, (word, parts)) in shown.candidates.iter_mut().zip([
@@ -616,7 +582,7 @@ fn learning_font_keeps_private_roots_when_candidate_font_changes() {
             }
         }
     }
-    popup.show(&shown, CARET, HWND::default()).unwrap();
+    popup.show(&shown, CARET).unwrap();
     let _ = render(&popup, popup.view.borrow().layout.size);
 }
 
@@ -643,9 +609,10 @@ fn hidden_popup_lays_out_rows_and_turns_matching_press_release_into_one_stamped_
     let popup = Popup::new(
         move |serial, index| sink.borrow_mut().push((serial, index)),
         true,
+        HWND::default(),
     )
     .unwrap();
-    popup.show(&state(3, 1), CARET, HWND::default()).unwrap();
+    popup.show(&state(3, 1), CARET).unwrap();
     // SAFETY: 只读取本测试窗口属性。
     unsafe {
         assert!(!IsWindowVisible(popup.hwnd).as_bool());
@@ -689,7 +656,7 @@ fn hidden_popup_lays_out_rows_and_turns_matching_press_release_into_one_stamped_
     popup.unblock(serial);
     assert!(popup.selectable(serial, 3).is_none());
     assert!(popup.showing(serial));
-    popup.show(&state(2, 0), CARET, HWND::default()).unwrap();
+    popup.show(&state(2, 0), CARET).unwrap();
     assert!(!popup.showing(serial) && popup.selectable(serial, 0).is_none());
     popup.hide();
     let view = popup.view.borrow();
@@ -707,7 +674,7 @@ fn hidden_popup_lays_out_rows_and_turns_matching_press_release_into_one_stamped_
     );
     drop(view);
     // 同一窗口和字体缓存继续复用；下一次组合须重新计算正常尺寸。
-    popup.show(&state(2, 0), CARET, HWND::default()).unwrap();
+    popup.show(&state(2, 0), CARET).unwrap();
     assert_eq!(popup.view.borrow().layout.rows.len(), 2);
     let mut restored = RECT::default();
     // SAFETY: 同上，只读隐藏测试窗口的重新布局结果。
@@ -717,14 +684,14 @@ fn hidden_popup_lays_out_rows_and_turns_matching_press_release_into_one_stamped_
 
 #[test]
 fn popup_refresh_pressure_stays_within_input_budget() {
-    let popup = Popup::new(|_, _| {}, true).unwrap();
+    let popup = Popup::new(|_, _| {}, true, HWND::default()).unwrap();
     let mut sample = state(9, 0);
     sample.options.show_learning = true;
     let started = std::time::Instant::now();
     for revision in 0..1_000 {
         sample.revision = revision + 1;
         sample.highlighted = Some(revision as usize % sample.candidates.len());
-        popup.show(&sample, CARET, HWND::default()).unwrap();
+        popup.show(&sample, CARET).unwrap();
     }
     let elapsed = started.elapsed();
     eprintln!(
@@ -787,8 +754,8 @@ fn runtime_id(fragment: &IRawElementProviderFragment) -> Vec<i32> {
 
 #[test]
 fn uia_follows_ime_conventions_and_old_items_expire_with_the_display() {
-    let popup = Popup::new(|_, _| {}, true).unwrap();
-    popup.show(&state(3, 1), CARET, HWND::default()).unwrap();
+    let popup = Popup::new(|_, _| {}, true, HWND::default()).unwrap();
+    popup.show(&state(3, 1), CARET).unwrap();
     let serial = popup.view.borrow().serial;
     let root = popup.root();
     // SAFETY: 以下均为本线程合成窗口提供者的同步 COM 调用。
@@ -847,7 +814,7 @@ fn uia_follows_ime_conventions_and_old_items_expire_with_the_display() {
             .unwrap();
         assert_eq!(name(&simple(&hit)).unwrap(), "字1");
 
-        popup.show(&state(2, 0), CARET, HWND::default()).unwrap();
+        popup.show(&state(2, 0), CARET).unwrap();
         let gone = HRESULT(UIA_E_ELEMENTNOTAVAILABLE as i32);
         assert_eq!(name(&simple(&second)).unwrap_err().code(), gone);
         assert_eq!(

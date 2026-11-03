@@ -22,9 +22,9 @@ use windows::{
                 VK_DOWN, VK_ESCAPE, VK_OEM_COMMA, VK_RETURN, VK_SPACE, VK_U,
             },
             WindowsAndMessaging::{
-                CreateWindowExW, DestroyWindow, DispatchMessageW, GetWindowRect, MSG, PM_REMOVE,
-                PeekMessageW, SendMessageW, WINDOW_EX_STYLE, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WS_POPUP,
+                CreateWindowExW, DestroyWindow, DispatchMessageW, GW_OWNER, GetWindow,
+                GetWindowRect, IsWindow, MSG, PM_REMOVE, PeekMessageW, SendMessageW,
+                WINDOW_EX_STYLE, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP, WS_POPUP,
             },
         },
     },
@@ -1087,6 +1087,86 @@ fn destroyed_candidate_window_is_recreated_for_the_next_input() {
     assert_eq!(text(&doc), "的");
     // SAFETY: 停用合成服务并关闭假后台连接。
     unsafe { tip.Deactivate() }.unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn candidate_window_is_created_owned_by_the_view_and_replaced_when_the_view_changes() {
+    // 开始菜单搜索等沉浸式宿主拒绝事后改 owner，无 owner 创建的候选窗被 Shell 隐去：
+    // 首次显示就要带着视图窗口创建，视图窗口变了（对话框、二级输入窗）换新窗口而不是改旧窗口。
+    let make = || {
+        // SAFETY: 本线程创建的隐藏系统类窗口，只作视图窗口，测试结束前销毁。
+        unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                None,
+                WS_POPUP,
+                100,
+                100,
+                200,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap()
+    };
+    let (first, second) = (make(), make());
+    // SAFETY: 只读本测试候选窗的 owner。
+    let owner = |popup: &Popup| unsafe { GetWindow(popup.hwnd, GW_OWNER) }.unwrap_or_default();
+    let object = service();
+    let (server, bound) = backend(&object.namespace);
+    bound.recv().unwrap();
+    let (_, thread_mgr) = manager();
+    let tip: ITfTextInputProcessorEx = object.to_interface();
+    // SAFETY: 合成线程管理器，不注册系统输入法。
+    unsafe { tip.ActivateEx(&thread_mgr, 7, 0) }.unwrap();
+    let active = object.active().unwrap();
+    let (doc, context) = document();
+    doc.window.set(first);
+    assert!(
+        active
+            .input(&context, Key::Character('u'), later())
+            .unwrap()
+    );
+    let (serial, _) = shown(&active).unwrap();
+    let old = active.current_popup().unwrap();
+    assert_eq!(owner(&old), first);
+    // 视图窗口换了：旧窗口收起，新窗口创建时就归新视图窗口。
+    doc.window.set(second);
+    assert!(
+        active
+            .input(&context, Key::Character('a'), later())
+            .unwrap()
+    );
+    let replacement = active.current_popup().unwrap();
+    assert!(!Rc::ptr_eq(&old, &replacement));
+    assert_eq!(owner(&replacement), second);
+    assert!(!old.showing(serial), "旧窗口的展示不得仍可点击");
+    assert!(shown(&active).is_some());
+    let hwnd = old.hwnd;
+    drop(old);
+    // SAFETY: 只查询本测试曾创建的候选窗句柄是否已销毁。
+    let alive = unsafe { IsWindow(Some(hwnd)) }.as_bool();
+    assert!(!alive, "换下的候选窗随最后引用销毁");
+    // 视图窗口不变时复用同一窗口，逐键不重建。
+    assert!(active.input(&context, Key::Space, later()).unwrap());
+    assert_eq!(text(&doc), "的");
+    assert!(
+        active
+            .input(&context, Key::Character('u'), later())
+            .unwrap()
+    );
+    assert!(Rc::ptr_eq(&replacement, &active.current_popup().unwrap()));
+    // SAFETY: 停用取消剩余组合、销毁候选窗、注销 sink 并关闭管道；随后销毁测试窗口。
+    unsafe {
+        tip.Deactivate().unwrap();
+        DestroyWindow(first).unwrap();
+        DestroyWindow(second).unwrap();
+    }
     server.join().unwrap();
 }
 

@@ -1,4 +1,5 @@
 //! 宿主进程内候选窗：TSF 线程惰性创建、停用时销毁；以上下文视图窗口为 owner，与宿主处于同一 z-order 层级。
+//! owner 只在创建时给定：沉浸式宿主（开始菜单搜索）拒绝事后改 owner，无 owner 创建的窗口会被 Shell 隐去，owner 变化由调用方换新窗口。
 //! 自绘与命中测试，不建标准控件，避免同线程控件取得焦点而终止组合；窗口创建时临时启用逐显示器 DPI，避免系统位图缩放文字。
 //! 窗口过程只经本线程登记表以弱引用找回候选窗，窗口数据里不存业务指针。
 //! 配色与字体随快照中的选项切换；圆角与描边自绘，位图和尺寸经 UpdateLayeredWindow 一次交给系统。
@@ -105,14 +106,18 @@ fn work_area(caret: Rect) -> Result<(HMONITOR, Rect)> {
         Ok((monitor, portable(info.rcWork)))
     }
 }
-/// 视图区域也取不到时的输入区域：视图窗口（为空则焦点窗口）的屏幕矩形。
-pub(crate) fn window_area(owner: HWND) -> Option<Rect> {
-    let hwnd = if owner.is_invalid() {
+/// 宿主窗口：视图窗口为空（取不到或已超时）时取本线程焦点窗口；候选窗 owner 与区域退路共用。
+pub(crate) fn host_window(view: HWND) -> HWND {
+    if view.is_invalid() {
         // SAFETY: 只读本线程焦点窗口。
         unsafe { GetFocus() }
     } else {
-        owner
-    };
+        view
+    }
+}
+/// 视图区域也取不到时的输入区域：宿主窗口的屏幕矩形。
+pub(crate) fn window_area(view: HWND) -> Option<Rect> {
+    let hwnd = host_window(view);
     if hwnd.is_invalid() {
         return None;
     }
@@ -427,20 +432,6 @@ fn point(lparam: LPARAM) -> POINT {
 fn inside(rect: &RECT, at: POINT) -> bool {
     at.x >= rect.left && at.x < rect.right && at.y >= rect.top && at.y < rect.bottom
 }
-#[cfg(target_pointer_width = "64")]
-fn set_owner(hwnd: HWND, owner: HWND) {
-    // SAFETY: 只修改本候选窗的 owner；宿主窗口句柄来自本线程上下文视图或焦点。
-    unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
-    }
-}
-#[cfg(target_pointer_width = "32")]
-fn set_owner(hwnd: HWND, owner: HWND) {
-    // SAFETY: x86 没有 Ptr 版本，句柄宽度与 LONG 相同；只修改本候选窗的 owner。
-    unsafe {
-        SetWindowLongW(hwnd, GWLP_HWNDPARENT, owner.0 as i32);
-    }
-}
 
 /// 测量结果：候选行、页脚的客户区矩形，以及候选字与注释列的起点。
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -497,6 +488,8 @@ type Moves = RefCell<Vec<(i32, i32)>>;
 
 pub struct Popup {
     pub(crate) hwnd: HWND,
+    /// 创建时请求的 owner（宿主窗口，可为空）；调用方据此判断是否需要换新窗口。
+    pub(crate) owner: HWND,
     pub(crate) view: RefCell<View>,
     fonts: Cell<Fonts>,
     click: Box<dyn Fn(u32, u8)>,
@@ -536,8 +529,8 @@ impl Popup {
             })
         })
     }
-    /// 在当前 TSF 线程创建隐藏候选窗；click 收到（展示编号，页内序号）。
-    pub fn new(click: impl Fn(u32, u8) + 'static, quiet: bool) -> Result<Rc<Self>> {
+    /// 在当前 TSF 线程创建隐藏候选窗，owner 为宿主窗口（空则无 owner）；click 收到（展示编号，页内序号）。
+    pub fn new(click: impl Fn(u32, u8) + 'static, quiet: bool, owner: HWND) -> Result<Rc<Self>> {
         let instance = crate::module()?;
         let class = WNDCLASSW {
             style: CS_DROPSHADOW,
@@ -558,7 +551,8 @@ impl Popup {
         // SAFETY: 只改变当前 TSF 线程的 DPI 上下文；窗口创建完成后立即恢复宿主设置，避免影响宿主控件。
         let previous_dpi =
             unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-        // SAFETY: NOACTIVATE/TOOLWINDOW 不抢宿主焦点、不进任务栏；未传入创建参数指针。
+        // SAFETY: NOACTIVATE/TOOLWINDOW 不抢宿主焦点、不进任务栏；owner 来自本线程上下文视图或焦点，
+        // 已销毁时创建失败返回错误；未传入创建参数指针。
         let hwnd = unsafe {
             let result = CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
@@ -569,7 +563,7 @@ impl Popup {
                 0,
                 0,
                 0,
-                None,
+                (!owner.is_invalid()).then_some(owner),
                 None,
                 Some(instance.into()),
                 None,
@@ -582,6 +576,7 @@ impl Popup {
         };
         let popup = Rc::new(Self {
             hwnd,
+            owner,
             view: RefCell::default(),
             fonts: Cell::new(Fonts::default()),
             click: Box::new(click),
@@ -1024,29 +1019,21 @@ impl Popup {
         unsafe { GetWindowRect(self.hwnd, &mut current) }.is_ok()
             && (current.left, current.top) == (place.left, place.top)
     }
-    /// 显示或刷新：owner 取视图窗口（空则取焦点窗口），按组合位置放在工作区内，不激活。
-    pub fn show(self: &Rc<Self>, state: &InputState, caret: Rect, owner: HWND) -> Result<()> {
+    /// 显示或刷新：按组合位置放在工作区内，不激活；owner 已在创建时定下。
+    pub fn show(self: &Rc<Self>, state: &InputState, caret: Rect) -> Result<()> {
         if !self.alive() {
             return Err(E_FAIL.into());
         }
         if !bounded(&caret) || state.candidates.len() > MAX_CANDIDATES {
             return Err(E_INVALIDARG.into());
         }
-        // 同一快照保留展示编号与在途点击；几何不变也须检查 owner、系统显隐与遮挡层级。
+        // 同一快照保留展示编号与在途点击；几何不变也须检查系统显隐与遮挡层级。
         let (same, moved) = self.view.try_borrow().map_or((false, true), |view| {
             (
                 view.state.as_ref() == Some(state),
                 view.caret != Some(caret),
             )
         });
-        let owner = if owner.is_invalid() {
-            // SAFETY: 只读本线程焦点窗口。
-            unsafe { GetFocus() }
-        } else {
-            owner
-        };
-        // SAFETY: 只读本窗口当前 owner。
-        let owner_changed = unsafe { GetWindow(self.hwnd, GW_OWNER) }.unwrap_or_default() != owner;
         // 系统可能在最小化或关闭 owned window 时自行隐藏候选；缓存有快照不代表窗口可见。
         // SAFETY: 登记已核对为本对象的存活窗口，仅查询可见性。
         let visible = self.quiet || unsafe { IsWindowVisible(self.hwnd) }.as_bool();
@@ -1055,7 +1042,7 @@ impl Popup {
         // SAFETY: 只查询本窗口所在显示器。
         let settled =
             visible && unsafe { MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) } == monitor;
-        if same && !owner_changed && settled && self.placed(caret, work) {
+        if same && settled && self.placed(caret, work) {
             if moved && let Ok(mut view) = self.view.try_borrow_mut() {
                 view.caret = Some(caret);
             }
@@ -1074,9 +1061,6 @@ impl Popup {
         }
         if !same {
             self.release();
-        }
-        if owner_changed {
-            set_owner(self.hwnd, owner);
         }
         if !settled {
             // SAFETY: 先移到组合所在显示器再读 DPI，使逐显示器感知的宿主得到正确字号；不激活、不改 z 序。

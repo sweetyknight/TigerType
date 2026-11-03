@@ -4,7 +4,7 @@
 //! 激活时登记任务栏输入法图标，按每次回复显示中英状态，其菜单经同一连接请后台显示设置/查字窗。
 //! 线程取得/失去输入焦点时告诉后台任务栏是否正显示本输入法图标，后台据此隐藏/恢复通知区图标。
 use crate::{
-    candidate::{Popup, fallback_caret, portable, window_area},
+    candidate::{Popup, fallback_caret, host_window, portable, window_area},
     edit::{EditReport, Editor, Verdict},
     indicator::{Indicator, Status},
     key,
@@ -31,7 +31,7 @@ use windows::{
     Win32::{
         Foundation::{
             CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_FAIL, E_INVALIDARG, E_POINTER,
-            E_UNEXPECTED, LPARAM, S_FALSE, WPARAM,
+            E_UNEXPECTED, HWND, LPARAM, S_FALSE, WPARAM,
         },
         System::{
             Com::{IClassFactory, IClassFactory_Impl},
@@ -268,11 +268,14 @@ impl Active {
     fn current_editor(&self) -> Option<Rc<Editor>> {
         self.editor.try_borrow().ok()?.clone()
     }
-    /// 惰性创建候选窗；失败只是不显示候选，不影响按键。
-    fn popup(self: &Rc<Self>) -> Option<Rc<Popup>> {
-        if let Some(popup) = self.current_popup() {
+    /// 取宿主窗口所拥有的候选窗，惰性创建；失败只是不显示候选，不影响按键。
+    /// owner 只能在创建时给定（沉浸式宿主拒绝事后改），宿主窗口变了就收起旧窗口、换新窗口。
+    fn popup(self: &Rc<Self>, view: HWND) -> Option<Rc<Popup>> {
+        let host = host_window(view);
+        if let Some(popup) = self.current_popup().filter(|popup| popup.owner == host) {
             return Some(popup);
         }
+        self.hide();
         let owner = Rc::downgrade(self);
         let popup = Popup::new(
             move |serial, index| {
@@ -281,6 +284,7 @@ impl Active {
                 }
             },
             self.quiet,
+            host,
         )
         .ok()?;
         *self.popup.try_borrow_mut().ok()? = Some(popup.clone());
@@ -467,9 +471,9 @@ impl Active {
             &|| report.area.map(portable),
             &|| window_area(report.owner),
         ]);
-        match (place, self.popup()) {
+        match (place, self.popup(report.owner)) {
             (Some(caret), Some(popup)) => {
-                if popup.show(state, caret, report.owner).is_err() {
+                if popup.show(state, caret).is_err() {
                     popup.hide();
                 }
             }
