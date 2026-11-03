@@ -5,7 +5,8 @@ use super::window::*;
 use super::*;
 
 pub(super) fn lookup_window(class: &Class, options: &Options) -> Result<Window, String> {
-    let style = WS_OVERLAPPEDWINDOW & !WS_MAXIMIZEBOX;
+    // 长词资料超出窗口时整窗纵向滚动；滚动条只在需要时出现。
+    let style = (WS_OVERLAPPEDWINDOW & !WS_MAXIMIZEBOX) | WS_VSCROLL;
     let mut window = Window::create(&class.0, LOOKUP_TITLE, null_mut(), style)?;
     // 零尺寸标签只为读屏名称与 Alt+Q；查询框里另画占位提示。
     window.add(QUERY_LABEL, "STATIC", "汉字或拼音(&Q)", 0)?;
@@ -44,12 +45,8 @@ pub(super) fn lookup_window(class: &Class, options: &Options) -> Result<Window, 
             label,
             SS_CENTERIMAGE | SS_NOPREFIX,
         )?;
-        let style = if value == READING {
-            SS_CENTERIMAGE | SS_NOPREFIX
-        } else {
-            SS_OWNERDRAW
-        };
-        window.add(value, "STATIC", "", style)?;
+        // 四项都自绘：读音也要按共用布局折行，行高才与布局一致。
+        window.add(value, "STATIC", "", SS_OWNERDRAW)?;
     }
     window.add(STATUS, "STATIC", "", SS_CENTER | SS_NOPREFIX)?;
     window.add(SETTINGS, "BUTTON", "设置(&S)", WS_TABSTOP)?;
@@ -59,7 +56,7 @@ pub(super) fn lookup_window(class: &Class, options: &Options) -> Result<Window, 
     window.decorate(options.palette(), options.palette().window);
     window.layout(options.candidate_font)?;
     window.set_icons();
-    size_client(&window, LOOKUP_SIZE, style);
+    size_client(&window, LOOKUP_SIZE, style & !WS_VSCROLL);
     initialize_cues(window.handle);
     Ok(window)
 }
@@ -306,10 +303,7 @@ pub(super) fn show_detail(main: &Window, model: &Model) {
         main.text(CODES, &join(&item.learning.codes, " "));
         main.text(FULL, &join(&item.learning.full_codes, " "));
         main.text(READING, &join(&item.learning.readings, "、"));
-        main.text(
-            PARTS,
-            item.learning.decomposition.as_deref().unwrap_or("缺资料"),
-        );
+        main.text(PARTS, &parts(item));
         main.text(CLIP, &details(item));
     }
     for id in [GLYPH, CODEPOINT, COPY, CODES, FULL, READING, PARTS]
@@ -319,9 +313,11 @@ pub(super) fn show_detail(main: &Window, model: &Model) {
         main.show(id, item.is_some());
     }
     main.show(STATUS, item.is_none());
+    // 行高随资料折行而变，换字后立即重排。
+    main.layout_lookup();
 }
 pub(super) fn refresh(main: &Window, settings: &Window, model: &Model) {
-    main.enable(QUERY, !model.busy);
+    // 查询框始终可编辑：边输边查时在途请求不能禁用它，否则正在打字的焦点会丢。
     main.enable(
         PREVIOUS,
         !model.busy && model.page > 0 && model.result.is_some(),

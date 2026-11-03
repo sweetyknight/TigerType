@@ -587,12 +587,21 @@ fn draw_item(item: &DRAWITEMSTRUCT) {
         _ if (KEYS..KEYS + KEYMAP.len()).contains(&id) => return draw_keys(item, &c, id - KEYS),
         _ => {}
     }
-    let mut buffer = [0u16; 64];
-    let length = window_text(item.hwndItem, &mut buffer);
-    let text = &buffer[..length];
+    let text = control_text(item.hwndItem);
+    let text = &text[..];
+    let value = String::from_utf16_lossy(text);
     fill(dc, &rect, c.surface);
     if id == GLYPH {
         round(dc, &rect, s(8), None, c.line);
+        if value.chars().count() > 1 {
+            return draw_word(
+                dc,
+                font_of(item.hwndItem),
+                c.text,
+                &value,
+                inset(&rect, s(8)),
+            );
+        }
         // SAFETY: 新建虚线画笔用后即删；直线端点为本地值。
         unsafe {
             let pen = CreatePen(PS_DOT, 1, c.line);
@@ -605,73 +614,124 @@ fn draw_item(item: &DRAWITEMSTRUCT) {
             SelectObject(dc, old);
             DeleteObject(pen);
         }
-        // 词组放不进字形格，改用字块字号。
-        let single = String::from_utf16_lossy(text).chars().count() <= 1;
-        let font = if single {
-            font_of(item.hwndItem)
-        } else {
-            sibling_font(item.hwndItem, LIST)
-        };
-        draw_text(dc, font, c.text, text, rect, DT_CENTER | DT_NOPREFIX);
+        draw_text(
+            dc,
+            font_of(item.hwndItem),
+            c.text,
+            text,
+            rect,
+            DT_CENTER | DT_NOPREFIX,
+        );
         return;
     }
-    let missing = String::from_utf16_lossy(text) == "缺资料";
+    let missing = value == "缺资料";
     if missing || text.is_empty() {
+        // 与左侧 28 高的字段名同一行；拆分格更高，不能按整格居中。
+        let line = RECT {
+            bottom: rect.bottom.min(rect.top + s(28)),
+            ..rect
+        };
         draw_text(
             dc,
             sibling_font(item.hwndItem, FIELD_LABEL),
             c.muted,
             text,
-            rect,
+            line,
             DT_NOPREFIX,
         );
         return;
     }
     let font = font_of(item.hwndItem);
-    let mut left = rect.left;
-    if id == PARTS {
-        // 拆分字根逐个放进字块，字根可能是扩展区字符，按 Unicode 标量切分。
-        for part in String::from_utf16_lossy(text).chars() {
-            let tile = RECT {
-                left,
-                top: rect.top,
-                right: left + s(30),
-                bottom: rect.top + s(30),
-            };
-            if tile.right > rect.right {
-                break;
+    // 共用布局按逻辑像素折行：控件宽换回逻辑像素向上取整，与排版时的值区宽相同。
+    let dpi = s(96);
+    let width = ((rect.right - rect.left) * 96 + dpi - 1) / dpi;
+    let place = |[x, y, w, h]: Box4| RECT {
+        left: rect.left + s(x),
+        top: rect.top + s(y),
+        right: rect.left + s(x + w),
+        bottom: rect.top + s(y + h),
+    };
+    match id {
+        // 字根逐个放进字块，其编码写在字块正下方。
+        PARTS => {
+            let mono = TempFont::new(dc, &MONO_FACES, 12, 400);
+            for ([x, y, w, h], root, code) in tile_boxes(&value, width) {
+                let tile = place([x, y, w, h]);
+                round(dc, &tile, s(6), None, c.line);
+                let mut unit = [0u16; 2];
+                draw_text(
+                    dc,
+                    font,
+                    c.text,
+                    root.encode_utf16(&mut unit),
+                    tile,
+                    DT_CENTER | DT_NOPREFIX,
+                );
+                draw_text(
+                    dc,
+                    mono.0,
+                    c.muted,
+                    &units(code),
+                    place([x, y + 32, w, 16]),
+                    DT_CENTER | DT_NOPREFIX,
+                );
             }
-            round(dc, &tile, s(6), None, c.line);
-            let mut code = [0u16; 2];
-            draw_text(
-                dc,
-                font,
-                c.text,
-                part.encode_utf16(&mut code),
-                tile,
-                DT_CENTER | DT_NOPREFIX,
-            );
-            left = tile.right + s(6);
         }
-        return;
+        READING => {
+            let measure = |line: &str| logical_extent(dc, font, dpi, line);
+            for (index, line) in reading_lines(&value, width, measure)
+                .into_iter()
+                .enumerate()
+            {
+                let line_box = place(reading_line(index, width));
+                draw_text(dc, font, c.text, &units(line), line_box, DT_NOPREFIX);
+            }
+        }
+        // 编码以空格分隔，各成一枚键帽。
+        _ => {
+            for (b, code) in chips(&value, width) {
+                let chip = place(b);
+                round(dc, &chip, s(5), Some(c.track), c.track);
+                draw_text(
+                    dc,
+                    font,
+                    c.text,
+                    &units(code),
+                    chip,
+                    DT_CENTER | DT_NOPREFIX,
+                );
+            }
+        }
     }
-    // 编码以空格分隔，各成一枚键帽。
-    for code in text
-        .split(|&unit| unit == u16::from(b' '))
-        .filter(|code| !code.is_empty())
-    {
-        let chip = RECT {
-            left,
-            top: rect.top + (rect.bottom - rect.top - s(26)) / 2,
-            right: left + extent(dc, font, code) + s(18),
-            bottom: rect.top + (rect.bottom - rect.top + s(26)) / 2,
+}
+
+/// 字形格里的词：按共用网格缩排，字号随格子变小，长词也能放全。
+fn draw_word(dc: HDC, font: HFONT, color: COLORREF, word: &str, area: RECT) {
+    let side = (area.right - area.left).min(area.bottom - area.top);
+    let count = word.chars().count();
+    let (columns, cell) = glyph_grid(count, side);
+    let rows = count.div_ceil(columns) as i32;
+    let small = resized(font, cell * 5 / 6);
+    let font = if small.0.is_null() { font } else { small.0 };
+    let left = area.left + (area.right - area.left - columns as i32 * cell) / 2;
+    let top = area.top + (area.bottom - area.top - rows * cell) / 2;
+    for (index, glyph) in word.chars().enumerate() {
+        let (row, column) = ((index / columns) as i32, (index % columns) as i32);
+        let slot = RECT {
+            left: left + column * cell,
+            top: top + row * cell,
+            right: left + (column + 1) * cell,
+            bottom: top + (row + 1) * cell,
         };
-        if chip.right > rect.right {
-            break;
-        }
-        round(dc, &chip, s(5), Some(c.track), c.track);
-        draw_text(dc, font, c.text, code, chip, DT_CENTER | DT_NOPREFIX);
-        left = chip.right + s(6);
+        let mut unit = [0u16; 2];
+        draw_text(
+            dc,
+            font,
+            color,
+            glyph.encode_utf16(&mut unit),
+            slot,
+            DT_CENTER | DT_NOPREFIX,
+        );
     }
 }
 
@@ -933,7 +993,7 @@ fn draw_swatch(item: &DRAWITEMSTRUCT) {
 pub(super) fn current_page(hwnd: HWND) -> usize {
     pick(hwnd, NAV, PAGES.len()).unwrap_or(0)
 }
-/// 设置窗滚动位置（96 DPI 逻辑像素），存于窗口数据：值类型，不是指针。
+/// 查字窗/设置窗滚动位置（96 DPI 逻辑像素），存于窗口数据：值类型，不是指针。
 pub(super) fn scroll_offset(hwnd: HWND) -> i32 {
     // SAFETY: 只读本线程窗口的用户数据整数。
     unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as i32 }
@@ -959,6 +1019,36 @@ pub(super) fn scroll_to(hwnd: HWND, position: i32) {
         set_scroll_offset(hwnd, position);
         post(hwnd, LAYOUT, 0);
     }
+}
+
+/// 按当前详情文字排查字窗，控件布局与父窗口画卡片共用；隐藏的行（未选中字）按空排。
+pub(super) fn lookup_layout(hwnd: HWND, width: i32, height: i32) -> LookupSpec {
+    // SAFETY: 只在本窗口内按编号找控件。
+    let control = |id: usize| unsafe { GetDlgItem(hwnd, id as i32) };
+    let texts = [CODES, FULL, READING, PARTS].map(|id| {
+        let control = control(id);
+        // SAFETY: 只读本线程控件的样式位。
+        let shown = unsafe { GetWindowLongW(control, GWL_STYLE) } as u32 & WS_VISIBLE != 0;
+        if shown {
+            String::from_utf16_lossy(&control_text(control))
+        } else {
+            String::new()
+        }
+    });
+    let reading = control(READING);
+    let font = font_of(reading);
+    let dpi = scale(reading, 96);
+    // SAFETY: 取读音控件 DC 只用于量字宽，结束前归还。
+    let dc = unsafe { GetDC(reading) };
+    let spec = lookup_spec(
+        width,
+        height,
+        texts.each_ref().map(String::as_str),
+        |text| logical_extent(dc, font, dpi, text),
+    );
+    // SAFETY: 归还上面取得的 DC。
+    unsafe { ReleaseDC(reading, dc) };
+    spec
 }
 
 /// 卡片内的控件用卡片底色，说明类文字用次要色。
@@ -1011,13 +1101,15 @@ fn paint_window(hwnd: HWND) {
         let s = |value: i32| value * dpi / 96;
         let query = GetDlgItem(hwnd, QUERY as i32);
         if !query.is_null() {
+            // 与控件同按滚动位置上移；卡片高随当前资料而变。
+            let offset = scroll_offset(hwnd);
             let r = |[x, y, w, h]: Box4| RECT {
                 left: s(x),
-                top: s(y),
+                top: s(y - offset),
                 right: s(x + w),
-                bottom: s(y + h),
+                bottom: s(y - offset + h),
             };
-            let spec = lookup_spec(client.right * 96 / dpi, client.bottom * 96 / dpi);
+            let spec = lookup_layout(hwnd, client.right * 96 / dpi, client.bottom * 96 / dpi);
             let card = r(spec.card);
             round(dc, &card, s(10), Some(c.surface), c.surface);
             round(dc, &card, s(10), None, c.line);
@@ -1040,17 +1132,6 @@ fn paint_window(hwnd: HWND) {
                 ..field
             };
             draw_icon(dc, 0xE721, 15, c.muted, icon);
-            let mono = TempFont::new(dc, &MONO_FACES, 11, 400);
-            let hint = units("Enter");
-            let width = extent(dc, mono.0, &hint) + s(12);
-            let cap = RECT {
-                left: field.right - s(8) - width,
-                top: field.top + s(9),
-                right: field.right - s(8),
-                bottom: field.bottom - s(9),
-            };
-            round(dc, &cap, s(4), Some(c.track), c.track);
-            draw_text(dc, mono.0, c.muted, &hint, cap, DT_CENTER | DT_NOPREFIX);
         } else {
             let sidebar = RECT {
                 right: s(SIDEBAR),

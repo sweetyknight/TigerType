@@ -1,7 +1,7 @@
 {
   "format_version": 1,
   "source_label": "虎码秃版 小狼毫（Win）",
-  "source": "虎码官网盘 https://huma.ysepan.com/ 下载的“虎码秃版 小狼毫（Win）”方案包；只取所需 12 项，按包内原相对路径存放，未作修改",
+  "source": "虎码官网盘 https://huma.ysepan.com/ 下载的“虎码秃版 小狼毫（Win）”方案包；只取所需 13 项，按包内原相对路径存放，未作修改",
   "dictionary_version": "2026.08.14",
   "license_status": "unconfirmed-personal-use-only",
   "files": [
@@ -44,6 +44,11 @@
       "path": "opencc/PYCharacters.txt",
       "size": 763940,
       "sha256": "698a2e1ed34b25de3e4cdd002918e3d2553d56feed0d2e42ce322a63d5790d0a"
+    },
+    {
+      "path": "opencc/PYPhrases.txt",
+      "size": 1044903,
+      "sha256": "c4b68b9140a7cca0adb83beaae732dc780bc3f9eebd9dc05a9c53cc44871df70"
     },
     {
       "path": "opencc/STCharacters_Tu.txt",

@@ -189,11 +189,85 @@ fn verify(root: &std::path::Path) -> Result<serde_json::Value> {
     );
     verify_word_mode(&dictionary, &data)?;
     assert!(!dictionary.learning('𠀀').codes.is_empty());
+    let roots_used = verify_roots(&dictionary, &data)?;
     Ok(
         json!({"entries":data.entries.len(),"phrases":data.phrases.len(),"pinyin":data.pinyin.len(),
         "details":data.details.len(),"full_codes_not_directly_inputtable":missing_full_codes,
+        "roots_used":roots_used,
         "source_count":import::SOURCES.len(),"load_ms":load_ms}),
     )
+}
+
+/// 字根数据与拆分资料按官方取码规则“取前三末一根的主码，不足四码补末根小码”互证：
+/// 拆分用到的每个字根都要有两码，且各字首个完整码在每个取码位上都与之相符。
+fn verify_roots(dictionary: &Dictionary, data: &Data) -> Result<usize> {
+    let mut used = std::collections::BTreeSet::new();
+    for detail in &data.details {
+        let (Some(parts), Some(full)) = (detail.decomposition, detail.full_codes.first()) else {
+            continue;
+        };
+        let parts: Vec<char> = parts.chars().collect();
+        let full = full.as_bytes();
+        for (index, root) in parts.iter().enumerate() {
+            used.insert(*root);
+            let code = dictionary.root_code(*root);
+            let code = code.ok_or_else(|| format!("{:04X} 无码", *root as u32))?;
+            let code = code.as_bytes();
+            assert_eq!(code.len(), 2, "{:04X}", *root as u32);
+            let last = index + 1 == parts.len();
+            let main = if index < 3 {
+                Some(index)
+            } else {
+                last.then_some(3)
+            };
+            let mut expect = main
+                .map(|position| (position, code[0]))
+                .into_iter()
+                .collect::<Vec<_>>();
+            if last && parts.len() < 4 {
+                expect.push((parts.len(), code[1]));
+            }
+            for (position, letter) in expect {
+                assert_eq!(
+                    full.get(position),
+                    Some(&letter),
+                    "{} 的第 {} 码与字根 {:04X} 不符",
+                    detail.character,
+                    position + 1,
+                    *root as u32
+                );
+            }
+        }
+    }
+    // 截图里的例子：你 = 亻 + ⺈ 的私用区变体 + 小；打词时逐字给出。
+    let you = |text| dictionary.lookup(text, 0).map(|page| page.items[0].clone());
+    let codes = |roots: &[(char, String)]| roots.iter().map(|r| r.1.clone()).collect::<Vec<_>>();
+    assert_eq!(codes(&you("你")?.roots[0]), ["jr", "xd", "yx"]);
+    let word = you("你好")?;
+    assert_eq!(word.learning.codes, ["jxbh"]);
+    assert_eq!(word.learning.full_codes, ["jxyx", "bhi"]);
+    assert_eq!(word.learning.readings, ["nǐ hǎo"]);
+    assert_eq!(codes(&word.roots[1]), ["bn", "hi"]);
+    // 词读音：官方整词（含轻声）> 官方片段 + 单字读音并经无调全拼筛选 > 各字首个读音。
+    for (text, expected) in [
+        ("银行", "yín háng"),
+        ("行长", "háng zhǎng"),
+        ("姘头", "pīn tou"),
+        ("重庆", "chóng qìng"),
+        ("一个", "yī gè"),
+        ("好的", "hǎo de"),
+    ] {
+        assert_eq!(you(text)?.learning.readings, [expected], "{text}");
+    }
+    // 每个可打的词都要给出读音或明确缺资料，不能因原件格式怪行而让查询出错。
+    let mut missing = 0;
+    for phrase in &data.phrases {
+        let page = dictionary.lookup(phrase.text, 0)?;
+        let item = page.items.iter().find(|item| item.text == phrase.text);
+        missing += usize::from(item.is_none_or(|item| item.learning.readings.is_empty()));
+    }
+    assert!(missing < data.phrases.len() / 100, "{missing} 个词缺读音");
+    Ok(used.len())
 }
 
 #[test]

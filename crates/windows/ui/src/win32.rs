@@ -20,7 +20,7 @@ use tigertype_contracts::{
 };
 use tigertype_ui_model::{
     layout::*,
-    model::{Effect, Model, details},
+    model::{Effect, Model, details, parts},
 };
 use windows_sys::Win32::{
     Foundation::{

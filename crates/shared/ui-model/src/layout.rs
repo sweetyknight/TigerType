@@ -26,7 +26,8 @@ pub const fn shades(p: Palette) -> Shades {
 /// 两端同源的窗口标题与界面文案；括号助记键只在 Windows 显示，AppKit 绘制前去掉。
 pub const LOOKUP_TITLE: &str = "虎码 查字";
 pub const SETTINGS_TITLE: &str = "虎码 设置";
-pub const QUERY_HINT: &str = "汉字或拼音，按 Enter 查询";
+/// 边输边查，不再提示按 Enter。
+pub const QUERY_HINT: &str = "汉字、词或拼音";
 pub const KEYS_NOTE_TEXT: &str = "暂不支持自定义";
 pub const OPEN_TEXT: &str = "打开(&O)";
 pub const RELOAD_TEXT: &str = "重新载入(&R)";
@@ -197,29 +198,118 @@ pub const CX: i32 = 212;
 pub const CW: i32 = 480;
 pub const ROW: i32 = 62;
 /// 查字窗默认与最小客户区。
-pub const LOOKUP_SIZE: (i32, i32) = (520, 400);
+pub const LOOKUP_SIZE: (i32, i32) = (520, 440);
 pub const LOOKUP_MIN: (i32, i32) = (440, 340);
 
 pub type Box4 = [i32; 4];
-/// 查字窗布局（96 DPI 逻辑坐标，按客户区尺寸现算）：控件位置与需由父窗口画的查询框、详情卡。
+/// 查字窗布局（96 DPI 逻辑坐标，按客户区尺寸现算）：控件位置与需由父窗口画的查询框、详情卡；
+/// height 为内容总高，超过窗口时整窗纵向滚动。
 pub struct LookupSpec {
     pub controls: Vec<(usize, Box4)>,
     pub field: Box4,
     pub card: Box4,
+    pub height: i32,
 }
-pub fn lookup_spec(width: i32, height: i32) -> LookupSpec {
+
+// 详情行折行度量：两端绘制与行高都取自下面几个函数，长词不会一端放全、一端截断。
+const CHIP_PITCH: i32 = 32;
+const READING_PITCH: i32 = 20;
+const TILE_PITCH: i32 = 56;
+
+/// 编码键帽：空格分隔；宽 18 加每字母 8（13 像素等宽字的字宽上限），放不下另起一行。
+pub fn chips(text: &str, width: i32) -> Vec<(Box4, &str)> {
+    let (mut x, mut y, mut out) = (0, 1, Vec::new());
+    for code in text.split(' ').filter(|code| !code.is_empty()) {
+        let w = 18 + 8 * code.chars().count() as i32;
+        if x > 0 && x + w > width {
+            (x, y) = (0, y + CHIP_PITCH);
+        }
+        out.push(([x, y, w, 26], code));
+        x += w + 6;
+    }
+    out
+}
+/// 拆分字块：字根 30 见方、编码写在其下 16 高；同字字根相隔 6，字与字相隔 14。
+/// 整字放不下才另起一行，单字本身超宽时在字内折行。
+pub fn tile_boxes(text: &str, width: i32) -> Vec<(Box4, char, &str)> {
+    let (mut x, mut y, mut out) = (0, 0, Vec::new());
+    for group in text.split("  ") {
+        let tiles: Vec<_> = crate::model::tiles(group).flatten().collect();
+        let span = tiles.len() as i32 * 36 - 6;
+        if x > 0 && x + 14 + span > width {
+            (x, y) = (0, y + TILE_PITCH);
+        }
+        for (index, (root, code)) in tiles.into_iter().enumerate() {
+            let gap = if index == 0 { 14 } else { 6 };
+            if x > 0 && x + gap + 30 > width {
+                (x, y) = (0, y + TILE_PITCH);
+            }
+            let left = if x == 0 { 0 } else { x + gap };
+            out.push(([left, y, 30, 30], root, code));
+            x = left + 30;
+        }
+    }
+    out
+}
+/// 读音按音节折行：在空格或顿号后断开，宽度由平台按实际字体量；单个音节超宽也不拆。
+pub fn reading_lines(text: &str, width: i32, measure: impl Fn(&str) -> i32) -> Vec<&str> {
+    let (mut lines, mut start, mut end) = (Vec::new(), 0, 0);
+    for piece in text.split_inclusive([' ', '、']) {
+        let next = end + piece.len();
+        if end > start && measure(text[start..next].trim_end()) > width {
+            lines.push(text[start..end].trim_end());
+            start = end;
+        }
+        end = next;
+    }
+    if end > start {
+        lines.push(text[start..end].trim_end());
+    }
+    lines
+}
+/// 读音第 index 行在读音框内的位置：首行与左侧 28 高的字段名同一中线。
+pub fn reading_line(index: usize, width: i32) -> Box4 {
+    [0, 4 + index as i32 * READING_PITCH, width, READING_PITCH]
+}
+/// 详情行内容高：编码与读音单行 28，拆分单行 48（字块加编码），多一行加一个行距。
+fn row_height(id: usize, text: &str, width: i32, measure: &impl Fn(&str) -> i32) -> i32 {
+    match id {
+        READING => {
+            28 + (reading_lines(text, width, measure).len().max(1) as i32 - 1) * READING_PITCH
+        }
+        PARTS => tile_boxes(text, width).last().map_or(0, |(b, ..)| b[1]) + 48,
+        _ => chips(text, width).last().map_or(0, |(b, _)| b[1] - 1) + 28,
+    }
+}
+/// 字形格排词：选列数使字最大，词越长字越小但总能放全；返回（列数，格边长）。
+pub fn glyph_grid(count: usize, side: i32) -> (usize, i32) {
+    let count = count.max(1);
+    // 同样大时取列多的一种，词按横排阅读。
+    (1..=count)
+        .map(|columns| (columns, side / columns.max(count.div_ceil(columns)) as i32))
+        .max_by_key(|&(_, cell)| cell)
+        .unwrap_or((1, side))
+}
+/// detail 为可用编码、完整编码、读音、拆分四行的当前文字（无资料时为空）；measure 量读音字体下的文字宽。
+pub fn lookup_spec(
+    width: i32,
+    height: i32,
+    detail: [&str; 4],
+    measure: impl Fn(&str) -> i32,
+) -> LookupSpec {
     const M: i32 = 20;
     let field = [M, 12, (width - 2 * M - 46).max(160), 38];
-    let card = [M, 112, width - 2 * M, (height - 112 - 18).max(170)];
+    let mut card = [M, 112, width - 2 * M, (height - 112 - 18).max(170)];
     let (x0, y0) = (card[0] + 16, card[1] + 16);
     let x1 = x0 + 112 + 20;
-    let value_x = x1 + 68;
-    let value_w = (card[0] + card[2] - 16 - value_x).max(60);
+    let right = card[0] + card[2] - 16;
+    // 字形格与码位下沿；从这以下开始的行改占整张卡片宽，长词少折几行。
+    let glyph_bottom = y0 + 136;
     let mut controls = vec![
         (QUERY_LABEL, [0, 0, 0, 0]),
         (
             QUERY,
-            [field[0] + 36, field[1] + 10, field[2] - 36 - 62, 20],
+            [field[0] + 36, field[1] + 10, field[2] - 36 - 12, 20],
         ),
         (SETTINGS, [width - M - 38, 12, 38, 38]),
         (LIST, [M, 62, (width - 2 * M - 100).max(120), 40]),
@@ -232,25 +322,33 @@ pub fn lookup_spec(width: i32, height: i32) -> LookupSpec {
         (STATUS, [x0, card[1] + card[3] / 2 - 24, card[2] - 32, 48]),
         (CLIP, [0, 0, 0, 0]),
     ];
+    let mut top = y0;
     for (index, value) in [CODES, FULL, READING, PARTS].into_iter().enumerate() {
-        let top = y0 + index as i32 * 38;
-        controls.push((FIELD_LABEL + index, [x1, top, 64, 28]));
         // 首行右侧让出“复制”按钮。
-        let width = if index == 0 { value_w - 88 } else { value_w };
-        controls.push((
-            value,
-            [
-                value_x,
-                top,
-                width.max(40),
-                if value == PARTS { 30 } else { 28 },
-            ],
-        ));
+        let reserve = if index == 0 { 88 } else { 0 };
+        let column = |top| {
+            let label_x = if top >= glyph_bottom { x0 } else { x1 };
+            (label_x, (right - label_x - 68 - reserve).max(40))
+        };
+        let (mut label_x, mut width) = column(top);
+        let mut rows = row_height(value, detail[index], width, &measure);
+        // 拆分在字形格右侧要折行时整行移到字形格下方占全宽：四字成语因此不必滚动。
+        if value == PARTS && label_x == x1 && rows > 48 {
+            top = top.max(glyph_bottom);
+            (label_x, width) = column(top);
+            rows = row_height(value, detail[index], width, &measure);
+        }
+        controls.push((FIELD_LABEL + index, [label_x, top, 64, 28]));
+        controls.push((value, [label_x + 68, top, width, rows]));
+        top += rows + 10;
     }
+    // 卡片至少填满窗口；内容更长时卡片随之加长，由窗口滚动看全。
+    card[3] = card[3].max(top.max(glyph_bottom + 10) + 6 - card[1]);
     LookupSpec {
         controls,
         field,
         card,
+        height: card[1] + card[3] + 18,
     }
 }
 
@@ -440,7 +538,8 @@ mod tests {
     fn both_platforms_share_the_same_sections_and_bounded_layout() {
         use super::*;
         for size in [LOOKUP_MIN, LOOKUP_SIZE] {
-            let spec = lookup_spec(size.0, size.1);
+            let spec = lookup_spec(size.0, size.1, [""; 4], |_| 0);
+            assert_eq!(spec.height, size.1);
             for (_, b) in spec.controls {
                 assert!(b[0] >= 0 && b[1] >= 0 && b[2] >= 0 && b[3] >= 0);
                 assert!(b[0] + b[2] <= size.0 && b[1] + b[3] <= size.1);
@@ -460,6 +559,85 @@ mod tests {
             }
         }
         assert!(SWATCHES.into_iter().all(tigertype_contracts::without_blue));
+    }
+
+    #[test]
+    fn long_words_wrap_every_detail_row_and_grow_the_card_instead_of_clipping() {
+        use super::*;
+        // 中华人民共和国：七个完整码、十五个字根，默认窗宽一行放不下。
+        let full = "dgs jvns jr dm lhb xdk rnid";
+        let parts = "口dk 丨gs  亻jr \u{e498}vb 十ns  人jr  巳xd 七ss  龷hw 八bb  禾he 口dk  囗uu 王gg 丶ss";
+        let reading = "Zhōng huá Rén mín Gòng hé guó";
+        // 读音按每字 8 量宽，足以触发折行又与平台字体无关。
+        let measure = |text: &str| 8 * text.chars().count() as i32;
+        let width = 248;
+        let codes = chips(full, width);
+        assert_eq!(codes.len(), 7);
+        assert!(codes.iter().all(|(b, _)| b[0] + b[2] <= width));
+        assert!(
+            codes.last().unwrap().0[1] > codes[0].0[1],
+            "七个完整码要折行"
+        );
+        let tiles = tile_boxes(parts, width);
+        assert_eq!(tiles.len(), 15);
+        assert!(tiles.iter().all(|(b, ..)| b[0] + b[2] <= width));
+        // 整字换行：同一字的字根不被拆到两行（华的三个字根同一行）。
+        let rows: Vec<_> = tiles[2..5].iter().map(|(b, ..)| b[1]).collect();
+        assert!(rows.iter().all(|row| *row == rows[0]));
+        // 只有一个字超宽时才在字内折行。
+        assert_eq!(
+            tile_boxes("一aa 二bb 三cc", 70).last().unwrap().0,
+            [0, 56, 30, 30]
+        );
+        let lines = reading_lines(reading, 120, measure);
+        assert_eq!(lines.join(" "), reading);
+        assert!(lines.len() > 1 && lines.iter().all(|l| measure(l) <= 120));
+        assert_eq!(reading_lines("hǎo、hào", 40, measure), ["hǎo、", "hào"]);
+        assert!(reading_lines("", 40, measure).is_empty());
+
+        let (w, h) = LOOKUP_SIZE;
+        let single = lookup_spec(w, h, ["jr", "jxyx", "nǐ", "亻jr \u{e4e4}xd 小yx"], measure);
+        let long = lookup_spec(w, h, ["djjr", full, reading, parts], measure);
+        let place = |spec: &LookupSpec, id| spec.controls.iter().find(|(k, _)| *k == id).unwrap().1;
+        // 单字维持原四行等距；长词各行按实际行数加高，下一行顺延，不重叠。
+        assert_eq!(place(&single, PARTS), [236, 242, 248, 48]);
+        let mut bottom = 0;
+        for id in [CODES, FULL, READING, PARTS] {
+            let b = place(&long, id);
+            assert!(b[1] >= bottom && b[0] + b[2] <= w - 36);
+            bottom = b[1] + b[3];
+        }
+        assert!(place(&long, FULL)[3] > 28 && place(&long, PARTS)[3] > 48);
+        // 字形格以下的行改占整张卡片宽，字段名与字形格左对齐。
+        assert_eq!(place(&long, PARTS)[0], 36 + 68);
+        assert_eq!(place(&long, FIELD_LABEL + 3)[0], 36);
+        assert!(long.card[1] + long.card[3] >= bottom + 6);
+        assert_eq!(long.height, long.card[1] + long.card[3] + 18);
+        // 二十八字的词在最小窗口也只是更高，可以滚动看全。
+        let huge = [parts; 4].join("  ");
+        let tall = lookup_spec(
+            LOOKUP_MIN.0,
+            LOOKUP_MIN.1,
+            ["", full, reading, &huge],
+            measure,
+        );
+        assert!(tall.height > LOOKUP_MIN.1);
+        assert_eq!(tile_boxes(&huge, place(&tall, PARTS)[2]).len(), 15 * 4);
+        // 四字成语每字四根时在字形格右侧要折三行，改到格下占全宽后默认窗口不必滚动。
+        let idiom = ["甲aa 乙bb 丙cc 丁dd"; 4].join("  ");
+        let fit = lookup_spec(
+            w,
+            h,
+            ["abcd", "abcd abcd abcd abcd", "a b c d", &idiom],
+            measure,
+        );
+        assert_eq!(place(&fit, PARTS)[0], 36 + 68);
+        assert_eq!(fit.height, h);
+
+        assert_eq!(glyph_grid(1, 96), (1, 96));
+        assert_eq!(glyph_grid(2, 96), (2, 48));
+        assert_eq!(glyph_grid(7, 96), (3, 32));
+        assert_eq!(glyph_grid(28, 96), (6, 16));
     }
 
     #[test]

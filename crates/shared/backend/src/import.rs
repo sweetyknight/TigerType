@@ -10,7 +10,9 @@ use std::{
     collections::{BTreeMap, HashSet},
     path::Path,
 };
-use tigertype_engine::{Data, Detail, Mapping, Phrase, Pronunciation, WordPinyin};
+use tigertype_engine::{
+    Data, Detail, Mapping, Phrase, Pronunciation, Root, WordPinyin, WordReading,
+};
 
 const LIMIT: u64 = 128 * 1024 * 1024;
 /// 码表目录内须有的文件（相对路径），即 resources/tiger 与安装目录 tiger 的全部内容。
@@ -23,6 +25,7 @@ pub const SOURCES: &[&str] = &[
     "PY_c.dict.yaml",
     "opencc/hu_cf.txt",
     "opencc/PYCharacters.txt",
+    "opencc/PYPhrases.txt",
     "opencc/STCharacters_Tu.txt",
     "opencc/TSCharacters.txt",
     "opencc/STPhrases.txt",
@@ -111,6 +114,20 @@ fn mappings(text: &str) -> Result<Vec<Mapping<'_>>> {
             })
         })
         .collect()
+}
+/// 字根大小码（官网字根表加拆分查询补充，来源见文件头），约 400 行，编进程序，不随码表目录安装。
+const ROOTS: &str = include_str!("../../../../resources/roots.tsv");
+/// 每行“编码<TAB>主根与变体”，一行拆成每个字根一条；字根是否重复由引擎按码位矛盾作废处理。
+fn roots(text: &str) -> Result<Vec<Root<'_>>> {
+    let mut roots = Vec::new();
+    for line in lines(text) {
+        let [code, characters] = fields::<2>(line)?;
+        if characters.is_empty() {
+            return Err("字根表行缺字根".into());
+        }
+        roots.extend(characters.chars().map(|character| Root { character, code }));
+    }
+    Ok(roots)
 }
 /// 资料以 &nbsp; 作空格，按它和普通空白切开，直接借用原文。
 fn words(text: &str) -> impl Iterator<Item = &str> {
@@ -254,6 +271,12 @@ fn parse_data(files: &BTreeMap<String, String>) -> Result<Data<'_>> {
         detail.readings = words(readings).collect();
     }
     data.details = details.into_values().collect();
+    data.roots = roots(ROOTS)?;
+    // 官方拼音滤镜的词读音表；原件个别行在读音里夹了制表符，只按首个制表符切出词，读音原样交引擎对齐。
+    for line in lines(&files["opencc/PYPhrases.txt"]) {
+        let (text, reading) = line.split_once('\t').ok_or("词读音缺少分隔符")?;
+        data.word_readings.push(WordReading { text, reading });
+    }
     // 同官方 t2s.json、st_tu.json 的字典组：短语在前、单字在后，合为一张表。
     data.simplified = mappings(&files["opencc/TSPhrases.txt"])?;
     data.simplified
@@ -306,6 +329,19 @@ mod tests {
         join_word_pinyin(&mut source);
         assert_eq!(source, joined);
         assert!(fields::<3>("西安\txi\tan\t4").is_err());
+    }
+    #[test]
+    fn compiled_root_chart_is_well_formed_and_unambiguous() {
+        let chart = roots(ROOTS).unwrap();
+        let mut codes = std::collections::BTreeMap::new();
+        for root in &chart {
+            let code = *codes.entry(root.character).or_insert(root.code);
+            assert_eq!(code, root.code, "{:04X}", root.character as u32);
+        }
+        // 官网字根表 241 行加拆分查询补充，覆盖锁定拆分用到的 1074 个字根。
+        assert!(codes.len() >= 1074, "{}", codes.len());
+        assert_eq!(codes.get(&'\u{e4e4}'), Some(&"xd"));
+        assert!(roots("ab\t").is_err() && roots("ab").is_err());
     }
     #[test]
     fn parsers_reject_ambiguous_or_malformed_records() {

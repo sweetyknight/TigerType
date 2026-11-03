@@ -61,12 +61,20 @@ impl Completion {
                 };
                 let next = {
                     let mut state = shared.borrow_mut();
-                    match reply {
+                    let next = match reply {
                         Ok(reply) => state.editor.receive(reply),
                         Err(error) => {
                             state.editor.failed(error);
                             None
                         }
+                    };
+                    // 在途期间查询框又改过：按当前文本补查一次（补存设置优先，其回复后再补查）。
+                    match next {
+                        None if !state.editor.fatal && state.editor.model.take_stale() => {
+                            let query = state.query.clone();
+                            state.editor.model.edit(query)
+                        }
+                        next => next,
                     }
                 };
                 refresh(&shared);
@@ -237,9 +245,10 @@ fn act(shared: &Shared, action: UiAction) {
             return;
         }
         match action {
-            UiAction::Query(query) => {
-                s.query = query;
-                None
+            // 边输边查：改动即查首页，在途时只记下，回复后补查；Enter 只是立即再查一次。
+            UiAction::Query(query) | UiAction::Search(query) => {
+                s.query = query.clone();
+                s.editor.model.edit(query)
             }
             UiAction::Move(next) => {
                 let count = s.editor.model.result.as_ref().map_or(0, |r| r.items.len());
@@ -269,13 +278,6 @@ fn act(shared: &Shared, action: UiAction) {
                 let index = s.swatch.take();
                 index.and_then(|i| s.editor.color(i, format!("#{value:06X}")))
             }
-            UiAction::Search(query) => match s.editor.model.lookup(query, 0) {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    s.editor.model.notice = e.into();
-                    None
-                }
-            },
             UiAction::Previous | UiAction::Next => {
                 let page = if matches!(action, UiAction::Previous) {
                     s.editor.model.page.saturating_sub(1)
@@ -742,6 +744,11 @@ pub mod tests {
                     decomposition: Some("亻\u{e4e4}小 文辶 日\u{e46a}页 缶\u{e432}人".into()),
                     ..Default::default()
                 },
+                // 多字拆分放不下时截断；私用区字根只有大码时编码为一个字母。
+                roots: ["亻\u{e4e4}小", "文辶", "日\u{e46a}页", "缶\u{e432}人"]
+                    .iter()
+                    .map(|parts| parts.chars().map(|root| (root, "x".into())).collect())
+                    .collect(),
             }],
         })));
         drain(|| !views.0.borrow().editor.model.busy);

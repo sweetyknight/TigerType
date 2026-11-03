@@ -282,6 +282,10 @@ pub(super) fn event_loop(
                     {
                         send(requests, model, request);
                     }
+                    // 在途期间查询框又改过：按当前文本补查一次。
+                    if model.take_stale() {
+                        edit(main, model, requests);
+                    }
                     refresh(main, settings, model);
                     if let Some(id) = main_focus.take() {
                         main.restore_focus(id);
@@ -350,11 +354,8 @@ pub(super) fn event_loop(
                 ACTION => {
                     let id = message.wParam & 0xffff;
                     let notification = (message.wParam >> 16) as u32;
-                    if id == QUERY && notification == EN_CHANGE && !model.busy {
-                        model.result = None;
-                        model.page = 0;
-                        model.notice = "按 Enter 查询".into();
-                        show_page(main, model);
+                    if id == QUERY && notification == EN_CHANGE {
+                        edit(main, model, requests);
                         refresh(main, settings, model);
                         continue;
                     }
@@ -367,9 +368,11 @@ pub(super) fn event_loop(
                         continue;
                     }
                     let request = match id {
-                        SEARCH if !model.busy => Some(
-                            query(main).and_then(|q| model.lookup(q, 0).map_err(str::to_owned)),
-                        ),
+                        // Enter 只是立即按当前文本再查一次，与边输边查同一路径。
+                        SEARCH => {
+                            edit(main, model, requests);
+                            None
+                        }
                         PREVIOUS | NEXT if !model.busy => {
                             let page = if id == NEXT {
                                 model.page + 1
@@ -409,6 +412,26 @@ pub(super) fn event_loop(
                 _ => keyboard(&message, main, settings),
             }
         }
+    }
+}
+
+/// 查询框改动即查；在途时由 Model 记下待补查。未发请求且结果已清空时立即重画。
+fn edit(main: &Window, model: &mut Model, requests: &SyncSender<Request>) {
+    let request = match query(main) {
+        Ok(text) => model.edit(text),
+        // 在途时 edit 只记下待补查、不看文字；空闲时撤下旧结果并报错（超长或无效 Unicode）。
+        Err(_) if model.busy => model.edit(String::new()),
+        Err(error) => {
+            model.clear(error);
+            None
+        }
+    };
+    match request {
+        Some(request) => {
+            send(requests, model, request);
+        }
+        None if !model.busy => show_page(main, model),
+        None => {}
     }
 }
 

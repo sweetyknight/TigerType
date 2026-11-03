@@ -251,7 +251,39 @@ pub(super) fn draw_icon(dc: HDC, code: u16, pixels: i32, color: COLORREF, rect: 
         draw_text(dc, font.0, color, &[code], rect, DT_CENTER | DT_NOPREFIX);
     }
 }
-pub(super) fn window_text(hwnd: HWND, buffer: &mut [u16; 64]) -> usize {
+/// 按已有字体改字号（设备像素）新建临时字体，沿用字体名与粗细；建不出时为空。
+pub(super) fn resized(font: HFONT, pixels: i32) -> TempFont {
+    // SAFETY: LOGFONTW 为本地值，按结构大小读取；新建字体归 TempFont 所有并由其删除。
+    unsafe {
+        let mut logfont: LOGFONTW = std::mem::zeroed();
+        if GetObjectW(
+            font,
+            size_of::<LOGFONTW>() as i32,
+            (&raw mut logfont).cast(),
+        ) == 0
+        {
+            return TempFont(null_mut());
+        }
+        logfont.lfHeight = -pixels;
+        logfont.lfWidth = 0;
+        TempFont(CreateFontIndirectW(&logfont))
+    }
+}
+/// 控件全文按实际长度取：长词的拆分串可上千个 UTF-16 单元，定长缓冲会截掉后面的字。
+pub(super) fn control_text(hwnd: HWND) -> Vec<u16> {
+    // SAFETY: 缓冲区长度含结尾 NUL，与传入容量一致；只读本线程控件文字。
+    unsafe {
+        let mut buffer = vec![0u16; GetWindowTextLengthW(hwnd).max(0) as usize + 1];
+        let length = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
+        buffer.truncate(length.max(0) as usize);
+        buffer
+    }
+}
+/// 文字宽换回 96 DPI 逻辑像素并向上取整；查字布局与绘制同用，读音折行处两边一致。
+pub(super) fn logical_extent(dc: HDC, font: HFONT, dpi: i32, text: &str) -> i32 {
+    (extent(dc, font, &units(text)) * 96 + dpi - 1) / dpi
+}
+pub(super) fn window_text<const N: usize>(hwnd: HWND, buffer: &mut [u16; N]) -> usize {
     // SAFETY: 缓冲区长度与传入容量相同。
     unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32).max(0) as usize }
 }

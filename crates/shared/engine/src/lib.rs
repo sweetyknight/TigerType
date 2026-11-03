@@ -2,7 +2,9 @@
 #![forbid(unsafe_code)]
 mod dictionary;
 mod session;
-pub use dictionary::{Data, Detail, Dictionary, Entry, Mapping, Phrase, Pronunciation, WordPinyin};
+pub use dictionary::{
+    Data, Detail, Dictionary, Entry, Mapping, Phrase, Pronunciation, Root, WordPinyin, WordReading,
+};
 pub use session::Session;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -278,14 +278,15 @@ impl Window {
         if unsafe { GetClientRect(self.handle, &mut rect) } == 0 {
             return Err(error());
         }
-        let dpi = self.dpi as i32;
         if self.controls.iter().any(|(id, _)| *id == QUERY) {
-            for (id, place) in lookup_spec(rect.right * 96 / dpi, rect.bottom * 96 / dpi).controls {
-                self.place(id, place);
-            }
-        } else {
-            self.layout_settings(rect.bottom * 96 / dpi);
+            self.layout_lookup();
+            return Ok(());
         }
+        self.layout_settings(rect.bottom * 96 / self.dpi as i32);
+        self.redraw();
+        Ok(())
+    }
+    fn redraw(&self) {
         // SAFETY: 重画本窗口及其子控件，使卡片与新位置一致。
         unsafe {
             RedrawWindow(
@@ -295,7 +296,38 @@ impl Window {
                 RDW_INVALIDATE | RDW_ALLCHILDREN,
             );
         }
-        Ok(())
+    }
+    /// 查字窗：行高按当前资料折行现算；内容高于窗口时同设置窗整窗纵向滚动。
+    /// 滚动条出现会收窄客户区并经 WM_SIZE 再排一次；窄了只会更高，不会来回闪。
+    pub(super) fn layout_lookup(&self) {
+        let mut rect = RECT::default();
+        // SAFETY: 输出 RECT 由栈分配且窗口有效。
+        unsafe { GetClientRect(self.handle, &mut rect) };
+        let dpi = self.dpi as i32;
+        let view = rect.bottom * 96 / dpi;
+        let spec = lookup_layout(self.handle, rect.right * 96 / dpi, view);
+        let offset = self.scroll_range(spec.height, view);
+        for (id, [x, y, width, height]) in spec.controls {
+            self.place(id, [x, y - offset, width, height]);
+        }
+        self.redraw();
+    }
+    /// 按内容总高与可见高度设置纵向滚动条，返回夹紧后的滚动位置（逻辑像素）。
+    fn scroll_range(&self, height: i32, view: i32) -> i32 {
+        let offset = scroll_offset(self.handle).clamp(0, (height - view).max(0));
+        set_scroll_offset(self.handle, offset);
+        let info = SCROLLINFO {
+            cbSize: size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+            nMin: 0,
+            nMax: height - 1,
+            nPage: view.max(0) as u32,
+            nPos: offset,
+            nTrackPos: 0,
+        };
+        // SAFETY: 结构大小已填，只设置本窗口滚动条；页长不小于范围时系统自动隐藏滚动条。
+        unsafe { SetScrollInfo(self.handle, SB_VERT, &info, 1) };
+        offset
     }
     /// 设置窗：按当前分区与是否自定义配色排布，隐藏其余控件；内容高于窗口时更新滚动条并按滚动位置平移。
     pub(super) fn layout_settings(&self, view: i32) {
@@ -303,19 +335,7 @@ impl Window {
             current_page(self.handle),
             checked_in(self.handle, THEME + 4),
         );
-        let offset = scroll_offset(self.handle).clamp(0, (spec.height - view).max(0));
-        set_scroll_offset(self.handle, offset);
-        let info = SCROLLINFO {
-            cbSize: size_of::<SCROLLINFO>() as u32,
-            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
-            nMin: 0,
-            nMax: spec.height - 1,
-            nPage: view.max(0) as u32,
-            nPos: offset,
-            nTrackPos: 0,
-        };
-        // SAFETY: 结构大小已填，只设置本窗口滚动条；页长不小于范围时系统自动隐藏滚动条。
-        unsafe { SetScrollInfo(self.handle, SB_VERT, &info, 1) };
+        let offset = self.scroll_range(spec.height, view);
         for (id, place) in &spec.fixed {
             self.place(*id, *place);
         }

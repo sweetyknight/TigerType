@@ -117,6 +117,10 @@ pub(super) fn symbol(names: &[&str], size: f64, ink: u32, frame: NSRect) {
         );
     }
 }
+/// 读音行宽：向上取整到整点，查字布局与绘制同用，折行处一致。
+pub(super) fn reading_width(text: &str, font: &NSFont) -> i32 {
+    string(text, font, 0).size().width.ceil() as i32
+}
 pub(super) fn candidate_font(o: Options, size: f64) -> Retained<NSFont> {
     let faces: &[&str] = match o.candidate_font {
         CandidateFont::WenKai => &["LXGW WenKai GB Screen", "PingFang SC"],
@@ -145,7 +149,7 @@ pub(super) struct Scene {
     pub tracks: Vec<Box4>,
     /// 输入框外框与是否正在编辑（编辑中边框改强调色）。
     pub frames: Vec<(Box4, bool)>,
-    /// 查字查询框：左侧放大镜、右侧 Enter 键帽提示（同 Windows paint_window）。
+    /// 查字查询框：左侧放大镜（同 Windows paint_window）；边输边查，不画 Enter 提示。
     pub search: Option<Box4>,
     pub tile: Option<Box4>,
     pub seal: Option<Box4>,
@@ -214,23 +218,17 @@ impl Canvas {
         }
         if let Some(b) = scene.search {
             let field = box_rect(b);
-            let (x, y, w, h) = (
-                field.origin.x,
-                field.origin.y,
-                field.size.width,
-                field.size.height,
-            );
             symbol(
                 &["magnifyingglass"],
                 14.0,
                 p.muted,
-                rect(x + 10.0, y, 20.0, h),
+                rect(
+                    field.origin.x + 10.0,
+                    field.origin.y,
+                    20.0,
+                    field.size.height,
+                ),
             );
-            let hint = string("Enter", &mono(11.0), p.muted);
-            let width = hint.size().width + 12.0;
-            let cap = rect(x + w - 8.0 - width, y + 9.0, width, h - 18.0);
-            fill_round(cap, 4.0, s.track);
-            draw_text(&hint, cap, true);
         }
         if let Some(b) = scene.tile {
             fill_round(box_rect(b), 8.0, s.track);
@@ -310,6 +308,21 @@ impl Art {
             GLYPH => {
                 fill_round(r, 8.0, p.surface);
                 ring(r, 8.0, 1.0, p.line);
+                // 词按共用网格缩排，字号随格子变小，长词也能放全；同 Windows draw_word。
+                let count = value.chars().count();
+                if count > 1 {
+                    let (columns, cell) = glyph_grid(count, (w.min(h) - 16.0) as i32);
+                    let (rows, cell) = (count.div_ceil(columns) as f64, cell as f64);
+                    let font = candidate_font(o, (cell * 5.0 / 6.0).floor());
+                    let left = (w - columns as f64 * cell) / 2.0;
+                    let top = (h - rows * cell) / 2.0;
+                    for (index, glyph) in value.chars().enumerate() {
+                        let (row, column) = ((index / columns) as f64, (index % columns) as f64);
+                        let slot = rect(left + column * cell, top + row * cell, cell, cell);
+                        draw_text(&string(&glyph.to_string(), &font, p.text), slot, true);
+                    }
+                    return;
+                }
                 // 虚线十字格，内缩 8 点，与 Windows PS_DOT 相同的点距。
                 let (cx, cy) = ((w / 2.0).floor(), (h / 2.0).floor());
                 let mut t = 8.0;
@@ -322,45 +335,53 @@ impl Art {
                     }
                     t += 2.0;
                 }
-                // 词组放不进字形格，改用字块字号。
-                let size = if value.chars().count() > 1 {
-                    20.0
-                } else {
-                    76.0
-                };
-                draw_text(&string(&value, &candidate_font(o, size), p.text), r, true);
+                draw_text(&string(&value, &candidate_font(o, 76.0), p.text), r, true);
             }
-            CODES | FULL | PARTS => {
+            CODES | FULL | READING | PARTS => {
                 if value.is_empty() || *value == "缺资料" {
-                    draw_text(&string(&value, &ui(12.0), p.muted), r, false);
+                    // 与 28 点高的字段名同一行；拆分格更高，不能按整格居中。
+                    let line = rect(0.0, 0.0, w, h.min(28.0));
+                    draw_text(&string(&value, &ui(12.0), p.muted), line, false);
                     return;
                 }
-                let mut x = 0.0;
-                if s.id == PARTS {
-                    // 拆分字根逐个放进 30 点字块；放不下即止，同 Windows。
-                    let font = learning_font(20.0);
-                    for part in value.chars() {
-                        let tile = rect(x, 0.0, 30.0, 30.0);
-                        if x + 30.0 > w {
-                            break;
+                // 三项都按共用布局折行，位置与行高同 Windows。
+                let width = w as i32;
+                match s.id {
+                    // 字根逐个放进 30 点字块，编码写在字块正下方。
+                    PARTS => {
+                        let font = learning_font(20.0);
+                        let small = mono(12.0);
+                        for (b, root, code) in tile_boxes(&value, width) {
+                            let tile = box_rect(b);
+                            ring(tile, 6.0, 1.0, p.line);
+                            draw_text(&string(&root.to_string(), &font, p.text), tile, true);
+                            draw_text(
+                                &string(code, &small, p.muted),
+                                box_rect([b[0], b[1] + 32, b[2], 16]),
+                                true,
+                            );
                         }
-                        ring(tile, 6.0, 1.0, p.line);
-                        draw_text(&string(&part.to_string(), &font, p.text), tile, true);
-                        x += 36.0;
                     }
-                    return;
-                }
-                // 编码以空格分隔，各成一枚浅底键帽。
-                let font = mono(13.0);
-                for code in value.split(' ').filter(|c| !c.is_empty()) {
-                    let line = string(code, &font, p.text);
-                    let chip = rect(x, (h - 26.0) / 2.0, line.size().width + 18.0, 26.0);
-                    if chip.origin.x + chip.size.width > w {
-                        break;
+                    READING => {
+                        let font = ui(14.0);
+                        let measure = |line: &str| reading_width(line, &font);
+                        for (index, line) in reading_lines(&value, width, measure)
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let frame = box_rect(reading_line(index, width));
+                            draw_text(&string(line, &font, p.text), frame, false);
+                        }
                     }
-                    fill_round(chip, 5.0, shades(p).track);
-                    draw_text(&line, chip, true);
-                    x += chip.size.width + 6.0;
+                    // 编码以空格分隔，各成一枚浅底键帽。
+                    _ => {
+                        let font = mono(13.0);
+                        for (b, code) in chips(&value, width) {
+                            let chip = box_rect(b);
+                            fill_round(chip, 5.0, shades(p).track);
+                            draw_text(&string(code, &font, p.text), chip, true);
+                        }
+                    }
                 }
             }
             id if (KEYS..KEYS + KEYMAP.len()).contains(&id) => {

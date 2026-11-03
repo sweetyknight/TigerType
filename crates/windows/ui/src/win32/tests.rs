@@ -292,7 +292,7 @@ fn keyboard_commands_preserve_ime_handling_and_escape_closes_settings() {
 fn layouts_keep_controls_inside_their_areas() {
     let (min_width, min_height) = LOOKUP_MIN;
     for (width, height) in [LOOKUP_MIN, LOOKUP_SIZE] {
-        let spec = lookup_spec(width, height);
+        let spec = lookup_spec(width, height, [""; 4], |_| 0);
         for (id, [x, y, w, h]) in &spec.controls {
             if !matches!(*id, CLIP | QUERY_LABEL) {
                 assert!(*x >= 0 && *y >= 0 && *w > 0 && *h > 0, "控件 {id}");
@@ -304,7 +304,7 @@ fn layouts_keep_controls_inside_their_areas() {
         }
         assert!(spec.card[1] + spec.card[3] <= height.max(min_height));
     }
-    assert!(lookup_spec(min_width, min_height).card[2] > 0);
+    assert!(lookup_spec(min_width, min_height, [""; 4], |_| 0).card[2] > 0);
     let (width, height) = SETTINGS_SIZE;
     for page in 0..PAGES.len() {
         for custom in [false, true] {
@@ -520,6 +520,8 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         settings.layout(defaults.candidate_font).unwrap();
 
         // 隐藏窗口仍走真实消息泵和事件等待，证明查询回复与工作线程退出都能被观察到。
+        // 前面两次改查询框、这一次与随后的 Enter 都已排在消息队列：首个改动即发查询，
+        // 其余在途期间只记下，回复后按当前文本补查恰好一次。
         main.text(QUERY, "𠀀");
         let mut model = Model::new(defaults);
         // 唤起邮箱保持连接，代表后台仍在运行。
@@ -527,22 +529,31 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         let (requests, receiver) = std::sync::mpsc::sync_channel(1);
         let (replies, inbox) = crate::mailbox().unwrap();
         let worker = std::thread::spawn(move || {
-            let request = receiver
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap();
-            assert!(matches!(request, Request::Lookup { query, page: 0 } if query == "𠀀"));
-            replies
-                .send(Reply::Lookup(Ok(tigertype_contracts::LookupPage {
-                    items: vec![tigertype_contracts::LookupItem {
-                        text: "𠀀".into(),
-                        learning: tigertype_contracts::LearningInfo {
-                            codes: vec!["ab".into(), "abc".into()],
-                            ..Default::default()
-                        },
-                    }],
-                    has_more: false,
-                })))
-                .unwrap();
+            for _ in 0..2 {
+                let request = receiver
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+                assert!(matches!(request, Request::Lookup { query, page: 0 } if query == "𠀀"));
+                replies
+                    .send(Reply::Lookup(Ok(tigertype_contracts::LookupPage {
+                        items: vec![tigertype_contracts::LookupItem {
+                            text: "𠀀".into(),
+                            learning: tigertype_contracts::LearningInfo {
+                                codes: vec!["ab".into(), "abc".into()],
+                                ..Default::default()
+                            },
+                            roots: vec![vec![('亻', "jr".into()), ('\u{e4e4}', "x".into())]],
+                        }],
+                        has_more: false,
+                    })))
+                    .unwrap();
+            }
+            // 没有第三次查询：连续改动不会排队。
+            assert!(
+                receiver
+                    .recv_timeout(std::time::Duration::from_millis(200))
+                    .is_err()
+            );
         });
         post(main.handle, ACTION, SEARCH);
         let run = |main: &mut Window,
@@ -575,8 +586,70 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         let length = window_text(main.control(CODES), &mut buffer);
         assert_eq!(String::from_utf16_lossy(&buffer[..length]), "ab abc");
         let length = window_text(main.control(PARTS), &mut buffer);
-        assert_eq!(String::from_utf16_lossy(&buffer[..length]), "缺资料");
+        assert_eq!(
+            String::from_utf16_lossy(&buffer[..length]),
+            "亻jr \u{e4e4}x"
+        );
         assert!(!shown(main.control(STATUS)));
+
+        // 长词：完整编码与拆分按值区宽折行、行高随之增加；内容高于窗口时出现纵向滚动，而不是截掉。
+        let word = "中华人民共和国".repeat(4);
+        let current = model.result.take();
+        model.result = Some(tigertype_contracts::LookupPage {
+            items: vec![tigertype_contracts::LookupItem {
+                text: word.clone(),
+                learning: tigertype_contracts::LearningInfo {
+                    codes: vec!["djjr".into()],
+                    full_codes: word.chars().map(|_| "jvns".into()).collect(),
+                    readings: vec!["zhōng huá rén mín gòng hé guó ".repeat(4).trim().into()],
+                    ..Default::default()
+                },
+                roots: word
+                    .chars()
+                    .map(|_| {
+                        vec![
+                            ('亻', "jr".into()),
+                            ('匕', "vb".into()),
+                            ('十', "ns".into()),
+                        ]
+                    })
+                    .collect(),
+            }],
+            has_more: false,
+        });
+        show_page(&main, &model);
+        let parts_text = control_text(main.control(PARTS));
+        assert!(parts_text.len() > 256, "拆分串不能被定长缓冲截断");
+        let line = |rows: i32| scale(main.handle, rows);
+        assert!(client(&main, FULL).bottom > line(28));
+        assert!(client(&main, READING).bottom > line(28));
+        assert!(client(&main, PARTS).bottom > line(48));
+        let mut info = SCROLLINFO {
+            cbSize: size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_ALL,
+            ..Default::default()
+        };
+        // SAFETY: 只读本测试窗口滚动条。
+        unsafe { GetScrollInfo(main.handle, SB_VERT, &mut info) };
+        assert!(info.nMax + 1 > info.nPage as i32, "长词内容应可滚动");
+        let mut full = RECT::default();
+        // SAFETY: 只读本测试窗口客户区。
+        unsafe { GetClientRect(main.handle, &mut full) };
+        let spec = lookup_layout(
+            main.handle,
+            full.right * 96 / scale(main.handle, 96),
+            10_000,
+        );
+        let parts_box = spec.controls.iter().find(|(id, _)| *id == PARTS).unwrap().1;
+        let parts_value = String::from_utf16_lossy(&parts_text);
+        let tiles = tile_boxes(&parts_value, parts_box[2]);
+        assert_eq!(tiles.len(), 28 * 3);
+        assert!(tiles.iter().all(|(b, ..)| b[1] + 48 <= parts_box[3]));
+        model.result = current;
+        show_page(&main, &model);
+        // SAFETY: 同上。
+        unsafe { GetScrollInfo(main.handle, SB_VERT, &mut info) };
+        assert!(info.nMax < info.nPage as i32, "单字不出现滚动");
 
         // 即时生效：点一下开关就发出保存，回复后换上新设置，并不改动查字结果与选择。
         let (requests, receiver) = std::sync::mpsc::sync_channel(1);

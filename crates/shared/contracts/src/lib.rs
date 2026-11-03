@@ -561,6 +561,9 @@ pub struct LookupItem {
     /// 查询结果文本；单字时长度为一个 Unicode 标量，词查询时为完整词组。
     pub text: String,
     pub learning: LearningInfo,
+    /// 拆分字根及其编码，每字一组（单字一组）。编码为大码+小码，资料只定得出大码时为一个字母，
+    /// 无资料为空串；只在进程内回复查字，不进 IPC 候选。
+    pub roots: Vec<Vec<(char, String)>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

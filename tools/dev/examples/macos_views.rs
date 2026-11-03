@@ -57,6 +57,7 @@ fn main() {
                                         readings: vec!["lā".into()],
                                         decomposition: Some("扌立".into()),
                                     },
+                                    roots: vec![vec![('扌', "us".into()), ('立', "il".into())]],
                                 })
                                 .collect()
                         },

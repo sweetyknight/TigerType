@@ -63,6 +63,7 @@ Source: "{#Root}\resources\tiger\core2022.dict.yaml"; DestDir: "{app}\tiger"; Fl
 Source: "{#Root}\resources\tiger\PY_c.dict.yaml"; DestDir: "{app}\tiger"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\opencc\hu_cf.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\opencc\PYCharacters.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
+Source: "{#Root}\resources\tiger\opencc\PYPhrases.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\opencc\STCharacters_Tu.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\opencc\TSCharacters.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion
 Source: "{#Root}\resources\tiger\opencc\STPhrases.txt"; DestDir: "{app}\tiger\opencc"; Flags: ignoreversion

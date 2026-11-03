@@ -1,6 +1,6 @@
 //! 启动时验证并建立有序索引；按键路径只访问对应键的有界切片。
 use crate::{Error, Result};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use tigertype_contracts::{
     Candidate, InputMode, LOOKUP_PAGE_SIZE, LearningInfo, LookupItem, LookupPage,
     MAX_LEARNING_ITEMS, MAX_PINYIN_BYTES, MAX_QUERY_CHARS, Options, OutputForm, TypingMode,
@@ -36,6 +36,13 @@ pub struct WordPinyin<'a> {
     pub pinyin: &'a str,
     pub weight: u64,
 }
+/// 官方拼音滤镜（pinyin.json）的词读音：带调全拼，音节多连写，偶有隔音符、连字符、制表符，
+/// 或以“/”接又读。
+#[derive(Debug, Clone)]
+pub struct WordReading<'a> {
+    pub text: &'a str,
+    pub reading: &'a str,
+}
 #[derive(Debug, Clone)]
 pub struct Detail<'a> {
     pub character: char,
@@ -43,6 +50,12 @@ pub struct Detail<'a> {
     pub full_codes: Box<[&'a str]>,
     pub decomposition: Option<&'a str>,
     pub readings: Box<[&'a str]>,
+}
+/// 一个字根及其大码+小码。
+#[derive(Debug, Clone)]
+pub struct Root<'a> {
+    pub character: char,
+    pub code: &'a str,
 }
 /// 字形映射的键是单字或短语；单字的一对多全部列出，词取整词命中或逐段最长匹配。
 #[derive(Debug, Clone)]
@@ -63,6 +76,10 @@ pub struct Data<'a> {
     /// 拼音反查用的词，只含词表里有的词：没有虎码的词反查不出东西。
     pub word_pinyin: Vec<WordPinyin<'a>>,
     pub details: Vec<Detail<'a>>,
+    /// 查字在拆分字根下显示编码用。
+    pub roots: Vec<Root<'a>>,
+    /// 官方 PYPhrases 词读音，查字给词注音用。
+    pub word_readings: Vec<WordReading<'a>>,
     pub simplified: Vec<Mapping<'a>>,
     pub traditional: Vec<Mapping<'a>>,
 }
@@ -154,6 +171,10 @@ pub struct Dictionary {
     word_order: Vec<u32>,
     // 字 → 学习资料，分段见 learning_table。
     learning: Table,
+    // 字根 → 编码，见 root_table。
+    roots: Table,
+    // 词 → 读音，只存与各字首个读音不同的词，见 reading_table。
+    readings: Table,
     simplified: Table,
     traditional: Table,
 }
@@ -317,6 +338,235 @@ fn learning_table(data: &Data<'_>) -> Result<Table> {
     }
     Ok(table.finish())
 }
+/// 字根 → 大码+小码。数据已覆盖拆分用到的全部字根（官网字根表加拆分查询补充），
+/// 与取码规则的一致性由完整资源验收核对；同一字根两种编码说明数据坏了，拒绝加载。
+fn root_table(data: &Data<'_>) -> Result<Table> {
+    let mut roots: Vec<_> = data
+        .roots
+        .iter()
+        .map(|root| (root.character, root.code))
+        .collect();
+    roots.sort_unstable();
+    roots.dedup();
+    if roots.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(Error("字根表同一字根编码矛盾"));
+    }
+    let mut table = Table::default();
+    let mut buffer = [0; 4];
+    for (root, code) in roots {
+        table.push(root.encode_utf8(&mut buffer), code)?;
+    }
+    Ok(table.finish())
+}
+/// 带调拼音字母去调、转小写，ü 记作 v，与 PY_c 的无调全拼同形。
+fn bare(c: char) -> char {
+    // 建表时对每个音节字母都要调用，绝大多数是 ASCII，免去 Unicode 小写表查找。
+    if c.is_ascii() {
+        return c.to_ascii_lowercase();
+    }
+    match c.to_lowercase().next().unwrap_or(c) {
+        'ā' | 'á' | 'ǎ' | 'à' => 'a',
+        'ē' | 'é' | 'ě' | 'è' | 'ê' => 'e',
+        'ī' | 'í' | 'ǐ' | 'ì' => 'i',
+        'ō' | 'ó' | 'ǒ' | 'ò' => 'o',
+        'ū' | 'ú' | 'ǔ' | 'ù' => 'u',
+        'ü' | 'ǖ' | 'ǘ' | 'ǚ' | 'ǜ' => 'v',
+        'ń' | 'ň' | 'ǹ' => 'n',
+        'ḿ' => 'm',
+        c => c,
+    }
+}
+/// 官方词读音里音节之间可能出现的分隔符。
+fn separator(c: char) -> bool {
+    matches!(c, '\'' | '’' | '-' | ',' | '/' | '\t' | ' ')
+}
+/// 从 text[at..] 起先跳过分隔符，再按无调形逐字对上 syllable，返回它在 text 中的范围。
+fn take(text: &str, at: usize, syllable: &str) -> Option<std::ops::Range<usize>> {
+    let start = at + text[at..].find(|c| !separator(c))?;
+    let mut end = start;
+    let mut rest = text[start..].chars();
+    for want in syllable.chars() {
+        let got = rest.next().filter(|got| bare(*got) == bare(want))?;
+        end += got.len_utf8();
+    }
+    Some(start..end)
+}
+/// 学习资料表里某字的读音段（第三个空串之后）。
+fn char_readings(learning: &Table, character: char) -> impl Iterator<Item = &str> {
+    let mut gaps = 0;
+    let values = learning.get(character.encode_utf8(&mut [0; 4]));
+    values.into_iter().flatten().filter(move |value| {
+        gaps += usize::from(value.is_empty());
+        gaps == 3 && !value.is_empty()
+    })
+}
+/// 建表期间各字的读音，按字缓存：13 万词反复查同一批字，学习资料表每次都要二分并跳段。
+type Sounds<'t> = HashMap<char, Vec<&'t str>>;
+fn sounds_of<'s, 't>(sounds: &'s Sounds<'t>, character: char) -> &'s [&'t str] {
+    sounds.get(&character).map_or(&[], Vec::as_slice)
+}
+/// 把官方整段读音按各字读音的无调形切成逐字音节，保留原文声调与大小写；
+/// 末尾以“/”起头的又读舍去。对不上（如儿化 r）为 None。
+fn split<'r>(text: &'r str, chars: &[char], sounds: &Sounds<'_>) -> Option<Vec<&'r str>> {
+    fn go<'r>(
+        text: &'r str,
+        at: usize,
+        chars: &[char],
+        sounds: &Sounds<'_>,
+        out: &mut Vec<&'r str>,
+    ) -> bool {
+        let Some((&first, rest)) = chars.split_first() else {
+            let tail = text[at..].trim_start_matches(['\t', ' ']);
+            return tail.is_empty() || tail.starts_with('/');
+        };
+        for reading in sounds_of(sounds, first) {
+            if let Some(range) = take(text, at, reading) {
+                out.push(&text[range.clone()]);
+                if go(text, range.end, rest, sounds, out) {
+                    return true;
+                }
+                out.pop();
+            }
+        }
+        false
+    }
+    let mut out = Vec::with_capacity(chars.len());
+    go(text, 0, chars, sounds, &mut out).then_some(out)
+}
+/// 词的一段：官方片段只有一串音节；单字的每个读音各是一个候选。
+enum Part<'r> {
+    Official(Vec<&'r str>),
+    Character(&'r [&'r str]),
+}
+impl<'r> Part<'r> {
+    fn first(&self) -> &[&'r str] {
+        match self {
+            Part::Official(syllables) => syllables,
+            Part::Character(readings) => &readings[..1],
+        }
+    }
+}
+/// 各段依次对上词的无调全拼，每段取第一个对得上的候选；整串对上才算。
+fn fit<'r>(pinyin: &str, at: usize, parts: &[Part<'r>], out: &mut Vec<&'r str>) -> bool {
+    let Some((first, rest)) = parts.split_first() else {
+        return at == pinyin.len();
+    };
+    let attempt = |syllables: &[&'r str], out: &mut Vec<&'r str>| {
+        let mut end = at;
+        for syllable in syllables {
+            match take(pinyin, end, syllable) {
+                Some(range) => end = range.end,
+                None => return false,
+            }
+        }
+        let len = out.len();
+        out.extend_from_slice(syllables);
+        fit(pinyin, end, rest, out) || {
+            out.truncate(len);
+            false
+        }
+    };
+    match first {
+        Part::Official(syllables) => attempt(syllables, out),
+        Part::Character(readings) => readings
+            .iter()
+            .any(|reading| attempt(std::slice::from_ref(reading), out)),
+    }
+}
+/// 词 → 读音（逐字音节以空格分隔）。同官方拼音滤镜 pinyin.json：按 PYPhrases 正向最长匹配分段，
+/// 命中段用官方词读音，其余各字用单字读音；再用 PY_c 的无调全拼筛掉音节对不上的读音，
+/// 仍只差声调的取单字表首个读音。结果与“各字首个读音”相同的词不存，查询时现拼；
+/// 有字没有读音、拼不出的词也不存，显示缺资料。words 须按词排序。
+fn reading_table<'w>(
+    official: Vec<WordReading<'_>>,
+    pinyin: &[WordPinyin<'_>],
+    learning: &Table,
+    words: impl Iterator<Item = &'w str>,
+) -> Result<Table> {
+    let longest = official
+        .iter()
+        .map(|word| word.text.chars().count())
+        .max()
+        .unwrap_or(0);
+    let official: HashMap<&str, &str> = official
+        .into_iter()
+        .map(|word| (word.text, word.reading))
+        .collect();
+    let mut by_word: Vec<&WordPinyin> = pinyin.iter().collect();
+    by_word.sort_by_key(|word| word.text);
+    let mut words: Vec<&str> = words.collect();
+    words.dedup();
+    let mut sounds = Sounds::new();
+    for character in words.iter().flat_map(|word| word.chars()) {
+        sounds
+            .entry(character)
+            .or_insert_with(|| char_readings(learning, character).collect());
+    }
+    let mut table = Table::default();
+    let (mut chars, mut offsets, mut chosen) = (Vec::new(), Vec::new(), Vec::new());
+    let mut cursor = 0;
+    for word in words {
+        chars.clear();
+        chars.extend(word.chars());
+        offsets.clear();
+        offsets.extend(word.char_indices().map(|(index, _)| index));
+        offsets.push(word.len());
+        let mut parts = Vec::with_capacity(chars.len());
+        let mut start = 0;
+        while start < chars.len() {
+            let most = longest.min(chars.len() - start);
+            let found = (2..=most)
+                .rev()
+                .find_map(|n| Some((n, *official.get(&word[offsets[start]..offsets[start + n]])?)));
+            if let Some((n, reading)) = found {
+                let syllables =
+                    split(reading, &chars[start..start + n], &sounds).unwrap_or_else(|| {
+                        reading.split(separator).filter(|s| !s.is_empty()).collect()
+                    });
+                parts.push(Part::Official(syllables));
+                start += n;
+            } else {
+                let readings = sounds_of(&sounds, chars[start]);
+                if readings.is_empty() {
+                    break;
+                }
+                parts.push(Part::Character(readings));
+                start += 1;
+            }
+        }
+        if start < chars.len() {
+            continue;
+        }
+        // 两边都按词排序，游标只进不退，不必每词二分。
+        while by_word
+            .get(cursor)
+            .is_some_and(|candidate| candidate.text < word)
+        {
+            cursor += 1;
+        }
+        let fitted = by_word[cursor..]
+            .iter()
+            .take_while(|candidate| candidate.text == word)
+            .any(|candidate| {
+                chosen.clear();
+                fit(candidate.pinyin, 0, &parts, &mut chosen)
+            });
+        if !fitted {
+            chosen.clear();
+            chosen.extend(parts.iter().flat_map(Part::first));
+        }
+        // 与查询时现拼的默认读音（各字首个读音）相同就不存。
+        let default = chosen.len() == chars.len()
+            && chars
+                .iter()
+                .zip(&chosen)
+                .all(|(c, syllable)| sounds_of(&sounds, *c).first() == Some(syllable));
+        if !default {
+            table.push(word, &chosen.join(" "))?;
+        }
+    }
+    Ok(table.finish())
+}
 /// 同 OpenCC（经 Rime simplifier）：整词命中列全部字形；否则从左到右取最长键的首选字形，表外字保留。
 fn forms(table: &Table, text: &str) -> Vec<String> {
     if let Some(forms) = table.get(text) {
@@ -365,6 +615,8 @@ impl Dictionary {
                 data.pinyin.len(),
                 data.word_pinyin.len(),
                 data.details.len(),
+                data.roots.len(),
+                data.word_readings.len(),
                 data.simplified.len(),
                 data.traditional.len(),
             ]
@@ -401,8 +653,11 @@ impl Dictionary {
             if detail.character.is_control()
                 || !details.insert(detail.character)
                 || detail.full_codes.iter().any(|s| !valid_code(s))
+                // 拆分每个字符就是一个字根，空白会被当成字根，也会和词的逐字分隔混淆。
                 || detail.decomposition.is_some_and(|s| {
-                    s.is_empty() || s.len() > 1024 || s.chars().any(char::is_control)
+                    s.is_empty()
+                        || s.len() > 1024
+                        || s.chars().any(|c| c.is_control() || c.is_whitespace())
                 })
                 || detail
                     .readings
@@ -413,6 +668,24 @@ impl Dictionary {
             }
         }
         drop(details);
+        if data.roots.iter().any(|root| {
+            root.code.len() != 2
+                || !valid_code(root.code)
+                || root.character.is_control()
+                || root.character.is_whitespace()
+        }) {
+            return Err(Error("字根表编码或字根非法"));
+        }
+        if data.word_readings.iter().any(|word| {
+            word.text.chars().count() < 2
+                || word.text.chars().any(char::is_control)
+                // 只有分隔符的读音切不出音节，会显示成空读音。
+                || !word.reading.chars().any(char::is_alphabetic)
+                || word.reading.len() > 256
+                || word.reading.chars().any(|c| c.is_control() && c != '\t')
+        }) {
+            return Err(Error("词读音数据非法"));
+        }
         if data.phrases.iter().any(|phrase| {
             phrase.text.chars().count() < 2
                 || phrase.text.chars().any(char::is_control)
@@ -439,8 +712,29 @@ impl Dictionary {
         // 词桶不再借用解析记录；先释放它们，再建立临时行较多的学习资料表。
         drop(std::mem::take(&mut data.word_entries));
         drop(std::mem::take(&mut data.phrases));
+        let mut word_order = Vec::with_capacity(phrase_count);
+        for key in 0..word_buckets.keys.len() {
+            for segment in word_buckets.value_segments(key) {
+                if word_buckets.segment(segment).chars().nth(1).is_some() {
+                    word_order.push(offset(segment)?);
+                }
+            }
+        }
+        // 桶已按码升序，稳定排序后同一个词的码仍升序。
+        word_order.sort_by_key(|segment| word_buckets.segment(*segment as usize));
         let learning = learning_table(&data)?;
+        let roots = root_table(&data)?;
         drop(data.details);
+        drop(data.roots);
+        // 词读音要用词的无调全拼筛音节，须在拼音桶消费 word_pinyin 之前建。
+        let readings = reading_table(
+            std::mem::take(&mut data.word_readings),
+            &data.word_pinyin,
+            &learning,
+            word_order
+                .iter()
+                .map(|segment| word_buckets.segment(*segment as usize)),
+        )?;
         let tiger_buckets = buckets(
             data.entries
                 .iter()
@@ -459,16 +753,6 @@ impl Dictionary {
         )?;
         drop(data.pinyin);
         drop(data.word_pinyin);
-        let mut word_order = Vec::with_capacity(phrase_count);
-        for key in 0..word_buckets.keys.len() {
-            for segment in word_buckets.value_segments(key) {
-                if word_buckets.segment(segment).chars().nth(1).is_some() {
-                    word_order.push(offset(segment)?);
-                }
-            }
-        }
-        // 桶已按码升序，稳定排序后同一个词的码仍升序。
-        word_order.sort_by_key(|segment| word_buckets.segment(*segment as usize));
         let simplified = mappings(data.simplified)?;
         let traditional = mappings(data.traditional)?;
         // 在加载时拒绝过大的同码桶，不能在查询时截断并悄悄丢掉后部候选。
@@ -497,6 +781,8 @@ impl Dictionary {
             word_buckets,
             word_order,
             learning,
+            roots,
+            readings,
             simplified,
             traditional,
         })
@@ -685,22 +971,66 @@ impl Dictionary {
                 .into_iter()
                 .skip(offset)
                 .take(LOOKUP_PAGE_SIZE)
-                .map(|text| {
-                    let mut learning = text
-                        .chars()
-                        .next()
-                        .map_or_else(LearningInfo::default, |character| self.learning(character));
-                    // 词查询展示词本身的四码，不把首字编码误当作词码。
-                    if let Some(code) = self.word_codes(&text).next() {
-                        learning.codes = vec![code.to_owned()];
-                        learning.full_codes.clear();
-                        learning.decomposition = None;
-                        learning.readings.clear();
-                    }
-                    LookupItem { text, learning }
-                })
+                .map(|text| self.lookup_item(text))
                 .collect(),
         })
+    }
+    /// 单字给全部资料。词本身只有词码：完整码、读音与拆分逐字拼起，任一字缺就整项标缺，
+    /// 不拿首字资料冒充整词；读音不按词猜多音字，各字读音全列（多音以“/”分隔）。
+    fn lookup_item(&self, text: String) -> LookupItem {
+        let mut infos: Vec<_> = text.chars().map(|c| self.learning(c)).collect();
+        let roots = infos
+            .iter()
+            .map(|info| {
+                info.decomposition
+                    .iter()
+                    .flat_map(|parts| parts.chars())
+                    .map(|root| (root, self.root_code(root).unwrap_or_default().to_owned()))
+                    .collect()
+            })
+            .collect();
+        let word = self.word_codes(&text).next();
+        let learning = match (word, infos.len()) {
+            (None, 1) => infos.pop().unwrap_or_default(),
+            _ => LearningInfo {
+                readings: self.word_reading(&text, &infos).into_iter().collect(),
+                ..Self::spell(word, &infos)
+            },
+        };
+        LookupItem {
+            text,
+            learning,
+            roots,
+        }
+    }
+    fn spell(word: Option<&str>, infos: &[LearningInfo]) -> LearningInfo {
+        let each = |part: fn(&LearningInfo) -> Option<String>| {
+            infos.iter().map(part).collect::<Option<Vec<_>>>()
+        };
+        LearningInfo {
+            codes: word.into_iter().map(str::to_owned).collect(),
+            full_codes: each(|i| i.full_codes.first().cloned()).unwrap_or_default(),
+            decomposition: each(|i| i.decomposition.clone()).map(|parts| parts.join(" ")),
+            readings: Vec::new(),
+        }
+    }
+    /// 词读音：建表时存了就用，否则各字首个读音现拼（与建表时比较的默认一致）；有字缺读音为 None。
+    fn word_reading(&self, text: &str, infos: &[LearningInfo]) -> Option<String> {
+        if let Some(mut stored) = self.readings.get(text) {
+            return stored.next().map(str::to_owned);
+        }
+        let first: Option<Vec<_>> = infos.iter().map(|info| info.readings.first()).collect();
+        first.map(|readings| {
+            readings
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    }
+    /// 字根的大码+小码。
+    pub fn root_code(&self, root: char) -> Option<&str> {
+        self.roots.get(root.encode_utf8(&mut [0; 4]))?.next()
     }
 }
 
@@ -812,7 +1142,7 @@ mod tests {
                 Detail {
                     character: '乙',
                     full_codes: Box::default(),
-                    decomposition: Some("乙 乙"),
+                    decomposition: Some("乙乙"),
                     readings: Box::default(),
                 },
             ],
@@ -831,10 +1161,251 @@ mod tests {
         assert_eq!(
             dictionary.learning('乙'),
             LearningInfo {
-                decomposition: Some("乙 乙".into()),
+                decomposition: Some("乙乙".into()),
                 ..Default::default()
             }
         );
         assert_eq!(dictionary.learning('丙'), LearningInfo::default());
+    }
+
+    fn detail<'a>(character: char, parts: &'a str, code: &'a str) -> Detail<'a> {
+        Detail {
+            character,
+            full_codes: Box::new([code]),
+            decomposition: Some(parts),
+            readings: Box::default(),
+        }
+    }
+    #[test]
+    fn root_codes_come_from_the_data_and_contradictions_are_rejected() {
+        let root = |character, code| Root { character, code };
+        let data = |roots| Data {
+            entries: vec![Entry {
+                character: '你',
+                code: "jx",
+                weight: 1,
+            }],
+            details: vec![detail('你', "亻\u{e4e4}小", "jxyx")],
+            roots,
+            ..Default::default()
+        };
+        // 同一字根重复列出、编码相同（字根表与拆分查询补充重叠）照常接受。
+        let dictionary = Dictionary::new(data(vec![
+            root('亻', "jr"),
+            root('\u{e4e4}', "xd"),
+            root('小', "yx"),
+            root('亻', "jr"),
+        ]))
+        .unwrap();
+        assert_eq!(dictionary.root_code('亻'), Some("jr"));
+        assert_eq!(dictionary.root_code('丑'), None);
+        assert_eq!(
+            dictionary.lookup("你", 0).unwrap().items[0].roots,
+            [vec![
+                ('亻', "jr".to_owned()),
+                ('\u{e4e4}', "xd".into()),
+                ('小', "yx".into())
+            ]]
+        );
+        // 反例：同一字根两种编码、空白字根或非两码都拒绝加载。
+        for roots in [
+            vec![root('亻', "jr"), root('亻', "jx")],
+            vec![root(' ', "ab")],
+            vec![root('丁', "a")],
+            vec![root('丁', "abc")],
+            vec![root('丁', "aB")],
+        ] {
+            assert!(Dictionary::new(data(roots.clone())).is_err(), "{roots:?}");
+        }
+    }
+    #[test]
+    fn word_lookup_spells_each_character_without_borrowing_the_first_one() {
+        let dictionary = Dictionary::new(Data {
+            entries: vec![Entry {
+                character: '你',
+                code: "jx",
+                weight: 1,
+            }],
+            word_entries: vec![Entry {
+                character: '你',
+                code: "jx",
+                weight: 1,
+            }],
+            phrases: vec![
+                Phrase {
+                    text: "你好",
+                    code: "jxbh",
+                    weight: 1,
+                },
+                Phrase {
+                    text: "你们",
+                    code: "jxja",
+                    weight: 1,
+                },
+            ],
+            details: vec![
+                Detail {
+                    readings: Box::new(["nǐ"]),
+                    ..detail('你', "亻\u{e4e4}小", "jxyx")
+                },
+                Detail {
+                    readings: Box::new(["hǎo", "hào"]),
+                    ..detail('好', "女子", "bhi")
+                },
+            ],
+            roots: vec![
+                Root {
+                    character: '女',
+                    code: "bn",
+                },
+                Root {
+                    character: '子',
+                    code: "hi",
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        let item = |text: &str| dictionary.lookup(text, 0).unwrap().items.remove(0);
+        let word = item("你好");
+        assert_eq!(
+            word.learning,
+            LearningInfo {
+                codes: vec!["jxbh".into()],
+                full_codes: vec!["jxyx".into(), "bhi".into()],
+                decomposition: Some("亻\u{e4e4}小 女子".into()),
+                // 没有词读音资料时取各字首个读音，不把多音字全列。
+                readings: vec!["nǐ hǎo".into()],
+            }
+        );
+        assert_eq!(word.roots.len(), 2);
+        assert_eq!(
+            word.roots[1],
+            [('女', "bn".to_owned()), ('子', "hi".into())]
+        );
+        // 数据里没有的字根编码为空，不现场猜。
+        assert_eq!(word.roots[0][0], ('亻', String::new()));
+        // 任一字缺资料就整项标缺，不拿首字冒充整词。
+        let partial = item("你们");
+        assert_eq!(partial.learning.codes, ["jxja"]);
+        assert!(partial.learning.full_codes.is_empty());
+        assert!(partial.learning.readings.is_empty());
+        assert_eq!(partial.learning.decomposition, None);
+        assert_eq!(partial.roots[1], []);
+        // 单字照旧给本字全部资料。
+        assert_eq!(item("好").learning.readings, ["hǎo", "hào"]);
+    }
+    #[test]
+    fn word_readings_follow_the_official_filter_then_toneless_pinyin_then_first_reading() {
+        let say = |character, readings: &'static [&'static str]| Detail {
+            character,
+            full_codes: Box::new(["a"]),
+            decomposition: None,
+            readings: readings.into(),
+        };
+        let words = [
+            "你好",
+            "银行",
+            "银行家",
+            "行列",
+            "几个",
+            "一会儿",
+            "忽闪",
+            "令爱",
+            "姘头",
+            "你㐀",
+        ];
+        let dictionary = Dictionary::new(Data {
+            entries: vec![Entry {
+                character: '你',
+                code: "a",
+                weight: 1,
+            }],
+            phrases: words
+                .iter()
+                .map(|text| Phrase {
+                    text,
+                    code: "ab",
+                    weight: 1,
+                })
+                .collect(),
+            details: vec![
+                say('你', &["nǐ"]),
+                say('好', &["hǎo", "hào"]),
+                say('银', &["yín"]),
+                say('行', &["xíng", "háng"]),
+                say('家', &["jiā", "jia"]),
+                say('列', &["liè"]),
+                say('几', &["jī", "jǐ"]),
+                say('个', &["gè", "gě"]),
+                say('一', &["yī"]),
+                say('会', &["huì", "kuài"]),
+                say('儿', &["ér"]),
+                say('忽', &["hū"]),
+                say('闪', &["shǎn"]),
+                say('令', &["lìng"]),
+                say('爱', &["ài"]),
+                say('姘', &["pīn"]),
+                say('头', &["tóu", "tou"]),
+            ],
+            word_readings: [
+                ("你好", "nǐhǎo"),
+                ("银行", "yínháng"),
+                // 儿化切不开，整段原样；“/”后是又读，隔音符不进显示。
+                ("一会儿", "yīhuìr"),
+                ("忽闪", "hūshǎn/hūshan"),
+                ("令爱", "lìng'ài"),
+                // 原件个别行在读音里夹制表符。
+                ("姘头", "pīn\ttou"),
+            ]
+            .into_iter()
+            .map(|(text, reading)| WordReading { text, reading })
+            .collect(),
+            word_pinyin: [("行列", "hanglie"), ("几个", "jige")]
+                .into_iter()
+                .map(|(text, pinyin)| WordPinyin {
+                    text,
+                    pinyin,
+                    weight: 1,
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .unwrap();
+        let reading = |text: &str| {
+            dictionary.lookup(text, 0).unwrap().items[0]
+                .learning
+                .readings
+                .clone()
+        };
+        // 官方整词读音逐字切开；词里的官方片段照用，其余字取单字读音。
+        assert_eq!(reading("你好"), ["nǐ hǎo"]);
+        assert_eq!(reading("银行"), ["yín háng"]);
+        assert_eq!(reading("银行家"), ["yín háng jiā"]);
+        assert_eq!(reading("一会儿"), ["yīhuìr"]);
+        assert_eq!(reading("忽闪"), ["hū shǎn"]);
+        assert_eq!(reading("令爱"), ["lìng ài"]);
+        // 官方轻声保留，不被单字读音改回本调。
+        assert_eq!(reading("姘头"), ["pīn tou"]);
+        // 无调全拼筛掉音节不符的首个读音；只差声调时仍取首个读音（已知局限：几个应为 jǐ）。
+        assert_eq!(reading("行列"), ["háng liè"]);
+        assert_eq!(reading("几个"), ["jī gè"]);
+        // 有字没有读音：拼不出就标缺，不拿其余字凑。
+        assert!(reading("你㐀").is_empty());
+        // 与各字首个读音相同的词（你好、忽闪、令爱、几个）不存。
+        assert_eq!(dictionary.readings.keys.len(), 5);
+        // 反例：空读音、只有分隔符的读音和单字键都拒绝。
+        for (text, reading) in [("你好", ""), ("你好", "'-/"), ("你", "nǐ")] {
+            let data = Data {
+                entries: vec![Entry {
+                    character: '你',
+                    code: "a",
+                    weight: 1,
+                }],
+                word_readings: vec![WordReading { text, reading }],
+                ..Default::default()
+            };
+            assert!(Dictionary::new(data).is_err(), "{text} {reading:?}");
+        }
     }
 }

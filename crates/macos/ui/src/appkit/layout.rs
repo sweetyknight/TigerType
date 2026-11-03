@@ -1,5 +1,5 @@
 //! AppKit 直接消费 Win32 共用布局，不另维护控件位置；只有字体、窗口外框和快捷键写法按平台调整。
-use super::art::{Art, Canvas, Scene, box_rect, caption, key_parts, mac_keys};
+use super::art::{Art, Canvas, Scene, box_rect, caption, key_parts, mac_keys, reading_width};
 use super::*;
 use tigertype_ui_model::layout::*;
 
@@ -31,7 +31,6 @@ fn role(id: usize) -> Role {
         FILE_NAME | ABOUT_TITLE => (strong(13.0), Tone::Text, false),
         FILE_PATH | CODEPOINT => (mono(13.0), Tone::Muted, false),
         PAGE => (mono(13.0), Tone::Muted, true),
-        READING => (ui(14.0), Tone::Text, true),
         CUSTOM_STATUS => (ui(12.0), Tone::Muted, true),
         _ if (ROW_TITLE..ROW_TITLE + 5).contains(&id) => (ui(14.0), Tone::Text, true),
         _ if (FIELD_LABEL..FIELD_LABEL + 4).contains(&id) => (ui(12.0), Tone::Muted, true),
@@ -511,6 +510,8 @@ impl SettingsWidgets {
 
 pub(super) struct LookupWidgets {
     pub native: NativeWindow,
+    /// 内容视图：长词资料高于窗口时整窗纵向滚动，同 Windows。
+    scroll: Retained<NSScrollView>,
     root: Retained<Canvas>,
     controls: Vec<(usize, Control)>,
     list: Retained<NSScrollView>,
@@ -534,9 +535,17 @@ impl LookupWidgets {
             .window
             .setContentMinSize(NSSize::new(LOOKUP_MIN.0 as f64, LOOKUP_MIN.1 as f64));
         let root = Canvas::new(s.mtm, rect(0.0, 0.0, width as f64, height as f64), p);
-        native.window.setContentView(Some(&root));
+        let scroll = NSScrollView::initWithFrame(
+            NSScrollView::alloc(s.mtm),
+            rect(0.0, 0.0, width as f64, height as f64),
+        );
+        scroll.setHasVerticalScroller(true);
+        scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+        scroll.setDrawsBackground(false);
+        scroll.setDocumentView(Some(&root));
+        native.window.setContentView(Some(&scroll));
         let mut controls = Vec::new();
-        for (id, b) in lookup_spec(width, height).controls {
+        for (id, b) in lookup_spec(width, height, [""; 4], |_| 0).controls {
             if [QUERY_LABEL, CLIP, LIST].contains(&id) {
                 continue;
             }
@@ -566,7 +575,7 @@ impl LookupWidgets {
                     f.on_focus(redraw(weak));
                     Control::Field(f)
                 }
-                GLYPH | CODES | FULL | PARTS => {
+                GLYPH | CODES | FULL | READING | PARTS => {
                     Control::Art(Art::new(s.mtm, id, frame, s.editor.appearance()))
                 }
                 SETTINGS | PREVIOUS | NEXT | COPY => button(
@@ -623,6 +632,7 @@ impl LookupWidgets {
         }
         Self {
             native,
+            scroll,
             root,
             controls,
             list,
@@ -634,8 +644,40 @@ impl LookupWidgets {
         let e = &s.editor;
         let p = e.appearance().palette();
         self.native.decorate(p, p.window);
-        let size = self.root.bounds().size;
-        let spec = lookup_spec(size.width as i32, size.height as i32);
+        let item = e
+            .model
+            .result
+            .as_ref()
+            .and_then(|r| r.items.get(e.selected));
+        let join = |items: &[String], separator: &str| {
+            if items.is_empty() {
+                "缺资料".into()
+            } else {
+                items.join(separator)
+            }
+        };
+        // 四行资料先算出来：行高按其折行现排，绘制再用同一份文字。
+        let texts: [String; 4] = item.map_or_else(Default::default, |i| {
+            [
+                join(&i.learning.codes, " "),
+                join(&i.learning.full_codes, " "),
+                join(&i.learning.readings, "、"),
+                tigertype_ui_model::model::parts(i),
+            ]
+        });
+        let size = self.scroll.contentSize();
+        let font = ui(14.0);
+        let spec = lookup_spec(
+            size.width as i32,
+            size.height as i32,
+            texts.each_ref().map(String::as_str),
+            |line| reading_width(line, &font),
+        );
+        // 文档视图至少与可见区等高；更高时滚动条出现。
+        self.root.setFrameSize(NSSize::new(
+            size.width,
+            spec.height.max(size.height as i32) as f64,
+        ));
         let editing = self
             .controls
             .iter()
@@ -649,11 +691,6 @@ impl LookupWidgets {
                 ..Scene::default()
             },
         );
-        let item = e
-            .model
-            .result
-            .as_ref()
-            .and_then(|r| r.items.get(e.selected));
         for (id, control) in &self.controls {
             control.update(*id, s);
             let detail = [GLYPH, CODEPOINT, COPY, CODES, FULL, READING, PARTS].contains(id)
@@ -661,13 +698,6 @@ impl LookupWidgets {
             control
                 .view()
                 .setHidden((detail && item.is_none()) || (*id == STATUS && item.is_some()));
-            let join = |items: &[String], separator: &str| {
-                if items.is_empty() {
-                    "缺资料".into()
-                } else {
-                    items.join(separator)
-                }
-            };
             let value = match *id {
                 STATUS => Some(e.model.notice.clone()),
                 PAGE => Some(
@@ -683,22 +713,10 @@ impl LookupWidgets {
                         .map(|i| format!("U+{:04X}", i.text.chars().next().unwrap() as u32))
                         .unwrap_or_default(),
                 ),
-                CODES => Some(
-                    item.map(|i| join(&i.learning.codes, " "))
-                        .unwrap_or_default(),
-                ),
-                FULL => Some(
-                    item.map(|i| join(&i.learning.full_codes, " "))
-                        .unwrap_or_default(),
-                ),
-                READING => Some(
-                    item.map(|i| join(&i.learning.readings, "、"))
-                        .unwrap_or_default(),
-                ),
-                PARTS => Some(
-                    item.and_then(|i| i.learning.decomposition.clone())
-                        .unwrap_or_else(|| "缺资料".into()),
-                ),
+                CODES => Some(texts[0].clone()),
+                FULL => Some(texts[1].clone()),
+                READING => Some(texts[2].clone()),
+                PARTS => Some(texts[3].clone()),
                 _ => None,
             };
             if let Some(value) = value {
@@ -726,7 +744,8 @@ impl LookupWidgets {
                             _ => true,
                         },
                 ),
-                Control::Field(f) => f.setEnabled(!e.model.busy && !e.fatal),
+                // 边输边查：查询在途时仍可编辑，否则正在打字的焦点会丢。
+                Control::Field(f) => f.setEnabled(!e.fatal),
                 _ => {}
             }
         }
