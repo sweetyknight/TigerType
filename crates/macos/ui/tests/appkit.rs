@@ -2,11 +2,6 @@
 #[cfg(target_os = "macos")]
 #[path = "../src/appkit.rs"]
 mod appkit;
-#[cfg(target_os = "macos")]
-#[path = "../src/editor.rs"]
-// 自定义主线程 harness 不生成 #[test] 函数，只允许其共用导入未使用；产品编译仍严格检查。
-#[allow(unused_imports)]
-mod editor;
 fn main() {
     #[cfg(target_os = "macos")]
     appkit::tests::run();

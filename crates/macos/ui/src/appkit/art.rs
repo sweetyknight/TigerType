@@ -2,7 +2,10 @@
 //! 形状、颜色与尺寸逐项对照 Windows 的 drawing.rs/controls.rs，字体与图标换成系统字体和 SF Symbols。
 use super::*;
 use objc2_foundation::{NSArray, NSAttributedString};
-use tigertype_ui_model::layout::*;
+use tigertype_ui_model::{
+    layout::*,
+    view::{key_parts, keys, strip_mnemonic},
+};
 
 pub(super) fn box_rect(b: Box4) -> NSRect {
     rect(b[0] as f64, b[1] as f64, b[2] as f64, b[3] as f64)
@@ -16,39 +19,16 @@ pub(super) fn inset(r: NSRect, by: f64) -> NSRect {
     )
 }
 pub(super) fn caption(value: &str) -> String {
-    // Win32 助记键不显示在 macOS；语义与顺序保持一致。
-    let mut value = value.to_owned();
-    for c in 'A'..='Z' {
-        value = value.replace(&format!("(&{c})"), "");
-    }
-    // ⌃ 在苹方里像脱字符，Mac 键盘上印的是 control，说明文字写全称。
-    value.replace("Ctrl+", "Control+")
+    // Win32 助记键不显示在 macOS；⌃ 在苹方里像脱字符，Mac 键盘上印的是 control，说明文字写全称。
+    strip_mnemonic(value).replace("Ctrl+", "Control+")
 }
 /// 快捷键键帽改用 Mac 键名：笔记本没有翻页键，以 fn+方向键代替；N 按当前每页候选数显示。
 pub(super) fn mac_keys(spec: &str, page_size: u8) -> String {
-    caption(spec)
+    keys(&caption(spec), page_size)
         .replace("[Ctrl]", "[Control]")
         .replace("[Enter]", "[Return]")
         .replace("[PgUp]", "[fn ↑]")
         .replace("[PgDn]", "[fn ↓]")
-        .replace("[N]", &format!("[{page_size}]"))
-}
-/// 按方括号切成键帽与说明文字（键名可含空格，如 fn ↑），与 Windows 同一切法。
-pub(super) fn key_parts(spec: &str) -> Vec<(bool, &str)> {
-    spec.split_inclusive(']')
-        .flat_map(|part| match part.find('[') {
-            Some(at) => vec![&part[..at], &part[at..]],
-            None => vec![part],
-        })
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(
-            |part| match part.strip_prefix('[').and_then(|k| k.strip_suffix(']')) {
-                Some(key) => (true, key),
-                None => (false, part),
-            },
-        )
-        .collect()
 }
 pub(super) fn fill(r: NSRect, ink: u32) {
     color(ink).setFill();

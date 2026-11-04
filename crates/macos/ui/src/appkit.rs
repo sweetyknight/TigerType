@@ -1,5 +1,4 @@
 //! 查字/设置 AppKit 视图。请求通过一次性 Completion 回到主线程；本模块不拥有词表、文件或工作线程。
-use crate::editor::Editor;
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
@@ -16,11 +15,11 @@ use std::{
     rc::{Rc, Weak},
 };
 use tigertype_contracts::{
-    CandidateFont, Options, OutputForm, Palette, Theme, TypingMode,
+    CandidateFont, Options, Palette, Theme,
     protocol::Panel,
     ui::{Reply, Request},
 };
-use tigertype_ui_model::model::details;
+use tigertype_ui_model::editor::{Action, Editor, Task};
 #[path = "appkit/art.rs"]
 mod art;
 #[path = "appkit/controls.rs"]
@@ -59,24 +58,8 @@ impl Completion {
                 let Some(shared) = target.get(mtm).upgrade() else {
                     return;
                 };
-                let next = {
-                    let mut state = shared.borrow_mut();
-                    let next = match reply {
-                        Ok(reply) => state.editor.receive(reply),
-                        Err(error) => {
-                            state.editor.failed(error);
-                            None
-                        }
-                    };
-                    // 在途期间查询框又改过：按当前文本补查一次（补存设置优先，其回复后再补查）。
-                    match next {
-                        None if !state.editor.fatal && state.editor.model.take_stale() => {
-                            let query = state.query.clone();
-                            state.editor.model.edit(query)
-                        }
-                        next => next,
-                    }
-                };
+                // 补存设置优先，其回复后再按当前查询框补查。
+                let next = shared.borrow_mut().editor.reply(reply);
                 refresh(&shared);
                 if let Some(next) = next {
                     submit(&shared, next);
@@ -111,10 +94,7 @@ impl Views {
             submit: Rc::new(submit),
             lookup: None,
             settings: None,
-            page: 0,
-            swatch: None,
             next_window: 0,
-            query: String::new(),
         }))))
     }
     pub fn show(&self, panel: Panel) {
@@ -123,7 +103,7 @@ impl Views {
     pub fn close(&self) {
         let (lookup, settings) = {
             let mut s = self.0.borrow_mut();
-            s.swatch = None;
+            s.editor.close_settings();
             (s.lookup.take(), s.settings.take())
         };
         drop((lookup, settings));
@@ -135,73 +115,15 @@ impl Drop for Views {
     }
 }
 struct State {
-    query: String,
     mtm: MainThreadMarker,
     editor: Editor,
     config: PathBuf,
     submit: Submit,
     lookup: Option<LookupWidgets>,
     settings: Option<SettingsWidgets>,
-    page: usize,
-    swatch: Option<usize>,
     next_window: u64,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Setting {
-    Auto,
-    Common,
-    Learning,
-    Mode(TypingMode),
-    Form(OutputForm),
-    Font(CandidateFont),
-    Size(u8),
-    Theme(Theme),
-}
-impl Setting {
-    fn apply(self, o: &mut Options) {
-        match self {
-            Self::Auto => o.auto_commit_four = !o.auto_commit_four,
-            Self::Common => o.common_only = !o.common_only,
-            Self::Learning => o.show_learning = !o.show_learning,
-            Self::Mode(v) => o.typing_mode = v,
-            Self::Form(v) => o.output_form = v,
-            Self::Font(v) => o.candidate_font = v,
-            Self::Size(v) => o.page_size = v,
-            Self::Theme(v) => o.theme = v,
-        }
-    }
-    fn selected(self, o: Options) -> bool {
-        match self {
-            Self::Auto => o.auto_commit_four,
-            Self::Common => o.common_only,
-            Self::Learning => o.show_learning,
-            Self::Mode(v) => o.typing_mode == v,
-            Self::Form(v) => o.output_form == v,
-            Self::Font(v) => o.candidate_font == v,
-            Self::Size(v) => o.page_size == v,
-            Self::Theme(v) => o.theme == v,
-        }
-    }
-}
-enum UiAction {
-    Query(String),
-    Move(bool),
-    Reset,
-    Page(usize),
-    Set(Setting),
-    Color(usize, String),
-    Palette(usize),
-    Swatch(u32),
-    Search(String),
-    Previous,
-    Next,
-    Select(usize),
-    Copy,
-    Settings,
-    Reload,
-    Open,
-}
-fn handler(weak: &WeakState, action: impl Fn() -> UiAction + 'static) -> impl Fn() + 'static {
+fn handler(weak: &WeakState, action: impl Fn() -> Action + 'static) -> impl Fn() + 'static {
     let weak = weak.clone();
     move || {
         if let Some(shared) = weak.upgrade() {
@@ -220,118 +142,35 @@ fn submit(shared: &Shared, request: Request) {
         Completion(Some(MainThreadBound::new(Rc::downgrade(shared), mtm))),
     );
 }
-fn act(shared: &Shared, action: UiAction) {
-    let focus_result = matches!(action, UiAction::Move(_) | UiAction::Select(_));
-    if matches!(action, UiAction::Settings) {
-        show(shared, Panel::Settings);
-        return;
+fn act(shared: &Shared, action: Action) {
+    let focus_result = matches!(action, Action::Move(_) | Action::Select(_));
+    // 共用状态机处理草稿与查询；剪贴板、打开文件与唤起设置窗留在 AppKit。
+    let task = shared.borrow_mut().editor.act(action);
+    match &task {
+        Some(Task::ShowSettings) => return show(shared, Panel::Settings),
+        Some(Task::OpenConfig) => {
+            let path = shared.borrow().config.clone();
+            let ok = path.to_str().is_some_and(|path| {
+                NSWorkspace::sharedWorkspace()
+                    .openURL(&NSURL::fileURLWithPath(&NSString::from_str(path)))
+            });
+            if !ok {
+                shared.borrow_mut().editor.model.settings_notice =
+                    "无法用默认编辑器打开配置文件".into();
+            }
+        }
+        Some(Task::Copy(text)) => {
+            let board = NSPasteboard::generalPasteboard();
+            board.clearContents();
+            // SAFETY: 仅在用户复制动作中写普通字符串，不读取剪贴板。
+            if !unsafe {
+                board.setString_forType(&NSString::from_str(text), NSPasteboardTypeString)
+            } {
+                shared.borrow_mut().editor.model.notice = "复制失败".into();
+            }
+        }
+        _ => {}
     }
-    if matches!(action, UiAction::Open) {
-        let path = shared.borrow().config.clone();
-        let ok = path.to_str().is_some_and(|path| {
-            NSWorkspace::sharedWorkspace()
-                .openURL(&NSURL::fileURLWithPath(&NSString::from_str(path)))
-        });
-        if !ok {
-            shared.borrow_mut().editor.model.settings_notice =
-                "无法用默认编辑器打开配置文件".into();
-        }
-        refresh(shared);
-        return;
-    }
-    let request = {
-        let mut s = shared.borrow_mut();
-        if s.editor.fatal {
-            return;
-        }
-        match action {
-            // 边输边查：改动即查首页，在途时只记下，回复后补查；Enter 只是立即再查一次。
-            UiAction::Query(query) | UiAction::Search(query) => {
-                s.query = query.clone();
-                s.editor.model.edit(query)
-            }
-            UiAction::Move(next) => {
-                let count = s.editor.model.result.as_ref().map_or(0, |r| r.items.len());
-                s.editor.selected = if next {
-                    s.editor
-                        .selected
-                        .saturating_add(1)
-                        .min(count.saturating_sub(1))
-                } else {
-                    s.editor.selected.saturating_sub(1)
-                };
-                None
-            }
-            UiAction::Reset => s.editor.reset_colors(),
-            UiAction::Page(page) => {
-                s.page = page.min(3);
-                s.swatch = None;
-                None
-            }
-            UiAction::Set(setting) => s.editor.edit(|o| setting.apply(o)),
-            UiAction::Color(index, value) => s.editor.color(index, value),
-            UiAction::Palette(index) => {
-                s.swatch = Some(index);
-                None
-            }
-            UiAction::Swatch(value) => {
-                let index = s.swatch.take();
-                index.and_then(|i| s.editor.color(i, format!("#{value:06X}")))
-            }
-            UiAction::Previous | UiAction::Next => {
-                let page = if matches!(action, UiAction::Previous) {
-                    s.editor.model.page.saturating_sub(1)
-                } else {
-                    s.editor.model.page.saturating_add(1)
-                };
-                let query = s.editor.model.query.clone();
-                match s.editor.model.lookup(query, page) {
-                    Ok(r) => Some(r),
-                    Err(e) => {
-                        s.editor.model.notice = e.into();
-                        None
-                    }
-                }
-            }
-            UiAction::Select(index) => {
-                if s.editor
-                    .model
-                    .result
-                    .as_ref()
-                    .is_some_and(|r| index < r.items.len())
-                {
-                    s.editor.selected = index;
-                }
-                None
-            }
-            UiAction::Reload => match s.editor.model.reload() {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    s.editor.model.settings_notice = e.into();
-                    None
-                }
-            },
-            UiAction::Copy => {
-                if let Some(item) = s
-                    .editor
-                    .model
-                    .result
-                    .as_ref()
-                    .and_then(|r| r.items.get(s.editor.selected))
-                {
-                    let text = NSString::from_str(&details(item));
-                    let board = NSPasteboard::generalPasteboard();
-                    board.clearContents();
-                    // SAFETY: 仅在用户复制动作中写普通字符串，不读取剪贴板。
-                    if !unsafe { board.setString_forType(&text, NSPasteboardTypeString) } {
-                        s.editor.model.notice = "复制失败".into();
-                    }
-                }
-                None
-            }
-            UiAction::Open | UiAction::Settings => None,
-        }
-    };
     refresh(shared);
     if focus_result {
         let button = {
@@ -346,7 +185,7 @@ fn act(shared: &Shared, action: UiAction) {
             window.makeFirstResponder(Some(&button));
         }
     }
-    if let Some(request) = request {
+    if let Some(Task::Send(request)) = task {
         submit(shared, request);
     }
 }
@@ -419,7 +258,7 @@ define_class!(
         fn dismiss_overlay(&self)->bool {callback(||{
             let Some(shared)=self.ivars().owner.upgrade()else{return false;};
             if self.ivars().panel!=Panel::Settings{return false;}
-            let had=shared.borrow_mut().swatch.take().is_some();if had{refresh(&shared);}had
+            let had=shared.borrow_mut().editor.dismiss_swatch();if had{refresh(&shared);}had
         }).unwrap_or(false)}
     }
     // SAFETY: 回调签名遵守 NSWindowDelegate，Rust panic 被截断。
@@ -459,7 +298,7 @@ define_class!(
                                 if s.settings.as_ref().is_some_and(|w| w.native.token == token) =>
                             {
                                 s.settings = None;
-                                s.swatch = None;
+                                s.editor.close_settings();
                             }
                             _ => {}
                         }
@@ -553,6 +392,7 @@ pub mod tests {
     //! 主线程隐藏窗口与异步回复断言；只能在 Mac 执行，交叉编译不等于这些断言已通过。
     use super::*;
     use objc2_foundation::{NSDate, NSDictionary, NSRunLoop};
+    use tigertype_ui_model::editor::Setting;
     fn drain(done: impl Fn() -> bool) {
         let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !done() {
@@ -698,7 +538,7 @@ pub mod tests {
             for page in 0..4 {
                 {
                     let mut s = views.0.borrow_mut();
-                    s.page = page;
+                    s.editor.page = page;
                     s.editor.draft.theme = theme;
                     // 外观预览同时覆盖空注释和实际文楷注释的测量/绘制分支。
                     s.editor.draft.show_learning = matches!(theme, Theme::Amber | Theme::Rose);
@@ -733,7 +573,7 @@ pub mod tests {
         }
         views.0.borrow_mut().editor = Editor::new(Options::default());
         // 非 BMP、长编码与拆分均使用合成资料，不读个人词库。
-        act(&views.0, UiAction::Search("合成".into()));
+        act(&views.0, Action::Query("合成".into()));
         let (_, reply) = requests.borrow_mut().pop().unwrap();
         reply.finish(Reply::Lookup(Ok(tigertype_contracts::LookupPage {
             has_more: true,
@@ -767,14 +607,17 @@ pub mod tests {
             );
         }
         // 保存途中关闭并重建窗口，旧回复只能更新模型，不能访问已释放视图。
-        act(&views.0, UiAction::Set(Setting::Size(7)));
+        act(&views.0, Action::Set(Setting::Size(7)));
         let (request, reply) = requests.borrow_mut().pop().unwrap();
         let Request::SaveSettings(expected) = request else {
             panic!("请求错配");
         };
-        views.0.borrow_mut().swatch = Some(0);
+        views.0.borrow_mut().editor.swatch = Some(0);
         views.close();
-        assert!(views.0.borrow().swatch.is_none(), "关闭不能留下旧色板状态");
+        assert!(
+            views.0.borrow().editor.swatch.is_none(),
+            "关闭不能留下旧色板状态"
+        );
         {
             let mut s = views.0.borrow_mut();
             s.settings = Some(SettingsWidgets::new(&s, &Rc::downgrade(&views.0), 3));
@@ -782,12 +625,12 @@ pub mod tests {
         reply.finish(Reply::Saved(Ok(expected)));
         drain(|| !views.0.borrow().editor.model.busy);
         assert_eq!(views.0.borrow().editor.model.options.page_size, 7);
-        act(&views.0, UiAction::Set(Setting::Size(9)));
+        act(&views.0, Action::Set(Setting::Size(9)));
         let (_, reply) = requests.borrow_mut().pop().unwrap();
         reply.fail("合成保存失败".into());
         drain(|| !views.0.borrow().editor.model.busy);
         assert_eq!(views.0.borrow().editor.draft.page_size, 7);
-        act(&views.0, UiAction::Reload);
+        act(&views.0, Action::Reload);
         let (_, reply) = requests.borrow_mut().pop().unwrap();
         drop(reply);
         drain(|| !views.0.borrow().editor.model.busy);

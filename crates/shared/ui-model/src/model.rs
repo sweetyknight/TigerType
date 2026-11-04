@@ -1,5 +1,5 @@
 //! 视图状态独立于窗口句柄，单个在途动作避免查询换页或保存回复错配。
-//! 设置即时生效：设置窗控件即草稿；在途时的新改动不排队，回复后按最新草稿与已确认设置比较再保存。
+//! 设置即时生效：Editor 持有草稿；在途时的新改动不排队，回复后按最新草稿与已确认设置比较再保存。
 use tigertype_contracts::{
     LookupItem, LookupPage, MAX_QUERY_CHARS, Options,
     ui::{Reply, Request},
@@ -113,9 +113,16 @@ impl Model {
         self.busy = true;
         Ok(Request::ReloadSettings)
     }
-    /// Mac 草稿在重新载入期间只读；保存期间仍允许合并后续编辑。
+    /// 草稿在重新载入期间只读；保存期间仍允许合并后续编辑。
     pub fn reloading(&self) -> bool {
         matches!(self.pending, Some(Request::ReloadSettings))
+    }
+    /// 正在保存的设置：丢弃未完成的草稿时退回它，而不是更早的已确认设置。
+    pub fn saving(&self) -> Option<Options> {
+        match self.pending {
+            Some(Request::SaveSettings(options)) => Some(options),
+            _ => None,
+        }
     }
     pub fn fail(&mut self, notice: String) {
         match self.pending.take() {

@@ -1,7 +1,11 @@
 //! AppKit 直接消费 Win32 共用布局，不另维护控件位置；只有字体、窗口外框和快捷键写法按平台调整。
-use super::art::{Art, Canvas, Scene, box_rect, caption, key_parts, mac_keys, reading_width};
+use super::art::{Art, Canvas, Scene, box_rect, caption, mac_keys, reading_width};
 use super::*;
-use tigertype_ui_model::layout::*;
+use tigertype_ui_model::{
+    editor::Setting,
+    layout::*,
+    view::{self, Tone},
+};
 
 enum Control {
     Button(Retained<Button>),
@@ -9,14 +13,7 @@ enum Control {
     Label(Retained<NSTextField>),
     Art(Retained<Art>),
 }
-/// 静态文字的颜色角色，对应 Windows WM_CTLCOLORSTATIC 的正文、分组名与次要色。
-#[derive(Clone, Copy)]
-enum Tone {
-    Text,
-    Label,
-    Muted,
-}
-/// 静态文字样式：字体角色、颜色、是否垂直居中（SS_CENTERIMAGE）与水平居中（SS_CENTER）、能否折行。
+/// 静态文字样式取自共用表，只把字号与粗细换成 AppKit 字体。
 struct Role {
     font: Retained<NSFont>,
     tone: Tone,
@@ -25,28 +22,19 @@ struct Role {
     wrap: bool,
 }
 fn role(id: usize) -> Role {
-    let (font, tone, middle) = match id {
-        HEADING => (strong(20.0), Tone::Text, false),
-        _ if (GROUP..GROUP + GROUPS.len()).contains(&id) => (strong(13.0), Tone::Label, false),
-        FILE_NAME | ABOUT_TITLE => (strong(13.0), Tone::Text, false),
-        FILE_PATH | CODEPOINT => (mono(13.0), Tone::Muted, false),
-        PAGE => (mono(13.0), Tone::Muted, true),
-        CUSTOM_STATUS => (ui(12.0), Tone::Muted, true),
-        _ if (ROW_TITLE..ROW_TITLE + 5).contains(&id) => (ui(14.0), Tone::Text, true),
-        _ if (FIELD_LABEL..FIELD_LABEL + 4).contains(&id) => (ui(12.0), Tone::Muted, true),
-        _ if (ROW_DESC..ROW_DESC + 5).contains(&id)
-            || matches!(id, NOTICE | KEYS_NOTE | ABOUT_DESC | STATUS) =>
-        {
-            (ui(12.0), Tone::Muted, false)
-        }
-        _ => (ui(14.0), Tone::Text, false),
-    };
+    let t = view::text_style(id);
     Role {
-        font,
-        tone,
-        middle,
-        center: matches!(id, CODEPOINT | PAGE | STATUS),
-        wrap: matches!(id, NOTICE | STATUS | CUSTOM_STATUS) || id == ROW_DESC + 4,
+        font: if t.mono {
+            mono(t.size)
+        } else if t.strong {
+            strong(t.size)
+        } else {
+            ui(t.size)
+        },
+        tone: t.tone,
+        middle: t.middle,
+        center: t.center,
+        wrap: t.wrap,
     }
 }
 fn text(mtm: MainThreadMarker, id: usize, value: &str) -> Retained<NSTextField> {
@@ -136,7 +124,7 @@ impl Control {
         let p = e.appearance().palette();
         match self {
             Self::Button(b) => {
-                b.update(p, setting(id).is_some_and(|v| v.selected(e.draft)));
+                b.update(p, view::selected(e, id));
                 if (THEME..THEME + Theme::ALL.len()).contains(&id) {
                     b.set_preview(
                         Options {
@@ -146,15 +134,12 @@ impl Control {
                         .palette(),
                     );
                 }
-                let edits =
-                    setting(id).is_some() || (SWATCH..SWATCH + 4).contains(&id) || id == RESET;
-                b.setEnabled(
-                    !e.fatal && (!edits || !e.model.reloading()) && (id != RELOAD || !e.model.busy),
-                );
+                b.setEnabled(view::enabled(e, id));
             }
             Self::Field(f) => {
                 f.update(p);
-                f.setEnabled(!e.fatal && !e.model.reloading());
+                // 边输边查：查询在途时查询框仍可编辑，否则正在打字的焦点会丢。
+                f.setEnabled(view::enabled(e, id));
             }
             Self::Label(v) => {
                 v.setTextColor(Some(&color(match role(id).tone {
@@ -169,12 +154,8 @@ impl Control {
                     if id == PREVIEW {
                         "候选窗预览：明天我们一起去 ui，拉，隹".into()
                     } else if (KEYS..KEYS + KEYMAP.len()).contains(&id) {
-                        // 读屏朗读去掉键帽括号的文字，画面仍由 KEYMAP 自绘。
                         let (name, keys) = KEYMAP[id - KEYS];
-                        let keys = mac_keys(keys, e.appearance().page_size);
-                        let spoken: Vec<&str> =
-                            key_parts(&keys).into_iter().map(|(_, part)| part).collect();
-                        format!("{name}：{}", spoken.join(" "))
+                        view::key_speech(name, &mac_keys(keys, e.appearance().page_size))
                     } else {
                         String::new()
                     },
@@ -188,30 +169,9 @@ impl Control {
             self.title(&e.model.settings_notice);
         }
         if id == CUSTOM_STATUS {
-            // 与 Windows custom_status 同一措辞：可读时报最低对比度，否则说明原因。
-            self.title(&match &e.invalid {
-                Some(error) => format!("✗ {error}；修正后自动保存"),
-                None => format!("✓ 全部文字可读，最低对比度 {:.1} : 1", p.min_contrast()),
-            });
+            self.title(&view::custom_status(e));
         }
     }
-}
-fn setting(id: usize) -> Option<Setting> {
-    Some(match id {
-        AUTO => Setting::Auto,
-        COMMON => Setting::Common,
-        LEARNING => Setting::Learning,
-        id if (MODE..MODE + 2).contains(&id) => Setting::Mode(TypingMode::ALL[id - MODE]),
-        id if (FORM..FORM + 3).contains(&id) => Setting::Form(FORMS[id - FORM].0),
-        id if (FONT..FONT + 2).contains(&id) => Setting::Font(CandidateFont::ALL[id - FONT]),
-        id if (SIZE_CHOICE..SIZE_CHOICE + 7).contains(&id) => {
-            Setting::Size((id - SIZE_CHOICE + 3) as u8)
-        }
-        id if (THEME..THEME + Theme::ALL.len()).contains(&id) => {
-            Setting::Theme(Theme::ALL[id - THEME])
-        }
-        _ => return None,
-    })
 }
 fn button(
     mtm: MainThreadMarker,
@@ -228,15 +188,15 @@ fn button(
         p,
         None,
         handler(weak, move || match id {
-            OPEN_CONFIG => UiAction::Open,
-            RELOAD => UiAction::Reload,
-            RESET => UiAction::Reset,
-            SETTINGS => UiAction::Settings,
-            PREVIOUS => UiAction::Previous,
-            NEXT => UiAction::Next,
-            COPY => UiAction::Copy,
-            id if (SWATCH..SWATCH + 4).contains(&id) => UiAction::Palette(id - SWATCH),
-            _ => UiAction::Set(setting(id).expect("布局只创建已知动作")),
+            OPEN_CONFIG => Action::Open,
+            RELOAD => Action::Reload,
+            RESET => Action::Reset,
+            SETTINGS => Action::Settings,
+            PREVIOUS => Action::Previous,
+            NEXT => Action::Next,
+            COPY => Action::Copy,
+            id if (SWATCH..SWATCH + 4).contains(&id) => Action::Palette(id - SWATCH),
+            _ => Action::Set(Setting::of(id).expect("布局只创建已知动作")),
         }),
     );
     b.style(id);
@@ -257,7 +217,7 @@ fn tool_control(s: &State, weak: &WeakState, page: usize, id: usize, frame: NSRe
             |_| {},
             move |v| {
                 if let Some(s) = w.upgrade() {
-                    act(&s, UiAction::Color(id - CUSTOM, v));
+                    act(&s, Action::Color(id - CUSTOM, v));
                 }
             },
         );
@@ -265,40 +225,11 @@ fn tool_control(s: &State, weak: &WeakState, page: usize, id: usize, frame: NSRe
         field.on_focus(redraw(weak));
         return Control::Field(field);
     }
-    let title = if let Some((_, name, _)) = TOGGLES.iter().find(|(key, ..)| *key == id) {
-        caption(name)
-    } else if (MODE..MODE + 2).contains(&id) {
-        TypingMode::ALL[id - MODE].name().into()
-    } else if (FORM..FORM + 3).contains(&id) {
-        FORMS[id - FORM].1.into()
-    } else if (FONT..FONT + 2).contains(&id) {
-        CandidateFont::ALL[id - FONT].name().into()
-    } else if (SIZE_CHOICE..SIZE_CHOICE + 7).contains(&id) {
-        (id - SIZE_CHOICE + 3).to_string()
-    } else if (THEME..THEME + Theme::ALL.len()).contains(&id) {
-        Theme::ALL[id - THEME].name().into()
-    } else if (SWATCH..SWATCH + 4).contains(&id) {
-        format!("{}色", COLORS[id - SWATCH].0)
-    } else {
-        match id {
-            HEADING => PAGES[page].0.into(),
-            id if (GROUP..GROUP + GROUPS.len()).contains(&id) => GROUPS[id - GROUP].into(),
-            id if (ROW_TITLE..ROW_TITLE + 4).contains(&id) => caption(CHOICES[id - ROW_TITLE].0),
-            id if (ROW_DESC..ROW_DESC + 4).contains(&id) => caption(CHOICES[id - ROW_DESC].1),
-            id if id == ROW_TITLE + 4 => RELOAD_TITLE.into(),
-            id if id == ROW_DESC + 4 => RELOAD_DESC.into(),
-            OPEN_CONFIG => OPEN_TEXT.into(),
-            RELOAD => RELOAD_TEXT.into(),
-            RESET => RESET_TEXT.into(),
-            FILE_NAME => "settings.toml".into(),
-            FILE_PATH => s.config.display().to_string(),
-            ABOUT_TITLE => ABOUT_NAME.into(),
-            ABOUT_DESC => about_description(),
-            KEYS_NOTE => KEYS_NOTE_TEXT.into(),
-            _ => String::new(),
-        }
+    let title = match id {
+        FILE_PATH => s.config.display().to_string(),
+        _ => caption(&view::text(id, page)),
     };
-    if setting(id).is_some()
+    if Setting::of(id).is_some()
         || (SWATCH..SWATCH + 4).contains(&id)
         || [OPEN_CONFIG, RELOAD, RESET].contains(&id)
     {
@@ -351,7 +282,7 @@ impl SettingsWidgets {
                 box_rect(b),
                 p,
                 None,
-                handler(weak, move || UiAction::Page(i)),
+                handler(weak, move || Action::Page(i)),
             );
             control.style(id);
             add(&root, &control);
@@ -401,7 +332,7 @@ impl SettingsWidgets {
                 ),
                 p,
                 Some(c),
-                handler(weak, move || UiAction::Swatch(c)),
+                handler(weak, move || Action::Swatch(c)),
             );
             add(&swatches, &b);
             swatch_buttons.push(b);
@@ -431,9 +362,9 @@ impl SettingsWidgets {
         );
         self.notice.update(NOTICE, s);
         for (i, b) in self.nav.iter().enumerate() {
-            b.update(p, i == s.page);
+            b.update(p, i == e.page);
         }
-        let view: &NSView = &self.pages[s.page].canvas;
+        let view: &NSView = &self.pages[e.page].canvas;
         if self
             .scroll
             .documentView()
@@ -495,12 +426,7 @@ impl SettingsWidgets {
                 ..Scene::default()
             },
         );
-        self.swatches.setHidden(
-            s.swatch.is_none()
-                || s.page != 1
-                || e.draft.theme != Theme::Custom
-                || e.model.reloading(),
-        );
+        self.swatches.setHidden(!e.swatch_open());
         for b in &self.swatch_buttons {
             b.update(p, false);
         }
@@ -561,44 +487,27 @@ impl LookupWidgets {
                         p,
                         move |q| {
                             if let Some(s) = w.upgrade() {
-                                act(&s, UiAction::Search(q));
+                                act(&s, Action::Query(q));
                             }
                         },
                         move |q| {
                             if let Some(s) = changed.upgrade() {
-                                act(&s, UiAction::Query(q));
+                                act(&s, Action::Query(q));
                             }
                         },
                     );
                     f.setPlaceholderString(Some(&NSString::from_str(QUERY_HINT)));
-                    f.setStringValue(&NSString::from_str(&s.query));
+                    f.setStringValue(&NSString::from_str(&s.editor.query));
                     f.on_focus(redraw(weak));
                     Control::Field(f)
                 }
                 GLYPH | CODES | FULL | READING | PARTS => {
                     Control::Art(Art::new(s.mtm, id, frame, s.editor.appearance()))
                 }
-                SETTINGS | PREVIOUS | NEXT | COPY => button(
-                    s.mtm,
-                    weak,
-                    id,
-                    match id {
-                        SETTINGS => "设置",
-                        PREVIOUS => "上一页",
-                        NEXT => "下一页",
-                        _ => "复制",
-                    },
-                    frame,
-                    p,
-                ),
-                _ => {
-                    let title = if (FIELD_LABEL..FIELD_LABEL + 4).contains(&id) {
-                        ["可用编码", "完整编码", "读音", "拆分"][id - FIELD_LABEL]
-                    } else {
-                        ""
-                    };
-                    Control::Label(text(s.mtm, id, title))
+                SETTINGS | PREVIOUS | NEXT | COPY => {
+                    button(s.mtm, weak, id, &view::text(id, 0), frame, p)
                 }
+                _ => Control::Label(text(s.mtm, id, &view::text(id, 0))),
             };
             add(&root, control.view());
             controls.push((id, control));
@@ -618,13 +527,13 @@ impl LookupWidgets {
                 NSRect::ZERO,
                 p,
                 None,
-                handler(weak, move || UiAction::Select(i)),
+                handler(weak, move || Action::Select(i)),
             );
             b.style(LIST);
             let w = weak.clone();
             b.navigation(move |next| {
                 if let Some(s) = w.upgrade() {
-                    act(&s, UiAction::Move(next));
+                    act(&s, Action::Move(next));
                 }
             });
             add(&strip, &b);
@@ -644,27 +553,9 @@ impl LookupWidgets {
         let e = &s.editor;
         let p = e.appearance().palette();
         self.native.decorate(p, p.window);
-        let item = e
-            .model
-            .result
-            .as_ref()
-            .and_then(|r| r.items.get(e.selected));
-        let join = |items: &[String], separator: &str| {
-            if items.is_empty() {
-                "缺资料".into()
-            } else {
-                items.join(separator)
-            }
-        };
+        let item = e.item();
         // 四行资料先算出来：行高按其折行现排，绘制再用同一份文字。
-        let texts: [String; 4] = item.map_or_else(Default::default, |i| {
-            [
-                join(&i.learning.codes, " "),
-                join(&i.learning.full_codes, " "),
-                join(&i.learning.readings, "、"),
-                tigertype_ui_model::model::parts(i),
-            ]
-        });
+        let texts: [String; 4] = item.map_or_else(Default::default, view::detail_texts);
         let size = self.scroll.contentSize();
         let font = ui(14.0);
         let spec = lookup_spec(
@@ -693,32 +584,8 @@ impl LookupWidgets {
         );
         for (id, control) in &self.controls {
             control.update(*id, s);
-            let detail = [GLYPH, CODEPOINT, COPY, CODES, FULL, READING, PARTS].contains(id)
-                || (FIELD_LABEL..FIELD_LABEL + 4).contains(id);
-            control
-                .view()
-                .setHidden((detail && item.is_none()) || (*id == STATUS && item.is_some()));
-            let value = match *id {
-                STATUS => Some(e.model.notice.clone()),
-                PAGE => Some(
-                    e.model
-                        .result
-                        .as_ref()
-                        .map(|_| (e.model.page + 1).to_string())
-                        .unwrap_or_default(),
-                ),
-                GLYPH => Some(item.map(|i| i.text.clone()).unwrap_or_default()),
-                CODEPOINT => Some(
-                    item.filter(|i| i.text.chars().count() == 1)
-                        .map(|i| format!("U+{:04X}", i.text.chars().next().unwrap() as u32))
-                        .unwrap_or_default(),
-                ),
-                CODES => Some(texts[0].clone()),
-                FULL => Some(texts[1].clone()),
-                READING => Some(texts[2].clone()),
-                PARTS => Some(texts[3].clone()),
-                _ => None,
-            };
+            control.view().setHidden(!view::lookup_visible(e, *id));
+            let value = view::lookup_value(e, *id, &texts);
             if let Some(value) = value {
                 if let Control::Art(a) = control {
                     a.update(e.appearance(), value);
@@ -729,24 +596,6 @@ impl LookupWidgets {
             // 文字先更新再定位，垂直居中按新内容的行高计算。
             if let Some((_, b)) = spec.controls.iter().find(|(key, _)| key == id) {
                 control.place(*id, box_rect(*b));
-            }
-        }
-        for (id, c) in &self.controls {
-            match c {
-                Control::Button(b) => b.setEnabled(
-                    !e.fatal
-                        && match *id {
-                            PREVIOUS => !e.model.busy && e.model.page > 0,
-                            NEXT => {
-                                !e.model.busy && e.model.result.as_ref().is_some_and(|r| r.has_more)
-                            }
-                            COPY => item.is_some(),
-                            _ => true,
-                        },
-                ),
-                // 边输边查：查询在途时仍可编辑，否则正在打字的焦点会丢。
-                Control::Field(f) => f.setEnabled(!e.fatal),
-                _ => {}
             }
         }
         let list = spec.controls.iter().find(|(id, _)| *id == LIST).unwrap().1;
