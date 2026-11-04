@@ -19,8 +19,9 @@ use tigertype_contracts::{
     ui::{Reply, Request},
 };
 use tigertype_ui_model::{
+    editor::{Action, Editor, Setting, Task},
     layout::*,
-    model::{Effect, Model, details, parts},
+    view,
 };
 use windows_sys::Win32::{
     Foundation::{

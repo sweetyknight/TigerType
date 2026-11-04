@@ -1,4 +1,4 @@
-//! 查字/设置窗口的构建及 Model 到控件的映射；只返回语义请求，由事件循环发送。
+//! 查字/设置窗口的构建及共用状态机到控件的映射；只返回语义请求，由事件循环发送。
 use super::controls::*;
 use super::drawing::*;
 use super::window::*;
@@ -9,7 +9,7 @@ pub(super) fn lookup_window(class: &Class, options: &Options) -> Result<Window, 
     let style = (WS_OVERLAPPEDWINDOW & !WS_MAXIMIZEBOX) | WS_VSCROLL;
     let mut window = Window::create(&class.0, LOOKUP_TITLE, null_mut(), style)?;
     // 零尺寸标签只为读屏名称与 Alt+Q；查询框里另画占位提示。
-    window.add(QUERY_LABEL, "STATIC", "汉字或拼音(&Q)", 0)?;
+    window.add(QUERY_LABEL, "STATIC", &view::text(QUERY_LABEL, 0), 0)?;
     window.add(QUERY, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL as u32)?;
     // 粘贴上限保留足够余量；超过业务上限明确报错，不把截断文本当成有效查询。
     window.send(QUERY, EM_SETLIMITTEXT, 4096, 0);
@@ -24,32 +24,24 @@ pub(super) fn lookup_window(class: &Class, options: &Options) -> Result<Window, 
                 | LBS_NOINTEGRALHEIGHT
                 | LBS_MULTICOLUMN) as u32,
     )?;
-    window.add(PREVIOUS, "BUTTON", "上一页(&P)", WS_TABSTOP)?;
+    window.add(PREVIOUS, "BUTTON", &view::text(PREVIOUS, 0), WS_TABSTOP)?;
     window.add(PAGE, "STATIC", "", SS_CENTER | SS_CENTERIMAGE)?;
-    window.add(NEXT, "BUTTON", "下一页(&N)", WS_TABSTOP)?;
+    window.add(NEXT, "BUTTON", &view::text(NEXT, 0), WS_TABSTOP)?;
     window.add(GLYPH, "STATIC", "", SS_OWNERDRAW)?;
     window.add(CODEPOINT, "STATIC", "", SS_CENTER)?;
-    window.add(COPY, "BUTTON", "复制(&C)", WS_TABSTOP)?;
-    for (index, (value, label)) in [
-        (CODES, "可用编码"),
-        (FULL, "完整编码"),
-        (READING, "读音"),
-        (PARTS, "拆分"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    window.add(COPY, "BUTTON", &view::text(COPY, 0), WS_TABSTOP)?;
+    for (index, value) in [CODES, FULL, READING, PARTS].into_iter().enumerate() {
         window.add(
             FIELD_LABEL + index,
             "STATIC",
-            label,
+            &view::text(FIELD_LABEL + index, 0),
             SS_CENTERIMAGE | SS_NOPREFIX,
         )?;
         // 四项都自绘：读音也要按共用布局折行，行高才与布局一致。
         window.add(value, "STATIC", "", SS_OWNERDRAW)?;
     }
     window.add(STATUS, "STATIC", "", SS_CENTER | SS_NOPREFIX)?;
-    window.add(SETTINGS, "BUTTON", "设置(&S)", WS_TABSTOP)?;
+    window.add(SETTINGS, "BUTTON", &view::text(SETTINGS, 0), WS_TABSTOP)?;
     // 隐藏控件不显示、不可聚焦，只承载当前字的资料供标准复制。
     window.add(CLIP, "EDIT", "", ES_MULTILINE as u32 | ES_READONLY as u32)?;
     window.show(CLIP, false);
@@ -68,43 +60,42 @@ pub(super) fn settings_window(
 ) -> Result<Window, String> {
     let style = WS_CAPTION | WS_SYSMENU | WS_VSCROLL;
     let mut window = Window::create(&class.0, SETTINGS_TITLE, owner, style)?;
-    for (k, (name, _)) in PAGES.iter().enumerate() {
+    for k in 0..PAGES.len() {
         let group = if k == 0 { WS_GROUP | WS_TABSTOP } else { 0 };
-        window.add(NAV + k, "BUTTON", name, group | BS_AUTORADIOBUTTON as u32)?;
+        let name = view::text(NAV + k, 0);
+        window.add(NAV + k, "BUTTON", &name, group | BS_AUTORADIOBUTTON as u32)?;
     }
     // 侧栏底部只在出错时显示原因，平时留空。
     window.add(NOTICE, "STATIC", "", SS_NOPREFIX)?;
-    window.add(HEADING, "STATIC", PAGES[0].0, SS_NOPREFIX)?;
-    for (k, name) in GROUPS.iter().enumerate() {
-        window.add(GROUP + k, "STATIC", name, SS_NOPREFIX)?;
+    window.add(HEADING, "STATIC", &view::text(HEADING, 0), SS_NOPREFIX)?;
+    for k in 0..GROUPS.len() {
+        window.add(GROUP + k, "STATIC", &view::text(GROUP + k, 0), SS_NOPREFIX)?;
     }
     let choice = |window: &mut Window, row: usize| -> Result<(), String> {
-        let (title, description, first, count, _) = CHOICES[row];
-        window.add(ROW_TITLE + row, "STATIC", title, SS_CENTERIMAGE)?;
-        window.add(ROW_DESC + row, "STATIC", description, SS_NOPREFIX)?;
-        let names: Vec<String> = match first {
-            MODE => TypingMode::ALL.iter().map(|m| m.name().into()).collect(),
-            FORM => FORMS.iter().map(|(_, name)| (*name).into()).collect(),
-            FONT => CandidateFont::ALL.iter().map(|f| f.name().into()).collect(),
-            _ => Options::PAGE_SIZES.map(|n| n.to_string()).collect(),
-        };
-        debug_assert_eq!(names.len(), count);
-        for (k, name) in names.iter().enumerate() {
+        let (_, _, first, count, _) = CHOICES[row];
+        let title = view::text(ROW_TITLE + row, 0);
+        window.add(ROW_TITLE + row, "STATIC", &title, SS_CENTERIMAGE)?;
+        let description = view::text(ROW_DESC + row, 0);
+        window.add(ROW_DESC + row, "STATIC", &description, SS_NOPREFIX)?;
+        for k in 0..count {
             // 每组首项开新组并作 Tab 停靠；组内方向键切换，选中项随之勾选。
             let style = if k == 0 { WS_GROUP | WS_TABSTOP } else { 0 };
-            window.add(first + k, "BUTTON", name, style | BS_AUTORADIOBUTTON as u32)?;
+            let name = view::text(first + k, 0);
+            window.add(
+                first + k,
+                "BUTTON",
+                &name,
+                style | BS_AUTORADIOBUTTON as u32,
+            )?;
         }
         Ok(())
     };
     let toggle = |window: &mut Window, id: usize| -> Result<(), String> {
-        let title = TOGGLES
-            .iter()
-            .find(|(key, ..)| *key == id)
-            .map_or("", |(_, t, _)| *t);
+        let title = view::text(id, 0);
         window.add(
             id,
             "BUTTON",
-            title,
+            &title,
             WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX as u32,
         )
     };
@@ -118,22 +109,19 @@ pub(super) fn settings_window(
     choice(&mut window, 2)?;
     choice(&mut window, 3)?;
     toggle(&mut window, LEARNING)?;
-    for (k, theme) in Theme::ALL.iter().enumerate() {
+    for k in 0..Theme::ALL.len() {
         let style = if k == 0 { WS_GROUP | WS_TABSTOP } else { 0 };
+        let name = view::text(THEME + k, 0);
         window.add(
             THEME + k,
             "BUTTON",
-            theme.name(),
+            &name,
             style | BS_AUTORADIOBUTTON as u32,
         )?;
     }
-    for (k, (name, _)) in COLORS.iter().enumerate() {
-        window.add(
-            SWATCH + k,
-            "BUTTON",
-            &format!("{name}色"),
-            WS_GROUP | WS_TABSTOP,
-        )?;
+    for k in 0..COLORS.len() {
+        let name = view::text(SWATCH + k, 0);
+        window.add(SWATCH + k, "BUTTON", &name, WS_GROUP | WS_TABSTOP)?;
         window.add(
             CUSTOM + k,
             "EDIT",
@@ -148,7 +136,7 @@ pub(super) fn settings_window(
     window.add(KEYS_NOTE, "STATIC", KEYS_NOTE_TEXT, SS_NOPREFIX)?;
     for (k, (label, spec)) in KEYMAP.iter().enumerate() {
         // 读屏朗读去掉键帽括号的文字，画面由自绘给出。
-        let spoken = format!("{label}：{}", spec.replace(['[', ']'], ""));
+        let spoken = view::key_speech(label, spec);
         window.add(KEYS + k, "STATIC", &spoken, SS_OWNERDRAW)?;
     }
     // 高级
@@ -203,60 +191,42 @@ pub(super) fn check(window: &Window, id: usize, on: bool) {
         0,
     );
 }
-pub(super) fn set_custom(window: &Window, custom: CustomColors) {
-    for (k, color) in [custom.window, custom.text, custom.highlight, custom.accent]
+/// 设置窗会改动草稿的控件：开关、单选、主题与侧栏分区。
+fn draft_controls() -> impl Iterator<Item = usize> {
+    [AUTO, COMMON, LEARNING]
         .into_iter()
-        .enumerate()
-    {
-        window.text(CUSTOM + k, &format!("#{color:06X}"));
+        .chain(MODE..MODE + TypingMode::ALL.len())
+        .chain(FORM..FORM + FORMS.len())
+        .chain(FONT..FONT + CandidateFont::ALL.len())
+        .chain(SIZE_CHOICE..SIZE_CHOICE + Options::PAGE_SIZES.count())
+        .chain(THEME..THEME + Theme::ALL.len())
+        .chain(NAV..NAV + PAGES.len())
+}
+/// 控件显示共用草稿：开关与单选按草稿勾选。控件不再是草稿本身，只是它的画面；自绘仍按控件状态取色。
+/// 色值逐框比较动作前的草稿，只回写发生变化的那一框，避免吞掉其他框尚在排队的编辑；
+/// 初次显示和明确丢弃草稿时传 None；重新载入期间拒收编辑，也须恢复全部只读草稿。
+pub(super) fn sync_settings(window: &Window, editor: &Editor, before: Option<&[String; 4]>) {
+    for id in draft_controls() {
+        check(window, id, view::selected(editor, id));
+    }
+    for (k, value) in editor.colors.iter().enumerate().filter(|(k, value)| {
+        editor.model.reloading() || before.is_none_or(|before| before[*k] != **value)
+    }) {
+        let current = String::from_utf16_lossy(&control_text(window.control(CUSTOM + k)));
+        if current != *value {
+            window.text(CUSTOM + k, value);
+        }
     }
 }
-pub(super) fn set_options(window: &Window, options: Options) {
-    check(window, AUTO, options.auto_commit_four);
-    check(window, COMMON, options.common_only);
-    check(window, LEARNING, options.show_learning);
-    for (k, (form, _)) in FORMS.iter().enumerate() {
-        check(window, FORM + k, *form == options.output_form);
-    }
-    for (k, font) in CandidateFont::ALL.iter().enumerate() {
-        check(window, FONT + k, *font == options.candidate_font);
-    }
-    for (k, theme) in Theme::ALL.iter().enumerate() {
-        check(window, THEME + k, *theme == options.theme);
-    }
-    for (k, mode) in TypingMode::ALL.iter().enumerate() {
-        check(window, MODE + k, *mode == options.typing_mode);
-    }
-    for (k, size) in Options::PAGE_SIZES.enumerate() {
-        check(window, SIZE_CHOICE + k, size == options.page_size);
-    }
-    set_custom(window, options.custom);
-}
-pub(super) fn query(window: &Window) -> Result<String, String> {
-    // SAFETY: 文本最多读取 128 个 UTF-16 单元，足够容纳 64 个非 BMP 字符；绝不接受截断查询。
-    let length = unsafe { GetWindowTextLengthW(window.control(QUERY)) };
-    if length > 128 {
-        return Err("查字文本超过 64 个字符".into());
-    }
-    let mut buffer = [0u16; 129];
-    // SAFETY: 缓冲区长度与传入容量相同；控件和读取都在同一线程。
-    let read = unsafe { GetWindowTextW(window.control(QUERY), buffer.as_mut_ptr(), 129) };
-    String::from_utf16(&buffer[..read as usize]).map_err(|_| "查询包含无效 Unicode".into())
-}
-pub(super) fn selected<'a>(
-    main: &Window,
-    model: &'a Model,
-) -> Option<&'a tigertype_contracts::LookupItem> {
-    let index = main.send(LIST, LB_GETCURSEL, 0, 0);
-    model
-        .result
-        .as_ref()
-        .and_then(|page| page.items.get(usize::try_from(index).ok()?))
+/// 查询框全文；业务上限与空查询由共用状态机判定，不在此截断，避免把截断文本当成有效查询。
+pub(super) fn query(window: &Window) -> String {
+    String::from_utf16_lossy(&control_text(window.control(QUERY)))
 }
 /// 换上新查询页：字块逐个列出，列宽容得下最长的词，默认选中首项。
-pub(super) fn show_page(main: &Window, model: &Model) {
+pub(super) fn show_page(main: &Window, editor: &Editor) {
     main.send(LIST, LB_RESETCONTENT, 0, 0);
-    let items = model
+    let items = editor
+        .model
         .result
         .as_ref()
         .map_or(&[][..], |page| &page.items[..]);
@@ -277,61 +247,46 @@ pub(super) fn show_page(main: &Window, model: &Model) {
     main.send(
         LIST,
         LB_SETCURSEL,
-        if items.is_empty() { usize::MAX } else { 0 },
+        if items.is_empty() {
+            usize::MAX
+        } else {
+            editor.selected
+        },
         0,
     );
-    show_detail(main, model);
+    show_detail(main, editor);
 }
 /// 详情卡：有选中字时显示资料，否则显示提示（空态、无结果或出错）。
-pub(super) fn show_detail(main: &Window, model: &Model) {
-    let item = selected(main, model);
-    if let Some(item) = item {
-        let join = |items: &[String], separator: &str| {
-            if items.is_empty() {
-                "缺资料".to_owned()
-            } else {
-                items.join(separator)
-            }
-        };
-        let mut chars = item.text.chars();
-        let point = match (chars.next(), chars.next()) {
-            (Some(c), None) => format!("U+{:04X}", c as u32),
-            _ => String::new(),
-        };
+pub(super) fn show_detail(main: &Window, editor: &Editor) {
+    if let Some(item) = editor.item() {
+        let [codes, full, reading, parts] = view::detail_texts(item);
         main.text(GLYPH, &item.text);
-        main.text(CODEPOINT, &point);
-        main.text(CODES, &join(&item.learning.codes, " "));
-        main.text(FULL, &join(&item.learning.full_codes, " "));
-        main.text(READING, &join(&item.learning.readings, "、"));
-        main.text(PARTS, &parts(item));
-        main.text(CLIP, &details(item));
+        main.text(CODEPOINT, &view::codepoint(item));
+        main.text(CODES, &codes);
+        main.text(FULL, &full);
+        main.text(READING, &reading);
+        main.text(PARTS, &parts);
     }
-    for id in [GLYPH, CODEPOINT, COPY, CODES, FULL, READING, PARTS]
+    for id in [GLYPH, CODEPOINT, COPY, CODES, FULL, READING, PARTS, STATUS]
         .into_iter()
         .chain(FIELD_LABEL..FIELD_LABEL + 4)
     {
-        main.show(id, item.is_some());
+        main.show(id, view::lookup_visible(editor, id));
     }
-    main.show(STATUS, item.is_none());
     // 行高随资料折行而变，换字后立即重排。
     main.layout_lookup();
 }
-pub(super) fn refresh(main: &Window, settings: &Window, model: &Model) {
-    // 查询框始终可编辑：边输边查时在途请求不能禁用它，否则正在打字的焦点会丢。
-    main.enable(
-        PREVIOUS,
-        !model.busy && model.page > 0 && model.result.is_some(),
-    );
-    main.enable(
-        NEXT,
-        !model.busy && model.result.as_ref().is_some_and(|p| p.has_more),
-    );
-    main.enable(COPY, selected(main, model).is_some());
-    main.text(STATUS, &model.notice);
-    let page = model.result.as_ref().map(|_| (model.page + 1).to_string());
+/// 查询框始终可编辑：边输边查时在途请求不能禁用它，否则正在打字的焦点会丢。
+/// 设置控件在重新载入期间也不停用（停用会夺走键盘焦点）；其间的编辑由共用状态机拒收，控件随后按草稿复原。
+pub(super) fn refresh(main: &Window, settings: &Window, editor: &Editor) {
+    for id in [PREVIOUS, NEXT, COPY] {
+        main.enable(id, view::enabled(editor, id));
+    }
+    main.text(STATUS, &editor.model.notice);
+    let page = view::lookup_value(editor, PAGE, &Default::default());
     main.text(PAGE, &page.unwrap_or_default());
-    settings.text(NOTICE, &model.settings_notice);
-    settings.text(CUSTOM_STATUS, &custom_status(settings.handle));
+    settings.text(NOTICE, &editor.model.settings_notice);
+    settings.text(CUSTOM_STATUS, &view::custom_status(editor));
 }
 /// 确认的配色/字体用于两个窗口：换绘制配色、标题栏与字体后整体重画。
 pub(super) fn apply_look(
@@ -355,7 +310,7 @@ pub(super) fn select_page(
     for k in 0..PAGES.len() {
         check(settings, NAV + k, k == page);
     }
-    settings.text(HEADING, PAGES[page].0);
+    settings.text(HEADING, &view::text(HEADING, page));
     set_scroll_offset(settings.handle, 0);
     settings.layout(face)?;
     let nav = settings.control(NAV + page);
@@ -434,92 +389,59 @@ pub(super) fn palette_menu(settings: &Window, k: usize) -> Option<u32> {
             .and_then(|index| SWATCHES.get(index).copied())
     }
 }
-/// 即时生效：草稿合法且与已确认设置不同才保存；在途时不排队，回复后由事件循环再比一次。
-/// 草稿不合法（色值未填完、偏蓝或不可读）时不保存，侧栏写明原因，在其他分区改设置时也看得到；
-/// 草稿回到已确认设置后清掉这条提示。
-pub(super) fn commit(settings: &Window, model: &mut Model) -> Option<Request> {
-    match read_options(settings.handle) {
-        Ok(options) if options == model.options => {
-            if model.settings_notice.starts_with('✗') {
-                model.settings_notice.clear();
-            }
-            None
-        }
-        Ok(options) if !model.busy => model.save(options).ok(),
-        Ok(_) => None,
-        Err(error) => {
-            model.settings_notice = format!("✗ 未保存：{error}");
-            None
-        }
-    }
-}
-/// 草稿里会影响设置的控件：点击后即保存。
-fn is_option(id: usize) -> bool {
-    matches!(id, AUTO | COMMON | LEARNING)
-        || (MODE..MODE + TypingMode::ALL.len()).contains(&id)
-        || (FORM..FORM + FORMS.len()).contains(&id)
-        || (FONT..FONT + CandidateFont::ALL.len()).contains(&id)
-        || (SIZE_CHOICE..SIZE_CHOICE + Options::PAGE_SIZES.count()).contains(&id)
-}
-/// 设置窗的命令：切换分区、即时保存、色板、打开与重新载入配置文件。
+/// 设置窗的命令：切换分区、草稿编辑、色板、打开与重新载入配置文件。保存规则全在共用状态机。
 pub(super) fn settings_action(
     settings: &mut Window,
-    model: &mut Model,
+    editor: &mut Editor,
     id: usize,
     notification: u32,
     settings_path: &Path,
 ) -> Result<Option<Request>, String> {
-    let face = model.options.candidate_font;
-    Ok(match notification {
+    let (face, colors) = (editor.model.options.candidate_font, editor.colors.clone());
+    let action = match notification {
         EN_CHANGE if (CUSTOM..CUSTOM + COLORS.len()).contains(&id) => {
-            repaint(settings);
-            commit(settings, model)
+            let value = String::from_utf16_lossy(&control_text(settings.control(id)));
+            Action::Color(id - CUSTOM, value)
         }
         BN_CLICKED if (NAV..NAV + PAGES.len()).contains(&id) => {
-            select_page(settings, id - NAV, face)?;
-            None
+            editor.act(Action::Page(id - NAV));
+            select_page(settings, editor.page, face)?;
+            return Ok(None);
         }
         BN_CLICKED if (SWATCH..SWATCH + COLORS.len()).contains(&id) => {
-            // 改写色值框会触发 EN_CHANGE，随后照常校验并保存。
-            if let Some(color) = palette_menu(settings, id - SWATCH) {
-                settings.text(CUSTOM + id - SWATCH, &format!("#{color:06X}"));
+            match palette_menu(settings, id - SWATCH) {
+                Some(color) => Action::Color(id - SWATCH, format!("#{color:06X}")),
+                None => return Ok(None),
             }
-            None
-        }
-        BN_CLICKED if (THEME..THEME + Theme::ALL.len()).contains(&id) => {
-            // 离开自定义时，未填完或不合格的四色退回已保存的值，免得挡住换预设主题的保存。
-            if id != THEME + Theme::ALL.len() - 1 && read_options(settings.handle).is_err() {
-                set_custom(settings, model.options.custom);
-            }
-            // 选不选自定义决定是否露出四色编辑行。
-            settings.layout(face)?;
-            commit(settings, model)
-        }
-        BN_CLICKED if is_option(id) => {
-            repaint(settings);
-            commit(settings, model)
         }
         BN_CLICKED => match id {
-            RESET => {
-                set_custom(settings, CustomColors::default());
-                None
-            }
-            OPEN_CONFIG => {
-                model.settings_notice = match open_config(settings_path) {
-                    Ok(()) => "已用默认编辑器打开 settings.toml".into(),
-                    Err(error) => error,
-                };
-                None
-            }
-            RELOAD => match model.reload() {
-                Ok(request) => Some(request),
-                Err(error) => {
-                    model.settings_notice = error.into();
-                    None
-                }
+            RESET => Action::Reset,
+            OPEN_CONFIG => Action::Open,
+            RELOAD => Action::Reload,
+            _ => match Setting::of(id) {
+                Some(setting) => Action::Set(setting),
+                None => return Ok(None),
             },
-            _ => None,
         },
+        _ => return Ok(None),
+    };
+    let request = match editor.act(action) {
+        Some(Task::Send(request)) => Some(request),
+        Some(Task::OpenConfig) => {
+            editor.model.settings_notice = match open_config(settings_path) {
+                Ok(()) => "已用默认编辑器打开 settings.toml".into(),
+                Err(error) => error,
+            };
+            None
+        }
         _ => None,
-    })
+    };
+    sync_settings(settings, editor, Some(&colors));
+    if (THEME..THEME + Theme::ALL.len()).contains(&id) {
+        // 选不选自定义决定是否露出四色编辑行。
+        settings.layout(face)?;
+    } else {
+        repaint(settings);
+    }
+    Ok(request)
 }

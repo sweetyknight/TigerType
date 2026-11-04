@@ -104,7 +104,7 @@ fn hidden_startup_present_worker() {
         Path::new("synthetic-settings.toml"),
     )
     .unwrap();
-    let mut model = Model::new(options);
+    let editor = Editor::new(options);
     // 私有桌面内仍移到屏幕外；不覆盖用户桌面、不加载配置或激活输入法。
     for window in [&main, &settings] {
         // SAFETY: 两个窗口由本线程持有，移动时不激活且不改变尺寸或 z 序。
@@ -120,16 +120,16 @@ fn hidden_startup_present_worker() {
             );
         }
     }
-    present(&main, &settings, &mut model, Panel::Settings);
+    present(&main, &settings, &editor, Panel::Settings);
     assert!(visible(&settings), "隐藏启动时首次设置唤起必须可见");
     assert!(!visible(&main), "单独开设置不连带显示查字窗");
-    present(&main, &settings, &mut model, Panel::Lookup);
+    present(&main, &settings, &editor, Panel::Lookup);
     assert!(visible(&main));
     // SAFETY: 仅最小化本测试窗口，接着经正式唤起路径还原。
     unsafe {
         ShowWindow(main.handle, SW_MINIMIZE);
     }
-    present(&main, &settings, &mut model, Panel::Lookup);
+    present(&main, &settings, &editor, Panel::Lookup);
     assert!(visible(&main));
     // SAFETY: 只查询本测试窗口是否已还原。
     assert_eq!(unsafe { IsIconic(main.handle) }, 0);
@@ -347,16 +347,16 @@ fn layouts_keep_controls_inside_their_areas() {
 fn window_menu_closes_when_the_backend_stops(
     main: &mut Window,
     settings: &mut Window,
-    model: &mut Model,
+    editor: &mut Editor,
 ) {
     for kind in 0..3 {
-        menu_closes_when_the_backend_stops(main, settings, model, kind);
+        menu_closes_when_the_backend_stops(main, settings, editor, kind);
     }
 }
 fn menu_closes_when_the_backend_stops(
     main: &mut Window,
     settings: &mut Window,
-    model: &mut Model,
+    editor: &mut Editor,
     kind: usize,
 ) {
     let (sender, show) = crate::mailbox::<Panel>().unwrap();
@@ -385,7 +385,7 @@ fn menu_closes_when_the_backend_stops(
         event_loop(
             main,
             settings,
-            model,
+            editor,
             &requests,
             &inbox,
             &show,
@@ -394,6 +394,120 @@ fn menu_closes_when_the_backend_stops(
         .is_ok()
     );
     watch(None);
+}
+/// 让设置窗控件显示给定设置（测试绘制用）；正式路径由共用状态机同步。
+fn show_options(settings: &Window, options: Options) {
+    sync_settings(settings, &Editor::new(options), None);
+}
+/// 保存回复补处理空查询或超长查询时，不会再收到查字回复，消息泵必须直接撤下旧结果。
+fn saved_reply_clears_lookup_controls_when_catch_up_clears_the_model() {
+    for query in [String::new(), "你".repeat(65)] {
+        let class = Class::register().unwrap();
+        let defaults = Options::default();
+        let mut main = lookup_window(&class, &defaults).unwrap();
+        let mut settings =
+            settings_window(&class, main.handle, &defaults, Path::new("synthetic.toml")).unwrap();
+        let mut editor = Editor::new(defaults);
+        editor.act(Action::Query("你".into()));
+        editor.reply(Ok(Reply::Lookup(Ok(tigertype_contracts::LookupPage {
+            items: vec![tigertype_contracts::LookupItem {
+                text: "你".into(),
+                learning: Default::default(),
+                roots: vec![],
+            }],
+            has_more: false,
+        }))));
+        show_page(&main, &editor);
+        let Some(Task::Send(Request::SaveSettings(saved))) = editor.act(Action::Set(Setting::Auto))
+        else {
+            panic!("缺少保存请求");
+        };
+        editor.act(Action::Query(query));
+        let (_show_sender, show) = crate::mailbox::<Panel>().unwrap();
+        let (requests, _receiver) = std::sync::mpsc::sync_channel(1);
+        let (replies, inbox) = crate::mailbox().unwrap();
+        replies.send(Reply::Saved(Ok(saved))).unwrap();
+        drop(replies);
+        assert!(
+            event_loop(
+                &mut main,
+                &mut settings,
+                &mut editor,
+                &requests,
+                &inbox,
+                &show,
+                (Path::new("synthetic.toml"), None),
+            )
+            .unwrap_err()
+            .contains("工作线程已退出")
+        );
+        assert!(editor.model.result.is_none());
+        assert_eq!(main.send(LIST, LB_GETCOUNT, 0, 0), 0);
+        assert!(!shown(main.control(GLYPH)) && shown(main.control(STATUS)));
+    }
+}
+/// 两框的 WM_COMMAND 已转为排队 ACTION：处理第一框时不能覆盖第二框尚未入草稿的文字。
+fn color_notifications_preserve_other_pending_fields_and_coalesce_saves() {
+    let class = Class::register().unwrap();
+    let options = Options {
+        theme: Theme::Custom,
+        ..Default::default()
+    };
+    let main = lookup_window(&class, &options).unwrap();
+    let mut settings =
+        settings_window(&class, main.handle, &options, Path::new("synthetic.toml")).unwrap();
+    let mut editor = Editor::new(options);
+    sync_settings(&settings, &editor, None);
+    settings.text(CUSTOM, "#FAFAFA");
+    settings.text(CUSTOM + 1, "#222222");
+    let Some(Request::SaveSettings(first)) = settings_action(
+        &mut settings,
+        &mut editor,
+        CUSTOM,
+        EN_CHANGE,
+        Path::new("synthetic.toml"),
+    )
+    .unwrap() else {
+        panic!("缺少首个色值的保存");
+    };
+    assert_eq!(
+        String::from_utf16_lossy(&control_text(settings.control(CUSTOM + 1))),
+        "#222222"
+    );
+    assert!(
+        settings_action(
+            &mut settings,
+            &mut editor,
+            CUSTOM + 1,
+            EN_CHANGE,
+            Path::new("synthetic.toml"),
+        )
+        .unwrap()
+        .is_none()
+    );
+    let Some(Request::SaveSettings(last)) = editor.reply(Ok(Reply::Saved(Ok(first)))) else {
+        panic!("缺少合并后的补存");
+    };
+    assert_eq!((last.custom.window, last.custom.text), (0xFAFAFA, 0x222222));
+    editor.reply(Ok(Reply::Saved(Ok(last))));
+    editor.act(Action::Reload);
+    // 重新载入期间控件仍保留焦点，但拒收的文字必须复原，不能与只读草稿不一致。
+    settings.text(CUSTOM, "#12");
+    assert!(
+        settings_action(
+            &mut settings,
+            &mut editor,
+            CUSTOM,
+            EN_CHANGE,
+            Path::new("synthetic.toml"),
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        String::from_utf16_lossy(&control_text(settings.control(CUSTOM))),
+        "#FAFAFA"
+    );
 }
 /// 投递一次控件命令（与系统 WM_COMMAND 经窗口过程转成的 ACTION 相同）。
 fn command(window: &Window, id: usize, notification: u32) {
@@ -446,6 +560,9 @@ fn assert_learning_fonts(main: &mut Window) {
 fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
     // 合成控件测试不显示窗口、不碰剪贴板、不加载个人资源。
     let _dpi = DpiContext::enter().unwrap();
+    // 窗口类为进程级资源，各隐藏窗口场景顺序执行，避免测试线程并行重复注册。
+    saved_reply_clears_lookup_controls_when_catch_up_clears_the_model();
+    color_notifications_preserve_other_pending_fields_and_coalesce_saves();
     // 只在测试里私有注册仓库原件，不依赖机器预装；随测试进程结束释放。
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../resources/fonts/LXGWWenKaiGBScreen.ttf");
@@ -473,7 +590,7 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
             ids.dedup();
             assert_eq!(ids.len(), count, "控件编号重复");
         }
-        set_options(&settings, defaults);
+        show_options(&settings, defaults);
         assert_learning_fonts(&mut main);
         assert_themed_drawing(&main, &settings);
         // 隐藏窗收到迟到回复也不能从用户桌面抢走焦点。
@@ -483,9 +600,12 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         // SAFETY: GetFocus 无输出指针，前后观察同一测试线程。
         assert_eq!(unsafe { GetFocus() }, original_focus);
         main.text(QUERY, "𠀀ü漢");
-        assert_eq!(query(&main).unwrap(), "𠀀ü漢");
+        assert_eq!(query(&main), "𠀀ü漢");
+        // 读出全文交给共用状态机判定上限，不把截断文本当成有效查询。
         main.text(QUERY, &"𠀀".repeat(65));
-        assert!(query(&main).is_err());
+        let mut probe = Editor::new(defaults);
+        assert!(probe.act(Action::Query(query(&main))).is_none());
+        assert!(probe.model.notice.contains("64"));
         let options = Options {
             auto_commit_four: true,
             common_only: false,
@@ -496,16 +616,14 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
             page_size: 7,
             ..defaults
         };
-        set_options(&settings, options);
+        show_options(&settings, options);
         assert_eq!(read_options(settings.handle).unwrap(), options);
-        // 偏蓝或格式不对的自定义基色在本地即被拒绝，不发往后台，提示写明原因。
+        // 预览按控件显示的草稿取色：偏蓝或格式不对时读不出，退回已确认配色。
         settings.text(CUSTOM + 3, "#0078D4");
         assert!(read_options(settings.handle).unwrap_err().contains("偏蓝"));
-        assert!(custom_status(settings.handle).starts_with('✗'));
         settings.text(CUSTOM + 3, "12345");
         assert!(read_options(settings.handle).is_err());
-        set_options(&settings, options);
-        assert!(custom_status(settings.handle).starts_with('✓'));
+        show_options(&settings, options);
         // 分区切换只显示该区控件；选了自定义才露出四色编辑行。
         select_page(&mut settings, 1, defaults.candidate_font).unwrap();
         let on = |window: &Window, id| shown(window.control(id));
@@ -516,14 +634,15 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         assert!(on(&settings, CUSTOM) && on(&settings, SWATCH + 3));
         select_page(&mut settings, 0, defaults.candidate_font).unwrap();
         assert!(on(&settings, AUTO) && !on(&settings, CUSTOM) && !on(&settings, PREVIEW));
-        set_options(&settings, defaults);
+        show_options(&settings, defaults);
         settings.layout(defaults.candidate_font).unwrap();
 
         // 隐藏窗口仍走真实消息泵和事件等待，证明查询回复与工作线程退出都能被观察到。
         // 前面两次改查询框、这一次与随后的 Enter 都已排在消息队列：首个改动即发查询，
         // 其余在途期间只记下，回复后按当前文本补查恰好一次。
         main.text(QUERY, "𠀀");
-        let mut model = Model::new(defaults);
+        // 设置窗色值框的改写通知也在队列里，按共用状态机逐个校验，最终回到合法默认值，不产生保存。
+        let mut editor = Editor::new(defaults);
         // 唤起邮箱保持连接，代表后台仍在运行。
         let (show_sender, show) = crate::mailbox::<Panel>().unwrap();
         let (requests, receiver) = std::sync::mpsc::sync_channel(1);
@@ -558,13 +677,13 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         post(main.handle, ACTION, SEARCH);
         let run = |main: &mut Window,
                    settings: &mut Window,
-                   model: &mut Model,
+                   editor: &mut Editor,
                    requests: &SyncSender<Request>,
                    inbox: &Inbox<Reply>| {
             event_loop(
                 main,
                 settings,
-                model,
+                editor,
                 requests,
                 inbox,
                 &show,
@@ -572,13 +691,13 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
             )
         };
         assert!(
-            run(&mut main, &mut settings, &mut model, &requests, &inbox)
+            run(&mut main, &mut settings, &mut editor, &requests, &inbox)
                 .unwrap_err()
                 .contains("工作线程已退出")
         );
         worker.join().unwrap();
-        assert_eq!(model.result.as_ref().unwrap().items[0].text, "𠀀");
-        assert!(!model.busy);
+        assert_eq!(editor.model.result.as_ref().unwrap().items[0].text, "𠀀");
+        assert!(!editor.model.busy);
         assert_eq!(main.send(LIST, LB_GETCOUNT, 0, 0), 1);
         let mut buffer = [0u16; 64];
         let length = window_text(main.control(GLYPH), &mut buffer);
@@ -594,8 +713,8 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
 
         // 长词：完整编码与拆分按值区宽折行、行高随之增加；内容高于窗口时出现纵向滚动，而不是截掉。
         let word = "中华人民共和国".repeat(4);
-        let current = model.result.take();
-        model.result = Some(tigertype_contracts::LookupPage {
+        let current = editor.model.result.take();
+        editor.model.result = Some(tigertype_contracts::LookupPage {
             items: vec![tigertype_contracts::LookupItem {
                 text: word.clone(),
                 learning: tigertype_contracts::LearningInfo {
@@ -617,7 +736,7 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
             }],
             has_more: false,
         });
-        show_page(&main, &model);
+        show_page(&main, &editor);
         let parts_text = control_text(main.control(PARTS));
         assert!(parts_text.len() > 256, "拆分串不能被定长缓冲截断");
         let line = |rows: i32| scale(main.handle, rows);
@@ -645,8 +764,8 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         let tiles = tile_boxes(&parts_value, parts_box[2]);
         assert_eq!(tiles.len(), 28 * 3);
         assert!(tiles.iter().all(|(b, ..)| b[1] + 48 <= parts_box[3]));
-        model.result = current;
-        show_page(&main, &model);
+        editor.model.result = current;
+        show_page(&main, &editor);
         // SAFETY: 同上。
         unsafe { GetScrollInfo(main.handle, SB_VERT, &mut info) };
         assert!(info.nMax < info.nPage as i32, "单字不出现滚动");
@@ -666,32 +785,32 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
             assert!(saved.auto_commit_four);
             replies.send(Reply::Saved(Ok(saved))).unwrap();
         });
-        assert!(run(&mut main, &mut settings, &mut model, &requests, &inbox).is_err());
+        assert!(run(&mut main, &mut settings, &mut editor, &requests, &inbox).is_err());
         worker.join().unwrap();
-        assert!(model.options.auto_commit_four);
+        assert!(editor.model.options.auto_commit_four);
         assert_eq!(main.send(LIST, LB_GETCURSEL, 0, 0), 0);
 
-        // 换主题：回复后整套界面换上新配色与字体。
+        // 换主题与字体：前一次保存在途时的改动合并成一次补存，回复后整套界面换上新配色与字体。
         let (requests, receiver) = std::sync::mpsc::sync_channel(1);
         let (replies, inbox) = crate::mailbox().unwrap();
-        check(&settings, THEME, false);
-        check(&settings, THEME + 1, true);
-        check(&settings, FONT, false);
-        check(&settings, FONT + 1, true);
         command(&settings, THEME + 1, BN_CLICKED);
+        command(&settings, FONT + 1, BN_CLICKED);
         let worker = std::thread::spawn(move || {
-            let Request::SaveSettings(saved) = receiver
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap()
-            else {
-                panic!("换主题须立即保存");
-            };
-            replies.send(Reply::Saved(Ok(saved))).unwrap();
+            for expected in [CandidateFont::WenKai, CandidateFont::KaiTi] {
+                let Request::SaveSettings(saved) = receiver
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap()
+                else {
+                    panic!("换主题须立即保存");
+                };
+                assert_eq!((saved.theme, saved.candidate_font), (Theme::Ink, expected));
+                replies.send(Reply::Saved(Ok(saved))).unwrap();
+            }
         });
-        assert!(run(&mut main, &mut settings, &mut model, &requests, &inbox).is_err());
+        assert!(run(&mut main, &mut settings, &mut editor, &requests, &inbox).is_err());
         worker.join().unwrap();
-        assert_eq!(model.options.theme, Theme::Ink);
-        assert_eq!(PALETTE.with(Cell::get), model.options.palette());
+        assert_eq!(editor.model.options.theme, Theme::Ink);
+        assert_eq!(PALETTE.with(Cell::get), editor.model.options.palette());
         assert_eq!(main.face, CandidateFont::KaiTi);
 
         // 保存失败：控件撤回到已确认设置，提示写明原因。
@@ -707,18 +826,18 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
                 .send(Reply::Saved(Err("settings.toml 已在外部修改".into())))
                 .unwrap();
         });
-        assert!(run(&mut main, &mut settings, &mut model, &requests, &inbox).is_err());
+        assert!(run(&mut main, &mut settings, &mut editor, &requests, &inbox).is_err());
         worker.join().unwrap();
         assert!(checked_in(settings.handle, COMMON));
-        assert_eq!(read_options(settings.handle).unwrap(), model.options);
-        assert!(model.settings_notice.contains("外部修改"));
+        assert_eq!(read_options(settings.handle).unwrap(), editor.model.options);
+        assert!(editor.model.settings_notice.contains("外部修改"));
 
         // 重新载入：控件换成文件里的设置。
         let (requests, receiver) = std::sync::mpsc::sync_channel(1);
         let (replies, inbox) = crate::mailbox().unwrap();
         let edited = Options {
             page_size: 9,
-            ..model.options
+            ..editor.model.options
         };
         command(&settings, RELOAD, BN_CLICKED);
         let worker = std::thread::spawn(move || {
@@ -730,25 +849,45 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
             ));
             replies.send(Reply::Saved(Ok(edited))).unwrap();
         });
-        assert!(run(&mut main, &mut settings, &mut model, &requests, &inbox).is_err());
+        assert!(run(&mut main, &mut settings, &mut editor, &requests, &inbox).is_err());
         worker.join().unwrap();
-        assert_eq!(model.options, edited);
+        assert_eq!(editor.model.options, edited);
         assert_eq!(read_options(settings.handle).unwrap(), edited);
 
-        // 自定义色值不合格时侧栏写明未保存；换回预设主题时四色退回已保存的值，换主题照常保存。
+        // 自定义色值不合格时侧栏写明未保存，回复后也不补存。
         let (requests, receiver) = std::sync::mpsc::sync_channel(1);
         let (replies, inbox) = crate::mailbox().unwrap();
-        for k in 0..Theme::ALL.len() {
-            check(&settings, THEME + k, k == 4);
-        }
+        let kept = editor.model.options.custom;
+        command(&settings, THEME + 4, BN_CLICKED);
+        // 改写色值框产生的编辑通知与用户输入走同一路径。
         settings.text(CUSTOM + 3, "#0078D4");
-        assert!(commit(&settings, &mut model).is_none());
-        assert!(model.settings_notice.starts_with('✗'));
-        for k in 0..Theme::ALL.len() {
-            check(&settings, THEME + k, k == 0);
-        }
+        let worker = std::thread::spawn(move || {
+            let Request::SaveSettings(saved) = receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+            else {
+                panic!("换自定义主题须保存");
+            };
+            assert_eq!((saved.theme, saved.custom), (Theme::Custom, kept));
+            replies.send(Reply::Saved(Ok(saved))).unwrap();
+            assert!(
+                receiver
+                    .recv_timeout(std::time::Duration::from_millis(200))
+                    .is_err(),
+                "偏蓝色值不能补存"
+            );
+        });
+        assert!(run(&mut main, &mut settings, &mut editor, &requests, &inbox).is_err());
+        worker.join().unwrap();
+        assert!(String::from_utf16_lossy(&control_text(settings.control(NOTICE))).starts_with('✗'));
+        assert!(
+            String::from_utf16_lossy(&control_text(settings.control(CUSTOM_STATUS)))
+                .starts_with('✗')
+        );
+        // 换回预设主题时四色退回已保存的值，换主题照常保存，提示撤下。
+        let (requests, receiver) = std::sync::mpsc::sync_channel(1);
+        let (replies, inbox) = crate::mailbox().unwrap();
         command(&settings, THEME, BN_CLICKED);
-        let kept = model.options.custom;
         let worker = std::thread::spawn(move || {
             let Request::SaveSettings(saved) = receiver
                 .recv_timeout(std::time::Duration::from_secs(2))
@@ -759,10 +898,11 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
             assert_eq!((saved.theme, saved.custom), (Theme::Amber, kept));
             replies.send(Reply::Saved(Ok(saved))).unwrap();
         });
-        assert!(run(&mut main, &mut settings, &mut model, &requests, &inbox).is_err());
+        assert!(run(&mut main, &mut settings, &mut editor, &requests, &inbox).is_err());
         worker.join().unwrap();
-        assert_eq!(model.options.theme, Theme::Amber);
-        assert_eq!(read_options(settings.handle).unwrap(), model.options);
+        assert_eq!(editor.model.options.theme, Theme::Amber);
+        assert_eq!(read_options(settings.handle).unwrap(), editor.model.options);
+        assert!(control_text(settings.control(NOTICE)).is_empty());
 
         // 后台常驻：关闭主窗只收起（连同设置窗），循环继续；本例由随后的 WM_QUIT 结束。
         let (requests, _receiver) = std::sync::mpsc::sync_channel(1);
@@ -770,7 +910,7 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         post(main.handle, CLOSE, 0);
         // SAFETY: 只向本测试线程的消息队列投递退出消息，排在 CLOSE 之后取出。
         unsafe { PostQuitMessage(0) };
-        assert!(run(&mut main, &mut settings, &mut model, &requests, &inbox).is_ok());
+        assert!(run(&mut main, &mut settings, &mut editor, &requests, &inbox).is_ok());
         let mut message = MSG::default();
         // 确认退出消息已被循环取走，而不是 CLOSE 提前返回后残留在队列里。
         // SAFETY: MSG 栈对象完整有效，只查看本线程队列。
@@ -778,8 +918,8 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         assert_eq!(left, 0);
         // 唤起邮箱断开即后台停止，UI 线程正常退出。
         drop(show_sender);
-        assert!(run(&mut main, &mut settings, &mut model, &requests, &inbox).is_ok());
-        window_menu_closes_when_the_backend_stops(&mut main, &mut settings, &mut model);
+        assert!(run(&mut main, &mut settings, &mut editor, &requests, &inbox).is_ok());
+        window_menu_closes_when_the_backend_stops(&mut main, &mut settings, &mut editor);
         PALETTE.with(|palette| palette.set(Options::default().palette()));
         // 反复创建可发现遗漏的窗口类注销，避免把线程退出误当资源已释放。
         drop(settings);

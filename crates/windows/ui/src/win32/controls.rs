@@ -276,7 +276,7 @@ fn custom_in(parent: HWND) -> Result<CustomColors, String> {
         accent: hex_in(parent, 3)?,
     })
 }
-/// 设置窗控件即草稿：读出并在本地校验，偏蓝、不可读或格式不对的不发往后台。
+/// 设置窗控件当前显示的草稿（由共用状态机同步）；预览按它取色，不合格时退回已确认配色。
 pub(super) fn read_options(parent: HWND) -> Result<Options, String> {
     let choice = |first: usize, count: usize, name: &str| {
         pick(parent, first, count).ok_or_else(|| format!("必须选择{name}"))
@@ -294,23 +294,6 @@ pub(super) fn read_options(parent: HWND) -> Result<Options, String> {
     };
     options.validate()?;
     Ok(options)
-}
-/// 自定义配色行下方的提示：可读时报最低对比度，否则说明原因。
-pub(super) fn custom_status(parent: HWND) -> String {
-    let check = custom_in(parent).and_then(|custom| {
-        let options = Options {
-            theme: Theme::Custom,
-            custom,
-            ..Options::default()
-        };
-        options
-            .validate()
-            .map(|()| options.palette().min_contrast())
-    });
-    match check {
-        Ok(contrast) => format!("✓ 全部文字可读，最低对比度 {contrast:.1} : 1"),
-        Err(error) => format!("✗ {error}；修正后自动保存"),
-    }
 }
 /// 主题卡片与预览所用配色：预设取固定值，自定义取输入框里的草稿，草稿无效时退回当前配色。
 fn theme_palette(parent: HWND, k: usize) -> Palette {
@@ -928,25 +911,14 @@ fn draw_keys(item: &DRAWITEMSTRUCT, c: &Colors, index: usize) {
         title,
         DT_NOPREFIX,
     );
-    let size = page_size_in(parent(item.hwndItem)).to_string();
-    let spec = spec.replace("[N]", &format!("[{size}]"));
+    let spec = view::keys(spec, page_size_in(parent(item.hwndItem)));
     let mono = sibling_font(item.hwndItem, CUSTOM);
     let small = sibling_font(item.hwndItem, NOTICE);
     let mut left = title.left;
     let (top, bottom) = (rect.top + s(32), rect.top + s(54));
-    for part in spec
-        .split_inclusive(']')
-        .flat_map(|part| match part.find('[') {
-            Some(at) => vec![&part[..at], &part[at..]],
-            None => vec![part],
-        })
-    {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if let Some(key) = part.strip_prefix('[').and_then(|key| key.strip_suffix(']')) {
-            let key = units(key);
+    for (key, part) in view::key_parts(&spec) {
+        if key {
+            let key = units(part);
             let cap = RECT {
                 left,
                 top,
