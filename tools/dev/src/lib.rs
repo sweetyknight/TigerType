@@ -1,5 +1,7 @@
 //! 本地开发工具：检查、打包与合成预览；产品不得反向依赖本 crate（包括测试依赖）。
 pub mod check;
+#[cfg(target_os = "linux")]
+pub mod fcitx;
 pub mod process;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 

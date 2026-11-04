@@ -29,7 +29,12 @@ objc2-foundation.workspace = true
 objc2-app-kit = { workspace = true, features = ["NSRunningApplication"] }
 tigertype-macos-app.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Linux 打包只由开发工具依赖产品包契约，产品不得反向引用工具。
+tigertype-linux-app.workspace = true
+
+# 开发子进程等待分别使用 kqueue 与 pidfd，不用轮询定时器。
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc.workspace = true
 
 [lints]

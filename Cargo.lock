@@ -779,6 +779,7 @@ dependencies = [
  "serde_json",
  "tigertype-backend",
  "tigertype-contracts",
+ "tigertype-linux-app",
  "tigertype-macos-app",
  "tigertype-macos-input-method",
  "tigertype-macos-ui",
@@ -799,6 +800,30 @@ name = "tigertype-input-client"
 version = "0.1.0"
 dependencies = [
  "tigertype-contracts",
+]
+
+[[package]]
+name = "tigertype-linux-app"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "libc",
+ "serde",
+ "serde_json",
+ "tigertype-backend",
+ "tigertype-contracts",
+ "tigertype-input-client",
+ "tigertype-linux-input-method",
+ "tigertype-linux-ui",
+]
+
+[[package]]
+name = "tigertype-linux-input-method"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "tigertype-contracts",
+ "tigertype-input-client",
 ]
 
 [[package]]

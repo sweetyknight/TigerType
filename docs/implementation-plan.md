@@ -5,7 +5,7 @@
 ## 产品范围
 - 产品名统一为 TigerType，crate 使用 `tigertype-*`、程序为 `tigertype.exe`，工作区目录为 `TigerType`，正式数据目录为 `%APPDATA%\TigerType`。窗口、IPC 管道/帧标识及目录所有权标记同步使用新名称；开发期不兼容旧名称的程序或受管目录，不迁移或改写已有数据。
 - Windows 10/11 x64、x86 宿主，含管理员和 UWP/AppContainer（沉浸式）宿主；Rust 专用单字/词引擎，不兼容 Rime。LPAC 宿主、UILess 模式和触摸键盘避让暂不支持；连不上后台时放行原键。
-- macOS 13+（构建机本机架构）按下文“macOS 端”分阶段实施，输入、查字、设置与外观功能同 Windows，入口、安装与系统集成按平台习惯；Linux 已批准用 GTK4 实现查字/设置视图，输入法框架、组装、存储与安装待批准后开发，见“多平台架构”的 Linux 一节。
+- macOS 13+（构建机本机架构）按下文“macOS 端”分阶段实施，输入、查字、设置与外观功能同 Windows，入口、安装与系统集成按平台习惯；Linux 已批准 GTK4 查字/设置、IBus/Fcitx5 自动适配、组装、存储与统一安装入口，明确支持范围和验收见“多平台架构”的 Linux 一节。
 - 单字模式用 tiger 单字表；词模式同官方词版，字词都能打：tigress 单字表与 tigress_ci、tigress_simp_ci 同桶，同码按官方权重降序，同权重保持“单字表、词表、简词表”原始行序（librime 的稳定排序）后按文本去重。两张单字表字码相同、权重不同，不能互换；不造词、不调频。常用字过滤同官方 core2022_filter，词中每个汉字都须在字集内，范围外的标点不参与。
 - 默认四码待选、下一码顶屏；可开启四码唯一自动上屏，唯一性在过滤/转换/去重后判定。
 - 空格选字、数字选重、分号次选、引号三选、翻页、退格、清屏、中英文切换；空码不误上屏；满四码空码时下一码顶上清屏（同小狼毫 `auto_clear: max_length`），无对应候选的选重、越界翻页等静默忽略，不弹文字提示（主流输入法均不弹）。
@@ -14,14 +14,14 @@
 - 独立查字窗输入拼音、词码或粘贴汉字/词（单字虎码不作查询入口），边输边查（不按 Enter；至多一个查询在途，在途期间的改动只在回复后按最新文本补查一次，无计时器），显示可用编码、完整编码、读音、拆分，拆分每个字根下方写其大码+小码；词查询给词码，完整码与拆分逐字拼起（任一字缺即整项标缺），读音见“数据与配置”；完整编码、读音与拆分按值区宽度折行，词在字形格里按网格缩排，内容高于窗口时整窗纵向滚动，不截断；复制由用户点击，不监视剪贴板。
 - 缺资料明确标注，不猜编码或拆分；学习信息对应实际显示汉字，转换字形标注来源。
 - 原字/简体/繁体三档，默认原字；单字一对多列候选，词同官方 OpenCC 配置（短语表+单字表）：整词命中列全部字形，否则从左到右取最长键的首选字形，转换后再去重。不猜语境，不改已上屏内容，不做地区词汇替换。
-- 竖排候选、15pt，每页 3–9 个（默认 5），候选多于一页时才在页脚显示翻页指示，拼音反查时页脚另有“拼音”标签。候选字体可选霞鹜文楷（默认）或楷体，未安装时回退微软雅黑 UI；独立编码与序号用 Cascadia Mono（回退 Consolas），窗口文字用微软雅黑 UI。候选注释（拆分及内嵌编码）、设置预览注释与查字拆分只使用 LXGW WenKai GB Screen，不受候选字楷体选项影响；禁止替代字体（字根是私用区字形，替代只会显示方块），字体不可用时立即返回错误。绘制与测量使用同一字体和排版 API。配色主题可选琥珀（默认）、墨、竹、玫红与自定义；自定义四基色在设置页点色块从无蓝色板选取或直接输入色值，即时校验并热加载。玫红取自小狼毫配色 MacRoseo（白底黑字，高亮候选无底色、只把字染成玫红，原色 #FA114F 等比压暗为 #E8114E 以达 4.5:1）；保存与载入均校验无蓝且文字对比度不低于 4.5:1。为保证换电脑可用，霞鹜文楷（虎码融合字根版）、Cascadia Mono、TumanPUA 与天珩全字库 P0/P1/P2 共六份字体随包：按 `resources/fonts.lock.json` 记录来源并锁定大小与 SHA256，由安装包全机安装。原生 UI，所有界面不得出现任何蓝色（高对比度除外）。
+- 竖排候选、15pt，每页 3–9 个（默认 5），候选多于一页时才在页脚显示翻页指示，拼音反查时页脚另有“拼音”标签。候选字体可选霞鹜文楷（默认）或楷体，未安装时回退微软雅黑 UI；独立编码与序号用 Cascadia Mono（回退 Consolas），窗口文字用微软雅黑 UI。候选注释（拆分及内嵌编码）、设置预览注释与查字拆分只使用 LXGW WenKai GB Screen，不受候选字楷体选项影响；禁止替代字体（字根是私用区字形，替代只会显示方块），字体不可用时立即返回错误。绘制与测量使用同一字体和排版 API。配色主题可选琥珀（默认）、墨、竹、玫红与自定义；自定义四基色在设置页点色块从无蓝色板选取或直接输入色值，即时校验并热加载。玫红取自小狼毫配色 MacRoseo（白底黑字，高亮候选无底色、只把字染成玫红，原色 #FA114F 等比压暗为 #E8114E 以达 4.5:1）；保存与载入均校验无蓝且文字对比度不低于 4.5:1。为保证换电脑可用，霞鹜文楷（虎码融合字根版）、Cascadia Mono、TumanPUA 与天珩全字库 P0/P1/P2 共六份字体随包：按 `resources/fonts.lock.json` 记录来源并锁定大小与 SHA256，由安装包全机安装。自有原生 UI 不得出现蓝色（高对比度除外）；Linux 框架原生候选面板采用系统主题，见 Linux 一节。
 - 设置窗分“输入、外观、快捷键、高级”四区（左侧导航，内容超出窗口时纵向滚动），修改即时保存并热加载，不设保存/取消按钮；保存在途时的新改动不排队，回复后按最新草稿与已确认设置比较再存一次，保存失败时控件撤回已确认设置并说明原因。输入区：单字/词输入模式（默认单字）、仅常用字、四码唯一自动上屏、输出字形；外观区：按草稿现画的候选窗预览、候选字体、每页候选数、显示拆分与编码（开启后候选注释为小狼毫虎码方案同款〔拆分 · 编码〕，缺拆分时只列编码；默认关闭）、配色主题卡片与自定义四色（色块点开 8×4 无蓝色板或输入 `#RRGGBB`，提示最低对比度或不可用原因）；快捷键区只读列出现有快捷键（数字键范围随每页候选数）；高级区用系统默认编辑器打开受管 `config/settings.toml`，手工修改后点“重新载入”生效（格式错误时保留当前设置并指出行号），另有版本信息。`settings.toml` 按带中文注释的固定模板写出（`[input]`、`[candidate]`、`[theme]`、`[theme.custom]` 四节，颜色写作 `"#RRGGBB"`），读回时缺键、多键、类型或范围不符都拒绝；首次运行写出默认文件；界面保存按模板重写，用户自加的注释不保留；文件被外部修改后界面保存被拒，须先重新载入。旧 `settings.json` 不再读取（开发期不兼容）。当前程序任务栏输入法图标右键菜单前三项写当前状态（中文/英文、半角/全角、中文标点/英文标点），点击即翻转，其下为查字、设置；全角另可按 `Shift+空格` 切换；全角与标点开关仍为会话状态。保存成功即热重载到后台，新会话与无组合的会话立即使用；组合中的会话在本次组合结束时换上，无需重启后台。
 - 不做 librime、Lua、OpenCC 运行库、数据库、英文补全、计算器、日期、Emoji、网址启动或通用 YAML 配置兼容。
 
 ## 多平台架构
 
 ### 阅读顺序与命名
-目录一级按共享/Windows/macOS，二级按职责；分组目录不是 crate。包名使用 `tigertype-<平台>-<职责>`，共享包省略平台。TSF（Windows 文本服务框架）、IMK（macOS Input Method Kit）、Win32、AppKit 是系统适配技术，不作为一级组件分类。
+目录一级按共享/Windows/macOS/Linux，二级按职责；分组目录不是 crate。包名使用 `tigertype-<平台>-<职责>`，共享包省略平台。TSF（Windows 文本服务框架）、IMK（macOS Input Method Kit）、Win32、AppKit 是系统适配技术，不作为一级组件分类。
 
 - **input-client**：宿主侧会话、按键与候选展示逻辑，不是 GUI，也不加载引擎。
 - **input-method**：平台输入法适配，拥有候选窗、编辑/上屏和输入法菜单。
@@ -32,7 +32,7 @@
 源码路径与部署名相互独立：`tigertype-windows-input-method` 的 x64/x86 构建产物均名为 `tigertype_windows_input_method.dll`，安装器才部署为 `tigertype_tsf.dll` / `tigertype_tsf_x86.dll`，打包驱动校验这一映射，不从构建目录取残留的旧名 DLL。
 
 ### 目录与职责
-仅下表 14 个有实现的叶子目录是工作区成员；macOS app 承载进程组装与安装，Linux 暂只有查字/设置视图，不建其他占位目录。下表同时是架构门禁的明确白名单，新增依赖须同步修改，不能使用通配放行。
+仅下表 16 个有实现的叶子目录是工作区成员；平台 app 承载进程组装，不建占位目录。下表同时是架构门禁的明确白名单，新增依赖须同步修改，不能使用通配放行。
 
 | 目录（相对仓库根） | 职责 | 项目内直接依赖（省略 tigertype 前缀） | 外部直接依赖 |
 |---|---|---|---|
@@ -40,7 +40,7 @@
 | crates/shared/engine | 引擎状态机、词表索引、字形转换 | contracts | 无 |
 | crates/shared/input-client | Host/Channel、物理键规则、Shift 判定、候选内容/尺寸与位置退路 | contracts | 无 |
 | crates/shared/ui-model | 查字/设置 Model、三端共用的草稿状态机（editor）与控件内容/状态（view）、文案、控件标识、派生绘制色与纯布局 | contracts | 无 |
-| crates/shared/backend | 锁定资源加载、settings.toml、受管目录、Dispatcher、宿主回收和查字控制器 | contracts、engine | serde、serde_json、sha2、toml；Windows 文件原语 windows-sys、Mac 文件原语 libc |
+| crates/shared/backend | 锁定资源加载、settings.toml、受管目录、Dispatcher、宿主回收和查字控制器 | contracts、engine | serde、serde_json、sha2、toml；Windows 文件原语 windows-sys、Mac/Linux 文件原语 libc |
 | crates/windows/ipc | Windows 跨进程信封、帧校验、认证管道、取消和驻留保护 | contracts | serde、serde_json、windows-sys |
 | crates/windows/input-method | TSF DLL、编辑会话、候选窗、UIA、输入法菜单与注册 | contracts、input-client、windows-ipc | windows、windows-core |
 | crates/windows/ui | Win32 查字/设置窗、托盘、事件邮箱 | contracts、ui-model | windows-sys |
@@ -49,9 +49,11 @@
 | crates/macos/ui | AppKit 查字/设置视图和主线程回复 | contracts、ui-model | objc2、objc2-foundation、objc2-app-kit、dispatch2 |
 | crates/macos/app | Mac 主程序、进程内有界通道、固定线程组装、包清单/图标及安装 | contracts、input-client、backend；Mac：macos-input-method、macos-ui | serde、serde_json；Mac：objc2、objc2-foundation、objc2-app-kit、libc |
 | crates/linux/ui | GTK4 查字/设置视图、主线程回复与样式表；开发期合成预览示例 | contracts、ui-model | Linux：gtk4 |
-| tools/dev | 检查、打包、合成预览和跨组件治理测试，不进入产品 | contracts、backend；Windows：windows-app、windows-ui；Mac：macos-input-method、macos-ui、macos-app | serde_json；Windows：windows-sys；Mac：objc2、objc2-foundation、objc2-app-kit、libc |
+| crates/linux/input-method | Linux 键值、版本化菜单、IBus 边界、GNOME 候选 GJS 显示适配、Fcitx5 D-Bus 服务和 C++ 系统胶水；由 app 注入通道 | contracts、input-client | Linux：gio；胶水链接系统 Fcitx5/GIO |
+| crates/linux/app | Linux 固定线程组装、单实例窗口动作、会话登记、包契约和安装/升级/卸载入口 | contracts、input-client、backend；Linux：linux-input-method、linux-ui | serde、serde_json；Linux：gio、libc |
+| tools/dev | 检查、打包、合成预览和跨组件治理测试，不进入产品 | contracts、backend；Windows：windows-app、windows-ui；Mac：macos-input-method、macos-ui、macos-app；Linux：linux-app | serde_json；Windows：windows-sys；Mac：objc2、objc2-foundation、objc2-app-kit；Mac/Linux：libc |
 
-backend 的 `storage/windows.rs` 与 `storage/macos.rs` 集中各平台目录固定、链接/硬链接拒绝、租约和原子替换；其余后台模块不直接调用平台 API。不得用普通文件读取占位绕过校验。词表类型通过 backend 公开，组装层不直接依赖 engine；产品组件不得反向依赖平台 app。
+backend 的 `storage/windows.rs` 与 macOS/Linux 共用的 `storage/unix.rs` 集中目录固定、链接/硬链接拒绝、租约和原子替换；Mac 使用 F_FULLFSYNC，Linux 使用 fsync。其余后台模块不直接调用平台 API。不得用普通文件读取占位绕过校验。词表类型通过 backend 公开，组装层不直接依赖 engine；产品组件不得反向依赖平台 app。
 
 原始资源在 `resources`，安装定义在 `installer/windows`；构建产物、缓存与证据不作为源码。测试跟随组件：纯模型测试在 shared，原生测试在对应平台，架构/文档与安装脚本校验归 tools/dev。
 
@@ -64,7 +66,7 @@ Windows 字体只用安装器全机注册的系统字体：宿主进程不读字
 - backend 不依赖 input-client、UI、平台输入法或 IPC；只允许存储原语所需的系统绑定，不能到达界面/COM 框架。
 - input-method 不依赖 engine、backend、ui-model 或查字/设置 UI，平台输入法彼此不依赖。
 - UI 不依赖 engine、backend、input-client、IPC 或输入法组件；界面只发 contracts 请求，由组装层把回复送回。
-- 各平台产品组件不互相引用；仅开发工具为合成预览选择对应目标的组件（Linux 预览暂在 linux-ui，见 Linux 一节）。GTK 系列绑定只允许 linux-ui 依赖。
+- 各平台产品组件不互相引用；仅开发工具为合成预览选择对应目标的组件（Linux 预览在 linux-ui）。GTK 绘图绑定只允许 linux-ui 直接依赖；GIO/GLib 另允许 Linux input-method/app 作 D-Bus 边界，不借道加载 GTK。
 - app 不直接依赖 engine；共享业务不反向依赖 app。
 - 产品不得依赖 tools/dev，**包括 dev/build 依赖**。打包工具可使用产品的字体/图标入口，产品测试辅助留在所属组件，不能为复用测试辅助而回引工具。
 - 架构检查同时验证真实包名、目录归属、别名、条件/测试/构建依赖、传递禁止边与环；未知成员拒绝，并有对应反例。
@@ -77,6 +79,8 @@ Windows UI 内部同样单向：events 组装 panels、window、tray；panels �
 |---|---|---|---|
 | Windows | 宿主进程内的 TSF DLL；候选窗在宿主 TSF 线程 | 每登录会话一个独立后台，固定引擎/UI/工作线程 | 认证命名管道，只有此边界序列化和校验协议版本 |
 | macOS | 输入法进程主线程上的 IMK 控制器、候选面板与全部 AppKit 窗口 | 同进程固定引擎与工作线程 | 进程内有界类型化通道，不套 Windows IPC |
+| Linux / IBus | Rust 输入法进程的 GIO 工厂与回调；框架绘制候选 | 同进程固定引擎/工作线程，主线程 GTK 查字/设置 | 进程内有界类型化通道，系统入口遵守 IBus 协议 |
+| Linux / Fcitx5 | 框架进程中的 C++ 薄插件；框架绘制候选 | 独立 Rust 后台固定引擎/工作线程，主线程 GTK 查字/设置 | 认证会话 D-Bus，版本/请求号/上下文/绝对期限校验 |
 
 两种形态的宿主逻辑都面对 `tigertype_input_client::Channel`：连接、编码与重试共享同一个绝对截止时间；传输失败作废连接且不重放，下一键重新开会话。取消未上屏组合、放行原键、拒收迟到提交的语义不能因平台变化而改变。
 
@@ -85,11 +89,17 @@ Windows UI 内部同样单向：events 组装 panels、window、tray；panels �
 ### Linux
 查字/设置视图（`crates/linux/ui`）经批准使用 GTK4（gtk4-rs 0.11.5；绑定的无障碍接口自 `v4_10` 提供，基线因此为 GTK 4.10：Ubuntu 24.04、Debian 13、CentOS Stream 10、Arch 及更新）。视图直接消费共享 editor/view/layout：控件放在固定容器里共用布局给出的坐标上，卡片、键帽、预览与按钮外观自绘（Pango 文字、系统图标主题的单色符号），按钮仍是 GTK 按钮（键盘激活、开关/单选读屏语义），文本框用 GTK 原生控件保留输入法与选区；助记键同 Windows 写作 (X)，Alt+字母触发。样式表由主题色现生成，以应用级优先覆盖系统强调色、选区、拖放与滚动条，只作用于本程序窗口；标题栏为侧栏色的自定义标题栏。回复经一次性 Completion 投回默认主上下文（一次性空闲源，不轮询）；关窗先隐藏，空闲回调里释放。GTK 是批准的界面框架例外，只允许 linux-ui 依赖。
 
-backend 尚无 Linux 存储边界（数据目录与落盘语义待定），统一检查器与开发工具因此暂不能在 Linux 编译；合成预览放在 linux-ui 的 example，Linux 端按“开发命令”单独验证。候选窗与输入法菜单归 input-method，待框架确定后实现，预览稿中的这两部分不在当前范围。
+首批发布目标明确限定为 x86_64 的 Ubuntu 24.04/26.04 LTS、Debian 13，GNOME 或 KDE Plasma，Wayland 与 X11 分别验收；此处是目标，不代表已经可用，实际支持证据只在项目状态维护。其他发行版、其他桌面、ARM 和旧 GTK 系统不承诺开箱即用。用户只有一个安装入口：优先复用正在运行的框架；无框架时 GNOME 优先 IBus、Plasma 优先 Fcitx5；两个独立框架同时运行时明确拒绝，不擅自停用。必要运行库、登记、字体和配置由安装器完成，不要求用户装开发工具、额外配置工具或手改环境变量。离线交付须另带经过校验的对应依赖，不能把联网下载称为离线安装。
 
-输入法开工前另行批准框架：IBus 的输入法进程形态，或 Fcitx5 插件加独立后台形态（C++ 胶水须另批）。届时在 Linux 分组新增有实现的输入法、视图和组装组件；只有确需跨进程时增加传输，不把 Windows IPC 扩成预设的万能传输。Wayland 下候选定位优先服从框架面板能力，无蓝色主题限制另行确认。Unix 文件安全原语可复用 macOS 的实现，但当前不建空实现。
+IBus 使用输入法进程，Fcitx5 使用薄插件加独立 Rust 后台；两者共用引擎、查字/设置与数据。经用户明确批准，Fcitx5 接口所必需的少量 C++ 胶水是 Rust 约束的例外，不承载业务、存储或引擎；Linux 框架原生候选面板可采用系统主题，不修改桌面主题来强求无蓝色，自有查字/设置仍无蓝。候选位置服从框架与 Wayland 合成器，不绕过协议抢放窗口。经用户批准，GNOME/IBus 另带仅作用于虎码候选的 GJS 适配层（`crates/linux/input-method/gnome/extension.js` 与 `presentation.js`）：沿用 Shell 的定位、事件和原生候选行，通过受限版本化展示附件传递配色/字体/文字，不读配置或词表、不生成提交。字形用 Pango/Cairo 绘制以避开整字体彩色纹理判断，保留读屏全文；失焦、切换其他输入法、禁用或错误时恢复原生外观。附件限制版本、色值、候选数和文字长度，输入仍走原有安全边界。扩展随程序包发布，自动登记本用户，不改其他扩展或全局开关；GNOME 46/48/50 为对应目标，首次安装/扩展代码更新需一次注销登录，不能开启不安全模式或调用任意代码求值绕过。GJS 语法、真实 IBus 附件反序列化及五套配色离屏绘制由 Rust 门禁驱动实际运行，桌面和旧版本仍分别验收。输入动作绑定连接、实例、展示编号和引擎快照，消费后作废整次展示；IBus 五项基础属性采用固定键，通过 UpdateProperty 更新标签。查字/设置不操作文档，不依赖宿主焦点；固定模式命令只允许空组合，不将迟到操作变成原码提交。候选选字与翻页仍须绑定快照；框架复位必须撤销组合，不为了菜单兼容放宽输入安全。原生候选点击没有展示版本，只提出带明确文字的菜单确认项，再经版本化菜单提交；不能直接用到达时的当前序号上屏。键盘选字不增加确认步骤。
+
+Fcitx5 通道版本独立为 1，校验上下文、单调请求号、绝对单调时钟期限和回复编号；总线核对插件连接与框架名字所有者属于同一进程（Fcitx 原生和 GIO 连接不同），不信正文 PID。框架退出/换主时取消旧会话；不自动启动后台或重放不确定按键。IBus 私有总线的内部调用使用保留发送方 `org.freedesktop.DBus`，外部连接 sender 由总线覆盖；引擎信号按官方订阅协议广播。密码/敏感输入在系统边界放行，不送入引擎。
+
+Linux 数据根为 `$XDG_DATA_HOME/TigerType`（未设置时 `~/.local/share/TigerType`），沿用受管标记、独占租约、无跟随目录描述符与事务备份；不接管已有未标记目录。输入处理主动等待共用 50ms 截止时间，连接失败/失焦/超时撤回未上屏组合，不重放。GIO 回调截断 panic，队列和实例数有界，主循环事件驱动；后台与 UI 各固定线程。GApplication 窗口动作按会话与数据目录隔离，不让测试请求发给现用后台。统一检查器在 Linux 执行共享组件、Linux 产品与开发工具的本机门禁；原生 GTK/D-Bus 测试须在 Linux 执行，Windows/Mac 类型检查不能替代。合成预览仍在 linux-ui 的 example，不当作完整产品。
 
 Linux 安装器必须沿用 `resources/fonts.lock.json` 的原始字体，默认安装文楷、字根/等宽字体及天珩 P0/P1/P2；按发行版字体目录规则发布并更新 fontconfig 缓存，不从网络临时取资源。安装/升级校验大小、SHA256 和路径边界，保留冲突文件及卸载后供其他应用使用的字体。验收须覆盖全部锁定单字、词与简繁输出，并在候选窗及真实宿主验证扩展汉字回退；不能以字体复制成功替代显示验收。
+
+交付按发行版和版本分别构建，不把新系统 ELF 用于旧系统；Rust 安装器 `tigertype-setup` 不链接 GTK，运行前只需目标系统基础 C 运行库。包分为 `tigertype`（程序、系统登记与插件）和 `tigertype-fonts`（全部字体），驱动用系统 dpkg-deb/符号依赖工具打包，维护程序为 Rust ELF，不生成 shell 脚本。普通用户入口在终端可用时采用 sudo 认证，否则使用 pkexec；认证拒绝后不更换通道重试。验证后的包字节复制到 root 独占临时目录；APT 只使用另建的官方 HTTPS 源列表、官方签名和包摘要验证，不改全局软件源。系统包事务完成后复核全部码表/字体；用户登记由原用户执行，保留其他输入源，不关闭应用或重启桌面。IBus 通过官方启动器刷新，事件驱动等待新所有者并核验引擎发现，失败显式返回；刷新会撤销未选定组合，不能冒充无感热加载。Fcitx5 原生插件仍需下次登录加载。卸载不调用 autoremove，不移除字体包或个人目录；配置、触发器或依赖失败必须显式报告，不能以文件复制成功代替完成。
 
 ## Windows 运行模型
 本节只描述 Windows 的进程、系统回调与传输；组件职责和允许依赖以上节为准。
@@ -338,22 +348,29 @@ cargo run --locked --offline -p tigertype-dev --example package
 
 `sudo` 要求管理员密码时，在自己的交互终端输入，不把密码写入命令、日志或聊天。安装失败保留 staging/旧包证据，不要手工批量清理。
 
-Linux 只检查查字/设置视图（backend 暂不支持 Linux，统一入口不可用）。首次安装 C 工具链、pkg-config 与 GTK 4.10+ 开发包（Ubuntu/Debian：`sudo apt install build-essential pkg-config libgtk-4-dev`，其他发行版装对应包），用 rustup 安装同一工具链及 rustfmt/clippy，再 `cargo fetch --locked`。以下须在图形会话执行；经 SSH 运行时带上桌面会话的 `XDG_RUNTIME_DIR` 与 `WAYLAND_DISPLAY`（或 X11 的 `DISPLAY`）：
+Linux 开发机首次准备 C++20 工具链、pkg-config、dpkg-dev、dbus-daemon、GTK 4.10+ 和 Fcitx5 开发包（Ubuntu/Debian：`sudo apt install build-essential pkg-config dpkg-dev libgtk-4-dev libfcitx5core-dev libfcitx5utils-dev libfcitx5config-dev dbus-daemon gjs`），用 rustup 安装同一工具链及 rustfmt/clippy，再 `cargo fetch --locked`；这是开发环境，不是最终用户的安装步骤。开发期可将已按官方摘要校验的开发包解压，令 `TIGERTYPE_FCITX_SDK` 指向包含 `usr/include/Fcitx5` 的绝对根，只替代头文件查找。以下在图形会话执行；经 SSH 运行时带上桌面会话的 `XDG_RUNTIME_DIR`、`DBUS_SESSION_BUS_ADDRESS` 与 `WAYLAND_DISPLAY`（或 X11 的 `DISPLAY`）：
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --locked --offline -p tigertype-linux-ui --all-targets -- -D warnings
-# 含 GTK 原生测试：在桌面短暂显示窗口，整窗图像存到临时目录供人工核对。
-cargo test --locked --offline -p tigertype-linux-ui
+# 含 C++ 胶水 -Werror/无未定义符号链接；不运行 Windows/Mac 原生测试。
+cargo run --locked --offline -p tigertype-dev --example check
+# 单列完整资源启动、窗口转发、独占租约与退出；用私有总线和新建临时目录。
+cargo test --locked --offline -p tigertype-linux-app --test native locked_resources -- --ignored
+# 实际框架，仍仅使用私有总线和合成目录；CARGO_TARGET_DIR 若另设需相应修改插件路径。
+TIGERTYPE_PLUGIN="$PWD/target/fcitx-check/tigertype.so" cargo test --locked --offline -p tigertype-linux-app --test fcitx actual_fcitx -- --ignored
+cargo test --locked --offline -p tigertype-linux-app --test ibus -- --ignored
+# 本机发行版 Release 交付目录，只打包，不安装；开发验收可设 TIGERTYPE_PACKAGE_PROFILE=debug。
+cargo run --locked --offline -p tigertype-dev --example package
+# 将路径替换为刚生成的 bundle 目录，只在新临时根解包/覆盖/移除，不执行 postinst 或系统触发器。
+TIGERTYPE_BUNDLE=/absolute/path/to/bundle cargo test --locked --offline -p tigertype-linux-app --test native debian_package -- --ignored
 # 合成预览：内存设置与合成资料，关闭两个窗口即退出。
 cargo run --locked --offline -p tigertype-linux-ui --example preview
 ```
 
-原生测试与预览以子进程让 fontconfig 另读 `resources/fonts`（缓存写临时目录），不安装字体，也不读写用户数据。
+GTK 原生测试与预览以子进程让 fontconfig 另读 `resources/fonts`（缓存写临时目录），不安装字体，也不读写用户数据。输入法私有 D-Bus 测试不注册、启用或切换现用输入源；实际系统安装、字体缓存、APT 依赖、登录登记/卸载、框架启动和真实宿主输入另行授权验收。`cargo run --locked --offline -p tigertype-linux-app -- diagnose` 只读诊断当前桌面和框架，不更改系统。
 
 ## 验收
 1. 每批运行完整统一入口；打包映射、锁定资源、真实宿主与长时验收按风险单列。输入法安装、注册、切换另须授权。
-2. 后续 macOS 按 M1–M5 验收；Linux 查字/设置视图每批在 Linux 图形会话按“开发命令”检查并截图核对，输入法开工前先定框架并修订方案。
+2. 后续 macOS 按 M1–M5 验收；Linux 每批在 Linux 图形会话按“开发命令”执行统一检查并核对界面。发布前逐项验收目标发行版/桌面/显示协议、双框架输入链路、一键安装升级卸载与字体实际回退，不能把单个 Ubuntu 环境通过推广到全部目标。
 
 验收覆盖：简/全码、稳定顺序、两种四码模式、空码/翻页/退格/清屏、非 BMP；多音字、ü/v、多编码、缺资料、简繁一对多与去重、实际字形与码对应；查询不改变会话；超时/卡死/断连/迟到/旧快照不重复上屏；坏包/配置失败/路径攻击保留旧数据；故意架构违规失败。
 

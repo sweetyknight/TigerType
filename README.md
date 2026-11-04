@@ -6,7 +6,7 @@ TigerType 是专为[虎码](https://huma.ysepan.com/)编写的输入法，用 Ru
 |---|---|
 | Windows 10/11 x64 | 可安装使用，支持 64 位和 32 位应用 |
 | macOS 13+（Apple 芯片） | 开发中，已能安装和打字，尚未完成完整验收 |
-| Linux | 开发中：查字与设置界面已完成，输入法尚不可用 |
+| Linux x86_64 | 试验阶段，提供分发行版安装入口；真实桌面与完整安装验收尚未完成 |
 
 各平台实际验收到哪一步，以[项目状态](docs/project-status.md)为准。
 
@@ -27,7 +27,7 @@ TigerType 是专为[虎码](https://huma.ysepan.com/)编写的输入法，用 Ru
 - 竖排，每页 3–9 个候选（默认 5 个），支持鼠标点选
 - 可在候选旁显示虎码拆分与编码，输入时也能用 `Ctrl+L` 临时切换
 - 候选字体可选霞鹜文楷或楷体
-- 配色有琥珀、墨、竹、玫红和自定义；界面不使用蓝色（系统高对比度模式和 macOS 系统菜单除外）
+- 配色有琥珀、墨、竹、玫红和自定义；自有界面不使用蓝色（系统高对比度模式、macOS 系统菜单和 Linux 框架原生候选面板除外）
 
 **查字**
 
@@ -68,6 +68,8 @@ macOS 上 `Ctrl` 即 `⌃` 键。
 
 **macOS**：从菜单栏的输入法菜单打开。
 
+**Linux**：从输入法菜单或应用列表的“TigerType 虎码”打开。GNOME/IBus 随包提供虎码候选外观适配：启用后候选同步虎码字体和配色，其他输入法保持原样。适配首次安装或代码更新后需注销登录一次，安装器会自动登记；之后切换主题无需重登。Fcitx5 当前仍使用系统候选外观。原生候选点击不会直接上屏；GNOME 的菜单确认尚不可用，请用键盘选字。试验版的生僻字显示与其他限制见[项目状态](docs/project-status.md)。
+
 ## 安装
 
 目前没有发布安装包，需要从源码构建。构建环境见[开发命令](docs/implementation-plan.md#开发命令)。
@@ -102,10 +104,18 @@ sudo target/package/TigerType.app/Contents/MacOS/tigertype install
 sudo '/Library/Input Methods/TigerType.app/Contents/MacOS/tigertype' uninstall
 ```
 
+### Linux 试验安装包
+
+目标为 Ubuntu 24.04/26.04 LTS、Debian 13 的 x86_64 GNOME/KDE Plasma 桌面；必须选择对应发行版和版本的包，不能把 Ubuntu 26.04 的产物用于旧系统。尚未完成的验收见[项目状态](docs/project-status.md)，当前不建议替换日用输入法。
+
+在完整解包后的目录，以普通用户运行 `./tigertype-setup`。安装器会请求管理员授权、联网补齐运行依赖、安装全部随包字体，并登记当前用户的输入源；不需要另装开发工具或手改配置。升级同样运行新版目录中的安装器。IBus 输入引擎会自动刷新并核验发现；GNOME 候选外观扩展首次安装或代码更新仍需注销登录一次，无需手动启用。刷新会取消尚未选定的组合，请先结束输入。Fcitx5 原生插件仍需注销重登后加载。安装器不会关闭现用应用或重启桌面。
+
+卸载运行 `/opt/tigertype/bin/tigertype-setup uninstall`，只移除程序及本用户的 TigerType 登记，保留个人数据、字体和原有输入框架。安装失败须查看原始错误后重试，不能把“文件已复制”当作安装已生效。当前安装依赖联网，不是离线安装包。
+
 ## 数据位置
 
-- 设置和用户数据：Windows 在 `%APPDATA%\TigerType`，macOS 在 `~/Library/Application Support/TigerType`；配置文件为其中的 `config/settings.toml`
-- TigerType 不读取个人词库，也不改动已有的其他输入法
+- 设置和用户数据：Windows 在 `%APPDATA%\TigerType`，macOS 在 `~/Library/Application Support/TigerType`，Linux 在 `$XDG_DATA_HOME/TigerType`（默认 `~/.local/share/TigerType`）；配置文件为其中的 `config/settings.toml`
+- TigerType 不读取个人词库，不删除其他输入法及其数据
 - 码表取自虎码官网盘的“虎码秃版 小狼毫（Win）”方案包（2026.08.14），字体来源见 [`resources/fonts.lock.json`](resources/fonts.lock.json)
 
 码表与字体的授权尚未确认，仅供个人使用，安装包不公开发布。

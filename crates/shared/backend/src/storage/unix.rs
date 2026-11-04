@@ -1,4 +1,4 @@
-//! Mac 安全存储：逐级 openat 固定目录、O_NOFOLLOW、所有者/硬链接检查、flock 与原子替换。
+//! macOS/Linux 共用安全存储：逐级 openat 固定目录、链接与所有权检查、flock 和原子替换。
 use crate::{Result, resources};
 use std::{
     ffi::CString,
@@ -105,12 +105,22 @@ impl Directory {
     fn write(&self, part: &str, contents: &[u8]) -> Result<()> {
         let mut file = self.file(part.as_ref(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
         file.write_all(contents)?;
-        // SAFETY: 对本函数持有的普通文件请求落盘，失败保留事务文件，不伪装保存成功。
+        sync_file(&file)?;
+        Ok(())
+    }
+}
+fn sync_file(file: &File) -> Result<()> {
+    // Mac 要求刷到设备，Linux 使用 fsync；失败都保留事务文件，不能伪装保存成功。
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: file 持有有效的普通文件描述符，命令不接收额外指针。
         if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
             return Err(std::io::Error::last_os_error().into());
         }
-        Ok(())
     }
+    #[cfg(target_os = "linux")]
+    file.sync_all()?;
+    Ok(())
 }
 fn read(file: File, limit: u64) -> Result<Vec<u8>> {
     // 先按实际大小留足容量：码表文件大，边读边翻倍会多占近一倍内存。
@@ -131,6 +141,38 @@ pub fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
 }
 pub fn plain(path: &Path) -> PathBuf {
     path.to_owned()
+}
+/// Linux 遵循 XDG 数据目录；逐级创建缺失父目录且拒绝链接，不以 create_dir_all 绕开边界。
+#[cfg(target_os = "linux")]
+pub fn user_data_root(home: &Path, xdg: Option<&Path>) -> Result<PathBuf> {
+    let path = xdg
+        .map(Path::to_owned)
+        .unwrap_or_else(|| home.join(".local/share"));
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| !matches!(c, Component::RootDir | Component::Normal(_)))
+    {
+        return Err("XDG 数据目录须为无上级跳转的绝对路径".into());
+    }
+    let mut directory = Directory::pin(Path::new("/"))?;
+    for component in path.components() {
+        if let Component::Normal(part) = component {
+            directory = match directory.child(part) {
+                Ok(child) => child,
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    directory.create(part.to_str().ok_or("数据目录不是 UTF-8")?)?
+                }
+                Err(error) => return Err(error),
+            };
+        }
+    }
+    directory.owned()?;
+    Ok(path.join("TigerType"))
 }
 pub fn reject_links(path: &Path) -> Result<()> {
     // 只允许末尾尚不存在；已存在的每一级仍用无跟随打开验证。
@@ -270,11 +312,35 @@ pub(crate) fn write_new(path: &Path, contents: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xdg_data_parents_are_private_and_do_not_follow_links() -> Result<()> {
+        let home = resources::new_directory(
+            &std::env::temp_dir().canonicalize()?,
+            "tigertype-linux-home",
+        )?;
+        assert_eq!(
+            user_data_root(&home, None)?,
+            home.join(".local/share/TigerType")
+        );
+        let directory = home.join("custom/deep");
+        assert_eq!(
+            user_data_root(&home, Some(&directory))?,
+            directory.join("TigerType")
+        );
+        assert_eq!(std::fs::metadata(&directory)?.mode() & 0o777, 0o700);
+        assert!(user_data_root(&home, Some(Path::new("relative"))).is_err());
+        std::os::unix::fs::symlink(&directory, home.join("alias"))?;
+        assert!(user_data_root(&home, Some(&home.join("alias"))).is_err());
+        assert!(user_data_root(&home, Some(&home.join("alias/new"))).is_err());
+        assert!(!directory.join("new").exists());
+        Ok(())
+    }
     #[test]
     fn lease_links_conflicts_and_atomic_backup() -> Result<()> {
         let parent = resources::new_directory(
             &std::env::temp_dir().canonicalize()?,
-            "tigertype-mac-storage",
+            "tigertype-unix-storage",
         )?;
         let root = parent.join("data");
         let data = Data::create(&root)?;
@@ -295,6 +361,28 @@ mod tests {
         std::os::unix::fs::symlink(&root, parent.join("alias"))?;
         assert!(Data::open(&parent.join("alias")).is_err());
         drop(data);
+        Ok(())
+    }
+
+    #[test]
+    fn replaced_directories_and_symlinked_parents_cannot_receive_settings() -> Result<()> {
+        let parent = resources::new_directory(
+            &std::env::temp_dir().canonicalize()?,
+            "tigertype-unix-replacement",
+        )?;
+        let root = parent.join("data");
+        let data = Data::create(&root)?;
+        let contents = crate::settings::render(&Default::default())?.into_bytes();
+        data.replace_settings(None, &contents)?;
+        // 只移动本测试新建的目录；持有的旧描述符不能掩盖路径被替换。
+        std::fs::rename(root.join("config"), root.join("old-config"))?;
+        std::fs::create_dir(root.join("config"))?;
+        assert!(data.settings().is_err());
+        assert!(data.replace_settings(None, &contents).is_err());
+        assert!(!root.join("config/settings.toml").exists());
+        std::os::unix::fs::symlink(&parent, parent.join("alias"))?;
+        assert!(Data::open(&parent.join("alias/data")).is_err());
+        assert!(read_file(&parent.join("alias/data/ownership"), 128).is_err());
         Ok(())
     }
 }

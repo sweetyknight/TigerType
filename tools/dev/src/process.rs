@@ -3,7 +3,7 @@
 use crate::Result;
 #[cfg(windows)]
 use std::os::windows::{io::AsRawHandle, process::CommandExt};
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 use std::process::{Child, Stdio};
 use std::{
     process::{Command, ExitStatus},
@@ -15,9 +15,9 @@ use windows_sys::Win32::{
     System::Threading::WaitForSingleObject,
 };
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 struct ChildGuard(Child);
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         // panic、超时和等待失败均回收自己创建的进程，不触碰其他进程。
@@ -107,12 +107,58 @@ pub fn run(command: &mut Command, timeout: Duration) -> Result<ExitStatus> {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
-pub fn run(_: &mut Command, _: Duration) -> Result<ExitStatus> {
-    Err("开发期子进程工具仅支持 Windows/macOS".into())
+#[cfg(target_os = "linux")]
+pub fn run(command: &mut Command, timeout: Duration) -> Result<ExitStatus> {
+    use std::{
+        os::fd::{AsRawFd, FromRawFd, OwnedFd},
+        time::Instant,
+    };
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or("子进程期限溢出")?;
+    let mut child = ChildGuard(command.stdin(Stdio::null()).spawn()?);
+    // SAFETY: 仅为尚未回收的本次子进程取得 pidfd，flags 为零；支持范围的内核均提供此接口。
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child.0.id(), 0) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: pidfd_open 返回的新描述符已核对非负，唯一交给 OwnedFd 关闭。
+    let descriptor = unsafe { OwnedFd::from_raw_fd(raw.try_into()?) };
+    let mut event = libc::pollfd {
+        fd: descriptor.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        if let Some(status) = child.0.try_wait()? {
+            return Ok(status);
+        }
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("子进程超时；将终止并回收")?;
+        let millis = left.as_millis().saturating_add(1).min(i32::MAX as u128) as i32;
+        // SAFETY: poll 只读取一个有效 pidfd，等待退出事件或绝对期限；EINTR 不重置预算。
+        let count = unsafe { libc::poll(&mut event, 1, millis) };
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.into());
+        }
+        if event.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err("子进程 pidfd 等待失败".into());
+        }
+        // 很长的期限可能分段等待；普通检查只等待一次，不周期唤醒。
+    }
 }
 
-#[cfg(all(test, any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+pub fn run(_: &mut Command, _: Duration) -> Result<ExitStatus> {
+    Err("开发期子进程工具仅支持 Windows/macOS/Linux".into())
+}
+
+#[cfg(all(test, any(windows, target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
     #[test]

@@ -1,6 +1,6 @@
 [workspace]
 # 分组目录不是包；只登记已有实现，不为未开发的平台建立占位 crate。
-members = ["crates/shared/contracts", "crates/shared/engine", "crates/shared/input-client", "crates/shared/ui-model", "crates/shared/backend", "crates/windows/ipc", "crates/windows/ui", "crates/windows/input-method", "crates/windows/app", "crates/macos/input-method", "crates/macos/ui", "crates/macos/app", "crates/linux/ui", "tools/dev"]
+members = ["crates/shared/contracts", "crates/shared/engine", "crates/shared/input-client", "crates/shared/ui-model", "crates/shared/backend", "crates/windows/ipc", "crates/windows/ui", "crates/windows/input-method", "crates/windows/app", "crates/macos/input-method", "crates/macos/ui", "crates/macos/app", "crates/linux/ui", "crates/linux/input-method", "crates/linux/app", "tools/dev"]
 resolver = "3"
 
 [workspace.package]
@@ -22,6 +22,8 @@ tigertype-macos-input-method = { path = "crates/macos/input-method" }
 tigertype-macos-ui = { path = "crates/macos/ui" }
 tigertype-macos-app = { path = "crates/macos/app" }
 tigertype-linux-ui = { path = "crates/linux/ui" }
+tigertype-linux-input-method = { path = "crates/linux/input-method" }
+tigertype-linux-app = { path = "crates/linux/app" }
 sha2 = "=0.10.9"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.154"
@@ -40,6 +42,8 @@ dispatch2 = { version = "=0.3.1", default-features = false, features = ["std", "
 # Linux 查字/设置的 GTK4 绑定，仅在 Linux 目标链接；无障碍接口在绑定里自 v4_10 起提供，基线即 GTK 4.10
 #（Ubuntu 24.04、Debian 13、CentOS Stream 10、Arch 及更新）。
 gtk4 = { version = "=0.11.5", features = ["v4_10"] }
+# 复用 GTK 已锁定的 GIO 版本，仅用于 Linux 组装和输入法的 D-Bus 边界。
+gio = "=0.22.10"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

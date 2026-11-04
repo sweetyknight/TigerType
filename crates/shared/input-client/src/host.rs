@@ -17,7 +17,7 @@ pub enum Error {
     Exhausted,
 }
 
-/// 宿主到后台的通道：跨进程（Windows 命名管道）或进程内（macOS 引擎线程）；请求带绝对截止时间。
+/// 宿主到后台的通道：跨进程（Windows 命名管道）或进程内（macOS/Linux 引擎线程）；请求带绝对截止时间。
 pub trait Channel {
     /// true 表示刚建立新连接：后台上的旧会话与焦点均已不存在。
     fn ensure(&mut self, deadline: Instant) -> Result<bool, Error>;

@@ -148,7 +148,7 @@ impl CandidateFont {
     }
 }
 
-/// 配色主题。产品要求界面不得出现蓝色：每个颜色的蓝分量都不超过红、绿分量，由测试逐个核对。
+/// 自有界面的配色主题不得出现蓝色：每个颜色的蓝分量都不超过红、绿分量，由测试逐个核对；Linux 框架原生面板使用系统主题。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Theme {

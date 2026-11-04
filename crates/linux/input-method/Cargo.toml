@@ -1,0 +1,17 @@
+[package]
+name = "tigertype-linux-input-method"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tigertype-contracts.workspace = true
+tigertype-input-client.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# GIO 仅用于输入法 D-Bus 适配，不加载 GTK 或通用异步运行时。
+gio.workspace = true
+
+[lints]
+workspace = true

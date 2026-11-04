@@ -29,6 +29,34 @@ type Shared = Rc<RefCell<State>>;
 type WeakState = Weak<RefCell<State>>;
 type Submit = Rc<dyn Fn(Request, Completion)>;
 
+/// 产品启动入口：初始化原生视图并核对拆分字体，不能让 Pango 静默替换私用区字根。
+pub fn initialize() -> Result<(), String> {
+    gtk::init().map_err(|e| e.to_string())?;
+    let label = gtk::Label::new(None);
+    let description = gtk::pango::FontDescription::from_string("LXGW WenKai GB Screen 16");
+    let font = label
+        .pango_context()
+        .load_font(&description)
+        .ok_or("无法加载拆分字体")?;
+    if !learning_font(&font) {
+        return Err(format!(
+            "缺少含虎码字根的 LXGW WenKai GB Screen，请重新安装 TigerType（实际字体：{}；字根覆盖：{:?}）",
+            font.describe(),
+            ['\u{e4e4}', '\u{e46a}', '\u{e432}'].map(|root| font.has_char(root))
+        ));
+    }
+    Ok(())
+}
+fn learning_font(font: &gtk::pango::Font) -> bool {
+    // Fontconfig 在中文桌面返回锁定字体的本地化字族名，两者都必须实际包含融合字根。
+    matches!(
+        font.describe().family().as_deref(),
+        Some("LXGW WenKai GB Screen" | "霞鹜文楷 GB 屏幕阅读版")
+    ) && ['\u{e4e4}', '\u{e46a}', '\u{e432}']
+        .iter()
+        .all(|root| font.has_char(*root))
+}
+
 /// 不可克隆的一次性回复，可在工作线程完成。生产工作线程应在事务保存并提交热重载后才回复 Saved。
 /// 回复经默认主上下文的一次性空闲源回到 GTK 主线程；丢弃也会唤醒界面并报告断开，不轮询、不定时。
 pub struct Completion(Option<glib::thread_guard::ThreadGuard<WeakState>>);
@@ -384,6 +412,17 @@ pub mod tests {
     }
     pub fn run() {
         gtk::init().expect("GTK 原生检查需要图形会话（Wayland 或 X11）");
+        initialize().expect("锁定字体必须通过产品启动校验");
+        let context = gtk::Label::new(None).pango_context();
+        let wrong = context
+            .load_font(&gtk::pango::FontDescription::from_string(
+                "TigerTypeMissingFont 16",
+            ))
+            .unwrap();
+        assert!(
+            !learning_font(&wrong),
+            "Pango 的静默替代字体不得冒充拆分字体"
+        );
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

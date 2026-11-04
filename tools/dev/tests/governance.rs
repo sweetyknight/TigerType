@@ -154,6 +154,39 @@ fn reach(origin: &str, via: &str, reached: &str) -> Value {
 }
 #[test]
 fn layering_follows_the_multi_platform_rules() {
+    // Linux GIO 仅作 D-Bus 边界；不能借道视图/输入法读取词表或引用其他平台。
+    assert!(
+        policy::architecture(&reach(
+            "tigertype-linux-app",
+            "tigertype-backend",
+            "tigertype-engine"
+        ))
+        .is_ok()
+    );
+    for (origin, via, reached) in [
+        ("tigertype-linux-input-method", "gio", "tigertype-backend"),
+        ("tigertype-linux-input-method", "gio", "gtk4"),
+        (
+            "tigertype-linux-input-method",
+            "tigertype-input-client",
+            "tigertype-engine",
+        ),
+        (
+            "tigertype-linux-ui",
+            "tigertype-ui-model",
+            "tigertype-linux-app",
+        ),
+        (
+            "tigertype-linux-app",
+            "tigertype-linux-ui",
+            "tigertype-macos-ui",
+        ),
+    ] {
+        assert!(
+            policy::architecture(&reach(origin, via, reached)).is_err(),
+            "{origin} -> {reached}"
+        );
+    }
     // 允许：backend 经 windows-sys 到达链接支撑；app 组装 backend（及其下的 engine）；平台前端经 input-client 到 contracts。
     for (origin, via, reached) in [
         ("tigertype-backend", "windows-sys", "windows-link"),

@@ -1,0 +1,11 @@
+//! Linux 进程组装：固定引擎与工作线程，框架输入和查字设置不直接调用引擎。
+pub mod channel;
+#[cfg(target_os = "linux")]
+pub mod integration;
+#[cfg(target_os = "linux")]
+pub mod native;
+pub mod package;
+pub mod platform;
+pub mod runtime;
+#[cfg(target_os = "linux")]
+pub mod setup;

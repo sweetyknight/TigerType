@@ -3,7 +3,7 @@ use std::{process::Command, time::Duration};
 use tigertype_dev::{Result, check, process, project_root};
 fn run() -> Result<()> {
     let root = project_root()?;
-    for args in check::commands(cfg!(target_os = "macos")) {
+    for args in check::commands(std::env::consts::OS) {
         println!("\n== cargo {} ==", args.join(" "));
         let status = process::run(
             Command::new("cargo").args(&args).current_dir(&root),
@@ -14,7 +14,7 @@ fn run() -> Result<()> {
         }
     }
     println!(
-        "本机常规门禁和异平台类型检查通过；异平台原生测试未执行。真实应用、完整资源与长期验收另列。"
+        "本机常规门禁通过；异平台仅执行命令矩阵所列的类型检查，不计原生测试。真实应用、完整资源与长期验收另列。"
     );
     Ok(())
 }

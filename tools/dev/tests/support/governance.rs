@@ -24,6 +24,8 @@ pub const COMPONENTS: &[(&str, &str)] = &[
     ("tigertype-macos-ui", "crates/macos/ui"),
     ("tigertype-macos-app", "crates/macos/app"),
     ("tigertype-linux-ui", "crates/linux/ui"),
+    ("tigertype-linux-input-method", "crates/linux/input-method"),
+    ("tigertype-linux-app", "crates/linux/app"),
     ("tigertype-dev", "tools/dev"),
 ];
 /// 直接依赖含 dev/build/平台条件；不能用别名、测试辅助或空壳绕开边界。
@@ -118,6 +120,24 @@ const RULES: &[(&str, &[&str])] = &[
         &["tigertype-contracts", "tigertype-ui-model", "gtk4"],
     ),
     (
+        "tigertype-linux-input-method",
+        &["tigertype-contracts", "tigertype-input-client", "gio"],
+    ),
+    (
+        "tigertype-linux-app",
+        &[
+            "tigertype-contracts",
+            "tigertype-input-client",
+            "tigertype-backend",
+            "tigertype-linux-input-method",
+            "tigertype-linux-ui",
+            "gio",
+            "libc",
+            "serde",
+            "serde_json",
+        ],
+    ),
+    (
         "tigertype-dev",
         &[
             "tigertype-contracts",
@@ -128,6 +148,7 @@ const RULES: &[(&str, &[&str])] = &[
             "tigertype-macos-ui",
             "tigertype-macos-app",
             "serde_json",
+            "tigertype-linux-app",
             "libc",
             "windows-sys",
             "objc2",
@@ -140,6 +161,7 @@ const RULES: &[(&str, &[&str])] = &[
 const FRONTENDS: &[&str] = &[
     "tigertype-windows-input-method",
     "tigertype-macos-input-method",
+    "tigertype-linux-input-method",
 ];
 const VIEWS: &[&str] = &[
     "tigertype-ui-model",
@@ -194,6 +216,17 @@ fn file_primitive(name: &str) -> bool {
 /// 检查传递可达性，而不仅是 Cargo.toml 的直接引用。
 fn forbidden(origin: &str, reached: &str) -> Option<&'static str> {
     let component = project_platform(reached).is_some();
+    // GIO/GLib 可承载 D-Bus，但 GTK 绘图绑定不能混入输入法或共享业务。
+    if ["gtk4", "gdk4", "gsk4", "pango", "cairo", "graphene"]
+        .iter()
+        .any(|name| reached.starts_with(name))
+        && !matches!(
+            origin,
+            "tigertype-linux-ui" | "tigertype-linux-app" | "tigertype-dev"
+        )
+    {
+        return Some("GTK 绘图只允许 Linux 查字设置视图及其组装方到达");
+    }
     if PURE.contains(&origin) && (platform(reached) || component) {
         return Some("纯共享层不得到达平台包");
     }
@@ -201,7 +234,10 @@ fn forbidden(origin: &str, reached: &str) -> Option<&'static str> {
         return Some("产品不得反向依赖开发工具");
     }
     if origin != "tigertype-dev"
-        && matches!(reached, "tigertype-windows-app" | "tigertype-macos-app")
+        && matches!(
+            reached,
+            "tigertype-windows-app" | "tigertype-macos-app" | "tigertype-linux-app"
+        )
     {
         return Some("产品组件不得反向依赖平台组装层");
     }
@@ -215,7 +251,7 @@ fn forbidden(origin: &str, reached: &str) -> Option<&'static str> {
     }
     if !matches!(
         origin,
-        "tigertype-dev" | "tigertype-windows-app" | "tigertype-macos-app"
+        "tigertype-dev" | "tigertype-windows-app" | "tigertype-macos-app" | "tigertype-linux-app"
     ) && (reached == "tigertype-backend" || FRONTENDS.contains(&reached))
     {
         return Some("只有平台组装与开发工具接入后台和输入法");
