@@ -3,14 +3,14 @@
 范围以 [实施方案](docs/implementation-plan.md) 为准，实际状态只维护在 [项目状态](docs/project-status.md)。开发期不向后兼容；旧路线代码和文档直接删除，不保留归档或兼容层。
 
 ## 产品与架构
-- 源码一级按 shared/windows/macos，二级按职责；input-client 是宿主侧共享逻辑，input-method 是平台系统适配，ui/ui-model 只指查字/设置。产品不得反向依赖 tools/dev（含 dev/build），两平台产品不互相引用；具体允许边与目录归属由方案和架构测试同步维护，不保留旧包转发壳。
-- Windows 10/11 x64、x86 宿主；macOS 13+ 本机架构按方案分阶段实施（IMK 输入法进程，管理员安装到 `/Library/Input Methods`，仅个人使用、不做代码签名）；Linux 只预留，暂不开发。专用 Rust 虎码单字/词引擎，不依赖 librime、Lua、OpenCC 运行库或 Rime 配置生态。
+- 源码一级按 shared/windows/macos/linux，二级按职责；input-client 是宿主侧共享逻辑，input-method 是平台系统适配，ui/ui-model 只指查字/设置。产品不得反向依赖 tools/dev（含 dev/build），各平台产品不互相引用；具体允许边与目录归属由方案和架构测试同步维护，不保留旧包转发壳。
+- Windows 10/11 x64、x86 宿主；macOS 13+ 本机架构按方案分阶段实施（IMK 输入法进程，管理员安装到 `/Library/Input Methods`，仅个人使用、不做代码签名）；Linux 目前只有 GTK4 查字/设置视图，输入法框架（IBus/Fcitx5）、组装、存储与安装待批准后开发。专用 Rust 虎码单字/词引擎，不依赖 librime、Lua、OpenCC 运行库或 Rime 配置生态。
 - 正式代码、开发工具和测试使用 Rust。Windows 安装包经用户批准由 Inno Setup 编译，`.iss` 只含声明与停后台、登记/改名/清理占用旧文件的少量 Pascal，打包驱动仍为 Rust。macOS 打包、安装、升级与卸载全由 Rust 完成，不用 pkgbuild/productbuild/codesign/lipo/iconutil，链接后不改写可执行文件。
-- 资源占用从低：不引入异步运行时、通用界面框架；空闲零定时唤醒。热点先剖析，确需时依次用 `core::arch`、`asm!`，只放在允许 unsafe 的平台边界，并有与安全实现的对照测试。
+- 资源占用从低：不引入异步运行时、通用界面框架（例外：Linux 查字/设置经批准用 GTK4，仅限 linux-ui）；空闲零定时唤醒。热点先剖析，确需时依次用 `core::arch`、`asm!`，只放在允许 unsafe 的平台边界，并有与安全实现的对照测试。
 - 只建立有实现的 crate。依赖边界由 Rust 架构测试检查；新增成员/依赖须同步方案、调用方与测试，不增加通配豁免。
 - contracts/engine/input-client/ui-model 禁止 unsafe 和任何平台依赖；engine 不做文件、进程或窗口操作。backend 共享业务不依赖平台组件，文件系统原语只放内部 storage 系统边界。UI 不调用 engine/backend；input-method 不依赖 engine/backend/ui-model/UI、不加载词表；候选窗归 input-method。分层与禁止边以方案“多平台架构”为准。
 - 每登录会话一个后台（macOS 为输入法进程本身），引擎与 UI 各有固定线程。不得全局业务可变状态、裸指针/窗口句柄暗中耦合或逐键/逐连接建线程。
-- Windows/macOS FFI unsafe 限于边界，资源配对释放，panic 不穿过系统回调（含 Objective-C 回调）。注释以 `SAFETY:` 开头，正文简体中文。
+- Windows/macOS FFI unsafe 限于边界，资源配对释放，panic 不穿过系统回调（含 Objective-C 与 GTK 回调）；Linux 视图不手写 unsafe。注释以 `SAFETY:` 开头，正文简体中文。
 
 ## 输入与数据保护
 - TSF 单次回调与 IMK 单次按键处理主动等待总预算 50ms；连接、编码、重试共享绝对截止时间；事件驱动、可取消，不忙轮询或持锁阻塞通信。

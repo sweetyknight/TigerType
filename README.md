@@ -6,7 +6,7 @@ TigerType 是专为[虎码](https://huma.ysepan.com/)编写的输入法，用 Ru
 |---|---|
 | Windows 10/11 x64 | 可安装使用，支持 64 位和 32 位应用 |
 | macOS 13+（Apple 芯片） | 开发中，已能安装和打字，尚未完成完整验收 |
-| Linux | 尚未开发 |
+| Linux | 开发中：查字与设置界面已完成，输入法尚不可用 |
 
 各平台实际验收到哪一步，以[项目状态](docs/project-status.md)为准。
 

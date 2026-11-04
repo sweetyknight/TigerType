@@ -390,6 +390,7 @@ fn component_paths_match_platform_and_responsibility() {
             "crates/shared/input-method",
         ),
         ("tigertype-macos-ui", "crates/windows/ui"),
+        ("tigertype-linux-ui", "crates/shared/ui"),
         ("tigertype-input-client", "crates/frontend"),
         ("tigertype-dev", "crates/windows/app"),
         ("tigertype-unapproved", "crates/shared/unapproved"),
@@ -417,6 +418,12 @@ fn split_components_reject_tool_back_edges_cross_platform_and_shared_platform_de
             "tigertype-backend",
         ),
         ("tigertype-dev", "tigertype-macos-ui", "objc2"),
+        (
+            "tigertype-linux-ui",
+            "tigertype-ui-model",
+            "tigertype-contracts",
+        ),
+        ("tigertype-linux-ui", "gtk4", "glib"),
     ] {
         assert!(policy::architecture(&reach(origin, via, reached)).is_ok());
     }
@@ -452,6 +459,39 @@ fn split_components_reject_tool_back_edges_cross_platform_and_shared_platform_de
             "tigertype-macos-ui",
             "tigertype-ui-model",
             "tigertype-engine",
+        ),
+        // GTK 只许 Linux 视图使用；三个平台的组件彼此不依赖，Linux 视图同样不碰引擎与后台。
+        ("tigertype-ui-model", "tigertype-contracts", "gtk4"),
+        ("tigertype-input-client", "tigertype-contracts", "pango"),
+        (
+            "tigertype-linux-ui",
+            "tigertype-contracts",
+            "tigertype-macos-ui",
+        ),
+        (
+            "tigertype-macos-ui",
+            "tigertype-contracts",
+            "tigertype-linux-ui",
+        ),
+        (
+            "tigertype-windows-app",
+            "tigertype-windows-ui",
+            "tigertype-linux-ui",
+        ),
+        (
+            "tigertype-linux-ui",
+            "tigertype-ui-model",
+            "tigertype-engine",
+        ),
+        (
+            "tigertype-linux-ui",
+            "tigertype-contracts",
+            "tigertype-backend",
+        ),
+        (
+            "tigertype-macos-input-method",
+            "tigertype-input-client",
+            "tigertype-linux-ui",
         ),
     ] {
         assert!(

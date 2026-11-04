@@ -8,6 +8,8 @@ const MAC: &[&str] = &[
     "tigertype-macos-input-method",
     "tigertype-macos-ui",
     "tigertype-macos-app",
+    // 样式表是纯逻辑，Mac 上同样执行；GTK 控件只在 Linux 编译，原生测试在 Mac 上报告未运行。
+    "tigertype-linux-ui",
     "tigertype-dev",
 ];
 fn selection(macos: bool) -> Vec<&'static str> {

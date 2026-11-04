@@ -23,6 +23,7 @@ pub const COMPONENTS: &[(&str, &str)] = &[
     ("tigertype-macos-input-method", "crates/macos/input-method"),
     ("tigertype-macos-ui", "crates/macos/ui"),
     ("tigertype-macos-app", "crates/macos/app"),
+    ("tigertype-linux-ui", "crates/linux/ui"),
     ("tigertype-dev", "tools/dev"),
 ];
 /// 直接依赖含 dev/build/平台条件；不能用别名、测试辅助或空壳绕开边界。
@@ -113,6 +114,10 @@ const RULES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "tigertype-linux-ui",
+        &["tigertype-contracts", "tigertype-ui-model", "gtk4"],
+    ),
+    (
         "tigertype-dev",
         &[
             "tigertype-contracts",
@@ -140,6 +145,7 @@ const VIEWS: &[&str] = &[
     "tigertype-ui-model",
     "tigertype-windows-ui",
     "tigertype-macos-ui",
+    "tigertype-linux-ui",
 ];
 const PURE: &[&str] = &[
     "tigertype-contracts",
@@ -147,7 +153,7 @@ const PURE: &[&str] = &[
     "tigertype-input-client",
     "tigertype-ui-model",
 ];
-/// 平台包：系统绑定、Objective-C 运行时与 libc。
+/// 平台包：系统绑定、Objective-C 运行时、libc 与 GTK/GLib 系列绑定。
 fn platform(name: &str) -> bool {
     name == "windows"
         || name.starts_with("windows-")
@@ -158,6 +164,26 @@ fn platform(name: &str) -> bool {
         || name == "dispatch2"
         || name.starts_with("core-foundation")
         || name == "libc"
+        || [
+            "gtk4",
+            "gdk4",
+            "gsk4",
+            "gdk-pixbuf",
+            "glib",
+            "gobject-sys",
+            "gio",
+            "pango",
+            "cairo",
+            "graphene",
+        ]
+        .iter()
+        .any(|family| name.starts_with(family))
+}
+/// 项目平台组件所属平台；共享组件与开发工具为 None。
+fn project_platform(name: &str) -> Option<&'static str> {
+    ["windows", "macos", "linux"]
+        .into_iter()
+        .find(|os| name.starts_with(&format!("tigertype-{os}-")))
 }
 /// backend 只许文件原语所需的 windows-sys（及其链接支撑）与 libc，不得到达界面或 COM 绑定。
 fn file_primitive(name: &str) -> bool {
@@ -167,9 +193,8 @@ fn file_primitive(name: &str) -> bool {
 }
 /// 检查传递可达性，而不仅是 Cargo.toml 的直接引用。
 fn forbidden(origin: &str, reached: &str) -> Option<&'static str> {
-    let project_platform =
-        reached.starts_with("tigertype-windows-") || reached.starts_with("tigertype-macos-");
-    if PURE.contains(&origin) && (platform(reached) || project_platform) {
+    let component = project_platform(reached).is_some();
+    if PURE.contains(&origin) && (platform(reached) || component) {
         return Some("纯共享层不得到达平台包");
     }
     if origin != "tigertype-dev" && reached == "tigertype-dev" {
@@ -180,10 +205,10 @@ fn forbidden(origin: &str, reached: &str) -> Option<&'static str> {
     {
         return Some("产品组件不得反向依赖平台组装层");
     }
-    if (origin.starts_with("tigertype-windows-") && reached.starts_with("tigertype-macos-"))
-        || (origin.starts_with("tigertype-macos-") && reached.starts_with("tigertype-windows-"))
+    if let (Some(from), Some(to)) = (project_platform(origin), project_platform(reached))
+        && from != to
     {
-        return Some("两平台不能互相依赖");
+        return Some("各平台组件不能互相依赖");
     }
     if origin == "tigertype-backend" && platform(reached) && !file_primitive(reached) {
         return Some("backend 只许文件原语平台包");
@@ -196,7 +221,7 @@ fn forbidden(origin: &str, reached: &str) -> Option<&'static str> {
         return Some("只有平台组装与开发工具接入后台和输入法");
     }
     if origin == "tigertype-backend"
-        && (project_platform || VIEWS.contains(&reached) || reached == "tigertype-input-client")
+        && (component || VIEWS.contains(&reached) || reached == "tigertype-input-client")
     {
         return Some("共享后台不得依赖传输、界面或宿主逻辑");
     }
