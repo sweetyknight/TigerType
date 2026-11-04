@@ -746,7 +746,7 @@ impl Popup {
             result
         }
     }
-    /// 按设计稿绘制：高亮行为圆角底色加左侧指示条（无底色主题只换字色），注释列对齐，页脚以分隔线隔开。
+    /// 按设计稿绘制：高亮行为圆角底色（无底色主题只换字色），注释列对齐，页脚以分隔线隔开。
     pub(crate) fn draw(&self, dc: HDC, client: &RECT) {
         let Ok(view) = self.view.try_borrow() else {
             return;
