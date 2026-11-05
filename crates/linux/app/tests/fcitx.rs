@@ -66,20 +66,30 @@ fn installer_session_registration_preserves_existing_fcitx_entries() {
         let main=glib::MainLoop::new(Some(&context),false);let quit=main.clone();
         let worker=std::thread::spawn(move||{
             let _quit=Quit(quit);
-            let run=|action|{
-                // 此用例只验控制器登记；固定会话类型，不能继承宿主 Wayland 后误走真实 KWin 配置。
-                let output=Command::new(env!("CARGO_BIN_EXE_tigertype-linux-app")).args(["integration","fcitx",action])
-                    .env("DBUS_SESSION_BUS_ADDRESS",address.trim()).env("HOME",&root).env("XDG_CONFIG_HOME",root.join("config")).env("XDG_CURRENT_DESKTOP","KDE").env("XDG_SESSION_TYPE","x11").output().unwrap();
+            let run=|args:&[&str]|{
+                // 此用例只验控制器登记；固定会话类型，不能继承宿主 Wayland 后误走真实 KWin 配置；GSettings 只用内存后端。
+                let output=Command::new(env!("CARGO_BIN_EXE_tigertype-linux-app")).arg("integration").args(args)
+                    .env("DBUS_SESSION_BUS_ADDRESS",address.trim()).env("HOME",&root).env("XDG_CONFIG_HOME",root.join("config")).env("XDG_CURRENT_DESKTOP","KDE").env("XDG_SESSION_TYPE","x11").env("GSETTINGS_BACKEND","memory").output().unwrap();
                 assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
             };
-            run("install");run("install");
-            assert!(root.join("config/autostart/tigertype.desktop").is_file());
-            run("remove");
-            assert!(!root.join("config/autostart/tigertype.desktop").exists());
+            let autostart=root.join("config/autostart/tigertype.desktop");
+            run(&["fcitx","install"]);run(&["fcitx","install"]);
+            // 框架已收下本输入法：自启动只启动后台，以后的登录不再改用户的输入法列表。
+            let entry=std::fs::read_to_string(&autostart).unwrap();
+            assert!(entry.contains("tigertype-linux-app fcitx") && !entry.contains("login"),"{entry}");
+            // 用户把本输入法排到最前后，再次安装不能把它挪回末尾。
+            let user=connect(address.trim());
+            user.call_sync(Some("org.fcitx.Fcitx5"),"/controller","org.fcitx.Fcitx.Controller1","SetInputMethodGroupInfo",Some(&("Default","us",vec![("tigertype","" ),("keyboard-us",""),("pinyin","")]).to_variant()),None,gio::DBusCallFlags::NONE,1000,gio::Cancellable::NONE).unwrap();
+            run(&["fcitx","install"]);
+            run(&["remove"]);
+            assert!(!autostart.exists());
         });
         main.run();let result=worker.join();assert_eq!(*entries.borrow(),original);bus.unregister_object(id).unwrap();result.unwrap();
-        let history=history.borrow();assert_eq!(history.len(),3);
-        for installed in &history[..2] {assert_eq!(&installed[..2],original.as_slice());assert_eq!(installed.len(),3);assert_eq!(installed[2].0,"tigertype");}
+        let history=history.borrow();
+        assert_eq!(history.len(),3,"已登记或用户调整过顺序时安装不得再写分组：{history:?}");
+        assert_eq!(&history[0][..2],original.as_slice());assert_eq!(history[0].len(),3);assert_eq!(history[0][2].0,"tigertype");
+        assert_eq!(history[1][0].0,"tigertype","第二项是测试模拟的用户调整");
+        assert_eq!(history[2],original);
     }).unwrap();
 }
 
@@ -281,6 +291,33 @@ fn actual_fcitx_plugin_loads_and_commits_through_its_native_frontend() {
                     );
                 }
                 assert_eq!(*commits.lock().unwrap(), vec!["虎"]);
+                let key = |symbol: u32, state: u32, release: bool| {
+                    call(
+                        path.as_str(),
+                        iface,
+                        "ProcessKeyEvent",
+                        (symbol, 0u32, state, release, 0u32).to_variant(),
+                    )
+                    .get::<(bool,)>()
+                    .unwrap()
+                    .0
+                };
+                // 用右 Shift：Fcitx5 默认把左 Shift 作为临时切换输入法的热键，避免测成框架切换。
+                key(0xffe2, 0, false);
+                key(0xffe2, 1, true);
+                assert!(!key(u32::from(b'a'), 0, false), "单击 Shift 后应为英文");
+                // 框架失焦默认复位：只撤销组合，不关闭会话，中英状态保留。
+                call(path.as_str(), iface, "FocusOut", ().to_variant());
+                call(path.as_str(), iface, "FocusIn", ().to_variant());
+                assert!(
+                    !key(u32::from(b'a'), 0, false),
+                    "{}",
+                    fs::read_to_string(root.join("framework.log")).unwrap()
+                );
+                key(0xffe2, 0, false);
+                key(0xffe2, 1, true);
+                assert!(key(u32::from(b'a'), 0, false), "再次单击 Shift 回到中文");
+                key(0xff1b, 0, false);
                 call(
                     path.as_str(),
                     iface,
@@ -374,7 +411,14 @@ fn real_engine_menu_snapshots_and_absolute_deadlines_cross_private_bus() {
                     gio::Cancellable::NONE,
                 )
                 .unwrap();
-            let server = Server::new(bus, move || Box::new(connector.link()), |_| {}).unwrap();
+            let panels = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let shown = panels.clone();
+            let server = Server::new(
+                bus,
+                move || Box::new(connector.link()),
+                move |panel| shown.lock().unwrap().push(panel),
+            )
+            .unwrap();
             let main = glib::MainLoop::new(Some(&context), false);
             let quit = main.clone();
             let child_address = address.clone();
@@ -494,8 +538,41 @@ fn real_engine_menu_snapshots_and_absolute_deadlines_cross_private_bus() {
                 assert_eq!(commit.child_value(3).get::<String>().unwrap(), "虎");
                 assert!(invoke(7, "menu", 0, &token).is_err());
                 assert!(invoke(6, "key", u32::from(b'a'), "").is_err());
-                invoke(8, "close", 0, "").unwrap();
-                assert!(invoke(9, "key", u32::from(b'a'), "").is_err());
+                let label = |reply: &glib::Variant| {
+                    reply.child_value(8).get::<Vec<(String, String)>>().unwrap()[0]
+                        .1
+                        .clone()
+                };
+                invoke(8, "key", u32::from(b'a'), "").unwrap();
+                assert!(
+                    invoke(9, "base", 0, "tigertype-ascii").is_err(),
+                    "模式切换只允许空组合"
+                );
+                let reset = invoke(10, "reset", 0, "").unwrap();
+                assert_eq!(reset.child_value(4).get::<String>().unwrap(), "");
+                assert_eq!(reset.child_value(5).n_children(), 0);
+                assert_eq!(
+                    label(&invoke(11, "base", 0, "tigertype-ascii").unwrap()),
+                    "英文"
+                );
+                // 再次聚焦保留会话，英文模式不被重置；字母直接放行。
+                assert_eq!(label(&invoke(12, "focus", 0, "").unwrap()), "英文");
+                let ascii = invoke(13, "key", u32::from(b'a'), "").unwrap();
+                assert!(!ascii.child_value(2).get::<bool>().unwrap());
+                assert_eq!(ascii.child_value(4).get::<String>().unwrap(), "");
+                invoke(14, "base", 0, "tigertype-settings").unwrap();
+                invoke(15, "close", 0, "").unwrap();
+                // 窗口命令不需要上下文；模式命令需要。
+                invoke(16, "base", 0, "tigertype-lookup").unwrap();
+                assert!(invoke(17, "base", 0, "tigertype-ascii").is_err());
+                assert!(invoke(18, "key", u32::from(b'a'), "").is_err());
+                assert_eq!(
+                    *panels.lock().unwrap(),
+                    vec![
+                        tigertype_contracts::protocol::Panel::Settings,
+                        tigertype_contracts::protocol::Panel::Lookup
+                    ]
+                );
             });
             main.run();
             let result = worker.join();

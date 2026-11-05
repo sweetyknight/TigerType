@@ -26,14 +26,20 @@ pub const IBUS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 "#;
 pub const ADDON: &str = "[Addon]\nName=TigerType\nCategory=InputMethod\nVersion=0.1.0\nLibrary=tigertype\nType=SharedLibrary\nOnDemand=True\n[Addon/Dependencies]\n0=core\n";
 pub const INPUT_METHOD: &str = "[InputMethod]\nName=TigerType 虎码\nIcon=input-keyboard\nLabel=虎\nLangCode=zh_CN\nAddon=tigertype\nConfigurable=False\n";
-pub const DESKTOP: &str = "[Desktop Entry]\nType=Application\nName=TigerType 虎码\nExec=/opt/tigertype/bin/tigertype-linux-app settings\nIcon=input-keyboard\nTerminal=false\nCategories=Settings;\n";
-pub fn session_entry(framework: crate::platform::Framework) -> String {
-    let name = match framework {
-        crate::platform::Framework::IBus => "ibus",
-        crate::platform::Framework::Fcitx5 => "fcitx",
-    };
+// StartupNotify 让 GLib 向 Shell 申请激活令牌，后台才能合法前置已打开的设置窗口；
+// 窗口 app_id 取程序名 tigertype（native 设置），与本文件名对应，Shell 才能关联名称与图标。
+pub const DESKTOP: &str = "[Desktop Entry]\nType=Application\nName=TigerType 虎码\nExec=/opt/tigertype/bin/tigertype-linux-app settings\nIcon=input-keyboard\nTerminal=false\nStartupNotify=true\nCategories=Settings;\n";
+/// 受管自启动文件按首行标记识别（任何版本），内容变化后升级/卸载仍能接管或清理本产品的文件。
+pub const SESSION_HEADER: &str = "# TigerType managed session";
+pub fn managed_session(bytes: &[u8]) -> bool {
+    bytes.starts_with(SESSION_HEADER.as_bytes())
+}
+/// 只有 Fcitx5 需要登录自启动后台；未登记时先待登记，框架确认收下本输入法后改为只启动后台，
+/// 不在以后的登录中重新加入用户已删除的条目。IBus 由 daemon 按需拉起，不写自启动。
+pub fn session_entry(registered: bool) -> String {
+    let command = if registered { "fcitx" } else { "login fcitx" };
     format!(
-        "# TigerType managed session v1\n[Desktop Entry]\nType=Application\nName=TigerType\nExec={PROGRAM} login {name}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+        "{SESSION_HEADER} v2\n[Desktop Entry]\nType=Application\nName=TigerType\nExec={PROGRAM} {command}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
     )
 }
 pub fn program_files() -> Vec<&'static str> {
@@ -180,11 +186,23 @@ mod tests {
             metadata["shell-version"],
             serde_json::json!(["46", "48", "50"])
         );
-        assert_eq!(metadata["version"], 1);
+        assert_eq!(metadata["version"], 2);
         for (path, source) in GNOME_FILES {
             assert!(program_files().contains(&path));
             assert!(!source.is_empty());
         }
+    }
+    #[test]
+    fn session_entries_are_recognized_across_versions() {
+        let pending = session_entry(false);
+        let steady = session_entry(true);
+        assert!(pending.contains("login fcitx") && !steady.contains("login"));
+        assert!(managed_session(pending.as_bytes()) && managed_session(steady.as_bytes()));
+        // 旧版（v1，含 IBus 登录登记）也必须可被清理。
+        assert!(managed_session(
+            b"# TigerType managed session v1\n[Desktop Entry]\nExec=x login ibus\n"
+        ));
+        assert!(!managed_session(b"[Desktop Entry]\nExec=tigertype\n"));
     }
     #[test]
     fn target_is_explicit_and_downloads_use_official_https() {

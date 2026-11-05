@@ -1,7 +1,7 @@
 //! IBus D-Bus 边界：校验私有总线的 daemon 身份，按键共用 50ms 期限，回调 panic 不跨 GIO。
 use crate::{
     Keyboard,
-    menu::{Action, Menu},
+    menu::{Action, BASE as BASE_PROPERTIES, Menu, caption},
 };
 use gio::{DBusConnection, DBusNodeInfo, RegistrationId, glib};
 use glib::{Variant, variant::ToVariant};
@@ -17,14 +17,6 @@ use tigertype_input_client::{Channel, Host};
 
 const ENGINE: &str = "org.freedesktop.IBus.Engine";
 const FACTORY: &str = "org.freedesktop.IBus.Factory";
-// GNOME 缓存首次注册的属性对象；这五项不提交文字，使用固定键并以 UpdateProperty 更新标签。
-const BASE_PROPERTIES: [(&str, Action); 5] = [
-    ("tigertype-ascii", Action::Key(Key::ToggleAscii)),
-    ("tigertype-shape", Action::Key(Key::ToggleFullShape)),
-    ("tigertype-punctuation", Action::Key(Key::TogglePunctuation)),
-    ("tigertype-lookup", Action::Show(Panel::Lookup)),
-    ("tigertype-settings", Action::Show(Panel::Settings)),
-];
 fn authorized(sender: Option<&str>, daemon: &str) -> bool {
     // IBus 私有总线把内部调用标为保留名，并覆盖外部连接的 sender；客户端不能伪造此名。
     sender == Some(daemon) || sender == Some("org.freedesktop.DBus")
@@ -120,7 +112,8 @@ fn lookup(state: &InputState) -> Variant {
         metadata,
         state.options.page_size as u32,
         state.highlighted.unwrap_or(0) as u32,
-        true,
+        // 引擎没有高亮项时不能让面板默认高亮第一项。
+        state.highlighted.is_some(),
         false,
         1_i32,
         candidates,
@@ -495,18 +488,7 @@ fn publish(
         state.composing && !state.candidates.is_empty(),
     )
         .to_variant();
-    let caption = tigertype_input_client::footer(state)
-        .map(|footer| {
-            format!(
-                "{}{}",
-                if footer.pinyin { "拼音 " } else { "" },
-                footer
-                    .pager
-                    .map(|page| format!("第 {} 页", page.page))
-                    .unwrap_or_default()
-            )
-        })
-        .unwrap_or_default();
+    let caption = caption(state);
     let auxiliary = (text(&caption), !caption.is_empty()).to_variant();
     let commit = outcome
         .commit

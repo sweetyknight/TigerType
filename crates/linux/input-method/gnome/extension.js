@@ -1,4 +1,5 @@
 // 获准的 GNOME 边界：只绘制虎码候选，不读文件、不联网、不轮询、不代替框架处理输入。
+import GLib from 'gi://GLib';
 import St from 'gi://St';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as IBusManager from 'resource:///org/gnome/shell/misc/ibusManager.js';
@@ -10,11 +11,15 @@ export default class TigerTypeAppearance extends Extension {
         this._panel = null;
         this._signals = [];
         this._saved = null;
+        this._pending = 0;
         this._ready = this._manager.connect('ready', () => this._bind());
         this._engine = this._manager._ibus.connect('global-engine-changed', () => this._restore());
         this._bind();
     }
     disable() {
+        if (this._pending)
+            GLib.source_remove(this._pending);
+        this._pending = 0;
         this._unbind();
         this._manager.disconnect(this._ready);
         this._manager._ibus.disconnect(this._engine);
@@ -34,6 +39,12 @@ export default class TigerTypeAppearance extends Extension {
         this._panel = this._manager._panelService;
         if (!this._panel)
             return;
+        // IBus 重启时 PanelService 随之销毁：此时只丢弃引用，不对已释放对象断开信号（GJS 会记严重日志）。
+        this._signals.push(this._panel.connect('destroy', () => {
+            this._restore();
+            this._signals = [];
+            this._panel = null;
+        }));
         this._signals.push(this._panel.connect_after('update-lookup-table', (_panel, table, visible) => {
             try {
                 const model = visible && this._manager._currentEngineName === 'tigertype' ? decode(table) : null;
@@ -70,8 +81,16 @@ export default class TigerTypeAppearance extends Extension {
                 } catch (_) {
                     failed = true;
                 } finally { cr.$dispose(); }
-                if (failed)
-                    this._restore();
+                // 不在绘制信号里销毁正在绘制的控件；放到空闲回调，且只还原同一次保存的外观。
+                if (failed && !this._pending) {
+                    const saved = this._saved;
+                    this._pending = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                        this._pending = 0;
+                        if (this._saved === saved)
+                            this._restore();
+                        return GLib.SOURCE_REMOVE;
+                    });
+                }
             });
             box.add_child(drawing);
             return row;

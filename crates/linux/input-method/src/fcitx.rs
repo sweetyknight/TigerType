@@ -1,7 +1,7 @@
 //! Fcitx5 薄插件的有界 D-Bus 服务；只接受框架进程的连接，绝对期限包含排队时间。
 use crate::{
     Keyboard,
-    menu::{Action, Menu},
+    menu::{Action, BASE, Menu, caption},
 };
 use gio::{
     DBusConnection, DBusNodeInfo, RegistrationId,
@@ -33,7 +33,9 @@ struct Context {
     menu: Menu,
 }
 struct State {
+    /// 已认证的插件连接。
     owner: String,
+    /// Fcitx5 框架名字的当前所有者，空表示尚未查询；由名字变化信号维护，按键路径不逐键查询。
     framework: String,
     contexts: BTreeMap<u64, Context>,
 }
@@ -111,26 +113,24 @@ impl Server {
             contexts: BTreeMap::new(),
         }));
         let disconnected = state.clone();
+        // 只订阅框架名字的换主：退出/重启时旧连接与全部上下文作废，其他名字变化不唤醒后台。
         let subscription = bus.subscribe_to_signal(
             Some("org.freedesktop.DBus"),
             Some("org.freedesktop.DBus"),
             Some("NameOwnerChanged"),
             Some("/org/freedesktop/DBus"),
-            None,
+            Some("org.fcitx.Fcitx5"),
             gio::DBusSignalFlags::NONE,
             move |signal| {
                 let _ = catch_unwind(AssertUnwindSafe(|| {
-                    let Some((name, _, new)) = signal.parameters.get::<(String, String, String)>()
+                    let Some((_, _, new)) = signal.parameters.get::<(String, String, String)>()
                     else {
                         return;
                     };
-                    if new.is_empty()
-                        && let Ok(mut state) = disconnected.try_borrow_mut()
-                        && (name == state.owner || name == state.framework)
-                    {
+                    if let Ok(mut state) = disconnected.try_borrow_mut() {
                         state.contexts.clear();
                         state.owner.clear();
-                        state.framework.clear();
+                        state.framework = new;
                     }
                 }));
             },
@@ -160,39 +160,65 @@ impl Server {
                     let deadline = Instant::now() + Duration::from_micros(left as u64);
                     let sender = sender.ok_or("缺少发送方")?;
                     let mut state = state.borrow_mut();
-                    let framework = owner(&bus, "org.fcitx.Fcitx5", remaining(deadline)?)?;
-                    if state.owner != sender || state.framework != framework {
+                    if state.framework.is_empty() {
+                        state.framework = owner(&bus, "org.fcitx.Fcitx5", remaining(deadline)?)?;
+                    }
+                    if state.owner != sender {
                         // Fcitx 主框架与 GIO 胶水使用两条连接；必须由总线核对同一进程，不能只信名字或正文 PID。
-                        if sender != framework
-                            && pid(&bus, sender, deadline)? != pid(&bus, &framework, deadline)?
+                        if sender != state.framework
+                            && pid(&bus, sender, deadline)?
+                                != pid(&bus, &state.framework, deadline)?
                         {
                             return Err("拒绝非 Fcitx5 进程调用".into());
                         }
-                        // 框架重启后旧连接及所有快照作废，不复用旧会话或上下文编号。
+                        // 换了连接即作废旧快照，不复用旧会话或上下文编号。
                         state.contexts.clear();
                         state.owner = sender.into();
-                        state.framework = framework;
+                    }
+                    if command == "base"
+                        && let Some(Action::Show(panel)) = base(&token)
+                    {
+                        // 窗口命令不依赖上下文与焦点：托盘菜单常在焦点回到应用前激活。
+                        if let Some(context) = state.contexts.get_mut(&id) {
+                            if sequence <= context.sequence {
+                                return Err("请求顺序不符".into());
+                            }
+                            context.sequence = sequence;
+                        }
+                        show(panel);
+                        return Ok(response(
+                            sequence,
+                            false,
+                            "",
+                            &InputState::default(),
+                            &[],
+                            "",
+                        ));
                     }
                     if command == "focus" {
-                        if state.contexts.len() >= 16 && !state.contexts.contains_key(&id) {
-                            return Err("输入上下文数超限".into());
+                        match state.contexts.get(&id) {
+                            Some(context) if sequence <= context.sequence => {
+                                return Err("焦点请求重复".into());
+                            }
+                            // 保留会话：中英、全角与标点状态跨焦点保持，旧组合由下一键的焦点代次清除。
+                            Some(_) => {}
+                            None if state.contexts.len() >= 16 => {
+                                return Err("输入上下文数超限".into());
+                            }
+                            None => {
+                                state.contexts.insert(
+                                    id,
+                                    Context {
+                                        host: Host::new(channel()),
+                                        keyboard: Keyboard::default(),
+                                        sequence: sequence - 1,
+                                        menu: Menu::new(format!(
+                                            "{identity}/{sender}/{id}/{sequence}"
+                                        )),
+                                    },
+                                );
+                            }
                         }
-                        if state
-                            .contexts
-                            .get(&id)
-                            .is_some_and(|c| sequence <= c.sequence)
-                        {
-                            return Err("焦点请求重复".into());
-                        }
-                        state.contexts.insert(
-                            id,
-                            Context {
-                                host: Host::new(channel()),
-                                keyboard: Keyboard::default(),
-                                sequence: sequence - 1,
-                                menu: Menu::new(format!("{identity}/{sender}/{id}/{sequence}")),
-                            },
-                        );
                     }
                     if command == "close" {
                         if let Some(context) = state.contexts.get(&id)
@@ -226,18 +252,7 @@ impl Server {
                     let caption = if command == "confirm" {
                         "请在输入法菜单确认要上屏的文字".into()
                     } else {
-                        tigertype_input_client::footer(&outcome.state)
-                            .map(|footer| {
-                                format!(
-                                    "{}{}",
-                                    if footer.pinyin { "拼音 " } else { "" },
-                                    footer
-                                        .pager
-                                        .map(|p| format!("第 {} 页", p.page))
-                                        .unwrap_or_default()
-                                )
-                            })
-                            .unwrap_or_default()
+                        caption(&outcome.state)
                     };
                     Ok(response(
                         sequence,
@@ -300,6 +315,23 @@ fn response(
     )
         .to_variant()
 }
+fn base(token: &str) -> Option<Action> {
+    BASE.iter()
+        .find(|(key, _)| *key == token)
+        .map(|(_, action)| *action)
+}
+/// 只保留模式与选项，供复位回复使用；组合文字和候选已撤销。
+fn modes(state: &InputState) -> InputState {
+    InputState {
+        page_size: state.page_size,
+        mode: state.mode,
+        options: state.options,
+        ascii_mode: state.ascii_mode,
+        ascii_punctuation: state.ascii_punctuation,
+        full_shape: state.full_shape,
+        ..Default::default()
+    }
+}
 fn process(
     context: &mut Context,
     command: &str,
@@ -315,13 +347,29 @@ fn process(
         state,
     };
     let key = match command {
-        "focus" => None,
+        "focus" => {
+            context.host.blur();
+            context.keyboard.reset();
+            None
+        }
+        // 框架复位（含失焦）只撤销组合，保留会话与模式；不像关闭那样丢掉中英等状态。
         "reset" => {
             context.host.discard();
             context.host.blur();
             context.keyboard.reset();
-            context.menu.invalidate();
-            return Ok(empty(InputState::default()));
+            let state = modes(context.host.state());
+            context.menu.update(&state, true, None)?;
+            return Ok(empty(state));
+        }
+        "base" => {
+            let Some(Action::Key(key)) = base(token) else {
+                return Err("未知基础菜单".into());
+            };
+            // 固定模式命令只允许空组合（同 IBus），不把切换动作变成原码提交。
+            if context.host.state().composing {
+                return Err("请先结束组合再切换模式".into());
+            }
+            Some(key)
         }
         "confirm" => {
             let state = context.host.state();

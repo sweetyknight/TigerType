@@ -12,10 +12,12 @@
 #include <fcitx/instance.h>
 #include <fcitx/statusarea.h>
 #include <fcitx/userinterfacemanager.h>
+#include <array>
 #include <memory>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -23,20 +25,35 @@ using Variant = std::unique_ptr<GVariant, decltype(&g_variant_unref)>;
 constexpr const char *service = "local.tigertype.Fcitx";
 constexpr const char *path = "/local/tigertype/Fcitx";
 constexpr const char *interface = "local.tigertype.Fcitx1";
+// 基础菜单的固定名字与后台 menu::BASE 一致；前三项是模式切换，后两项打开窗口。
+constexpr std::array<const char *, 5> baseNames = {
+    "tigertype-ascii", "tigertype-shape", "tigertype-punctuation", "tigertype-lookup", "tigertype-settings"};
+constexpr std::array<const char *, 5> baseLabels = {"中文", "半角", "中文标点", "查字", "设置"};
 class Engine;
 struct State : fcitx::InputContextProperty {
     Engine *engine;
     uint64_t id, sequence = 0;
-    bool active = false;
+    bool active = false, sensitive = false;
+    std::array<std::string, 5> labels{baseLabels[0], baseLabels[1], baseLabels[2], baseLabels[3], baseLabels[4]};
     std::vector<std::unique_ptr<fcitx::Action>> actions;
     State(Engine *owner, uint64_t number) : engine(owner), id(number) {}
     ~State() override;
+};
+// 常驻基础菜单：引擎持有、名字固定，焦点切换和重绘都不重建，托盘菜单延后激活时编号仍然有效。
+class BaseAction final : public fcitx::Action {
+    Engine *engine_; size_t index_;
+public:
+    BaseAction(Engine *engine, size_t index) : engine_(engine), index_(index) {}
+    std::string shortText(fcitx::InputContext *ic) const override;
+    std::string icon(fcitx::InputContext *) const override { return {}; }
+    void activate(fcitx::InputContext *ic) override;
 };
 class Engine final : public fcitx::InputMethodEngineV2 {
     fcitx::Instance *instance_;
     GDBusConnection *bus_ = nullptr;
     std::string owner_;
     uint64_t next_ = 0;
+    std::vector<std::unique_ptr<BaseAction>> base_;
     // 工厂最后销毁之前主动注销，确保上下文释放时后台连接仍有效。
     fcitx::FactoryFor<State> factory_;
     Variant call(const char *destination, const char *object, const char *iface,
@@ -59,27 +76,38 @@ class Engine final : public fcitx::InputMethodEngineV2 {
         if (!name || name[0] != ':') throw std::runtime_error("owner");
         owner_ = name;
     }
+    // 撤下面板与快照动作，基础菜单留在状态区；框架在激活前清空本组时由下一次重绘补回。
     void clear(fcitx::InputContext *ic) {
         ic->inputPanel().reset();
         ic->statusArea().clearGroup(fcitx::StatusGroup::InputMethod);
         ic->propertyFor(&factory_)->actions.clear();
+        for (auto &action : base_) ic->statusArea().addAction(fcitx::StatusGroup::InputMethod, action.get());
         ic->updatePreedit();
         ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
         ic->updateUserInterface(fcitx::UserInterfaceComponent::StatusArea);
+    }
+    // 复位只撤销组合、保留后台会话与中英等模式；失败时标为失效，下次按键重建上下文。
+    void cancel(State &state) noexcept {
+        if (!state.active) return;
+        try { request(state, "reset", 0, 0, "", g_get_monotonic_time() + 50000); } catch (...) { state.active = false; }
     }
 public:
     explicit Engine(fcitx::Instance *instance) : instance_(instance), factory_([this](fcitx::InputContext &) {
         if (next_ == std::numeric_limits<uint64_t>::max()) throw std::runtime_error("context exhausted");
         return new State(this, ++next_);
     }) {
+        for (size_t i = 0; i < baseNames.size(); ++i) {
+            auto action = std::make_unique<BaseAction>(this, i);
+            if (!action->registerAction(baseNames[i], &instance_->userInterfaceManager()))
+                throw std::runtime_error("base action");
+            base_.push_back(std::move(action));
+        }
+        if (!instance_->inputContextManager().registerProperty("tigertypeState", &factory_))
+            throw std::runtime_error("property");
         // 唯一启动期连接；输入路径不启动程序、不读配置、不按键创建线程。
         GError *error = nullptr;
         bus_ = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
         if (error) g_error_free(error);
-        if (!instance_->inputContextManager().registerProperty("tigertypeState", &factory_)) {
-            if (bus_) g_object_unref(bus_);
-            throw std::runtime_error("property");
-        }
     }
     ~Engine() override {
         factory_.unregister();
@@ -97,9 +125,28 @@ public:
         return reply;
     }
     void close(State &state) noexcept {
-        // 失败后 active 已清除也要释放旧上下文；关闭动作不创建会话且不会重放输入。
+        // 上下文销毁时释放后台会话；即使 active 已因失败清除也要发送，避免后台上下文堆积到上限。
         try { if (state.sequence && !owner_.empty()) request(state, "close", 0, 0, "", g_get_monotonic_time() + 50000); } catch (...) {}
         state.active = false;
+    }
+    std::string label(fcitx::InputContext *ic, size_t index) noexcept {
+        // 框架绘制菜单时调入，异常不能越过插件边界；取不到上下文状态就显示默认文字。
+        try { if (ic) return ic->propertyFor(&factory_)->labels[index]; } catch (...) {}
+        return baseLabels[index];
+    }
+    // 托盘菜单常在焦点回到应用前激活：窗口命令不要求焦点；模式命令由后台要求空组合与已有会话。
+    void base(fcitx::InputContext *ic, size_t index) noexcept {
+        try {
+            if (!ic || index >= baseNames.size()) return;
+            auto &state = *ic->propertyFor(&factory_);
+            const auto deadline = g_get_monotonic_time() + 50000;
+            if (owner_.empty()) resolve(deadline);
+            auto reply = request(state, "base", 0, 0, baseNames[index], deadline);
+            if (index < 3) render(ic, state, reply.get(), deadline);
+        } catch (...) {
+            // 后台可能已重启换名；下次重新解析，不重放本次动作。
+            owner_.clear();
+        }
     }
     bool render(fcitx::InputContext *ic, State &state, GVariant *reply, gint64 deadline);
     bool event(fcitx::InputContext *ic, const char *command, uint32_t symbol, uint32_t modifiers, std::string token = "") noexcept {
@@ -110,10 +157,11 @@ public:
             const auto deadline = g_get_monotonic_time() + 50000;
             if (!state.active) {
                 resolve(deadline);
-                request(state, "focus", 0, 0, "", deadline);
-                state.active = true;
+                // 新建或失效后重建后台上下文；本次就是焦点请求时不重复发送。
+                if (std::string_view(command) != "focus") request(state, "focus", 0, 0, "", deadline);
             }
             auto reply = request(state, command, symbol, modifiers, token, deadline);
+            state.active = true;
             // 先记住是否含提交，避免已提交后绘制异常又把原键放行。
             const gchar *commit = nullptr;
             g_variant_get_child(reply.get(), 3, "&s", &commit);
@@ -128,22 +176,29 @@ public:
         }
     }
     void keyEvent(const fcitx::InputMethodEntry &, fcitx::KeyEvent &key) override {
-        // 密码和敏感输入交还宿主，清理上一组合，不能把这些文本送往后台。
-        if (key.inputContext()->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive)) {
-            try { auto *ic=key.inputContext(); close(*ic->propertyFor(&factory_)); clear(ic); } catch (...) {}
-            return;
-        }
+        // 密码和敏感输入交还宿主，只在进入时撤销一次组合，不把这些按键送往后台。
+        try {
+            auto *ic = key.inputContext();
+            auto &state = *ic->propertyFor(&factory_);
+            const bool sensitive = ic->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive);
+            if (sensitive && !state.sensitive) { clear(ic); cancel(state); }
+            state.sensitive = sensitive;
+            if (sensitive) return;
+        } catch (...) { return; }
         if (event(key.inputContext(), "key", key.rawKey().sym(), static_cast<uint32_t>(key.rawKey().states().toInteger()) | (key.isRelease() ? 1u << 30 : 0))) key.filterAndAccept();
     }
     void activate(const fcitx::InputMethodEntry &, fcitx::InputContextEvent &event) override {
         this->event(event.inputContext(), "focus", 0, 0);
     }
+    // 框架复位和失焦（默认 deactivate 即复位）都走这里：撤销组合但不关闭会话，基础菜单保留。
     void reset(const fcitx::InputMethodEntry &, fcitx::InputContextEvent &event) override {
-        try { auto *ic = event.inputContext(); close(*ic->propertyFor(&factory_)); clear(ic); } catch (...) {}
+        try { auto *ic = event.inputContext(); clear(ic); cancel(*ic->propertyFor(&factory_)); } catch (...) {}
     }
     fcitx::UserInterfaceManager *ui() { return &instance_->userInterfaceManager(); }
 };
 State::~State() { engine->close(*this); }
+std::string BaseAction::shortText(fcitx::InputContext *ic) const { return engine_->label(ic, index_); }
+void BaseAction::activate(fcitx::InputContext *ic) { engine_->base(ic, index_); }
 class MenuAction final : public fcitx::Action {
     Engine *engine_; std::string token_, text_;
 public:
@@ -188,6 +243,11 @@ bool Engine::render(fcitx::InputContext *ic, State &state, GVariant *reply, gint
     for (gsize i = 0; i < g_variant_n_children(menus); ++i) {
         const gchar *key = nullptr, *text = nullptr;
         g_variant_get_child(menus, i, "(&s&s)", &key, &text);
+        // 前五项是基础菜单的当前文字：只更新常驻动作的标签，不按每次展示的名字重建。
+        if (i < base_.size()) {
+            if (state.labels[i] != text) { state.labels[i] = text; base_[i]->update(ic); }
+            continue;
+        }
         auto action = std::make_unique<MenuAction>(this, key, text);
         if (!action->registerAction(key, ui())) throw std::runtime_error("action registration");
         ic->statusArea().addAction(fcitx::StatusGroup::InputMethod, action.get());

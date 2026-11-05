@@ -20,8 +20,13 @@ pub fn desktop(value: &str) -> Result<Desktop, &'static str> {
         _ => Err("当前目标仅包含 GNOME 或 KDE Plasma，其他桌面尚未支持"),
     }
 }
-pub fn framework(desktop: Desktop, ibus: bool, fcitx: bool) -> Result<Framework, &'static str> {
-    match (ibus, fcitx) {
+/// 参数为两个框架总线名的当前所有者；Fcitx5 的 IBus 兼容前端会同时持有两个名字，同一所有者只算 Fcitx5。
+pub fn framework(
+    desktop: Desktop,
+    ibus: Option<&str>,
+    fcitx: Option<&str>,
+) -> Result<Framework, &'static str> {
+    match (ibus.is_some() && ibus != fcitx, fcitx.is_some()) {
         (true, true) => Err("检测到两个活动输入法框架，不自动停用或替换任一个"),
         (true, false) => Ok(Framework::IBus),
         (false, true) => Ok(Framework::Fcitx5),
@@ -42,13 +47,18 @@ mod tests {
             assert!(desktop(name).is_err());
         }
         for desk in [Desktop::Gnome, Desktop::Plasma] {
-            assert_eq!(framework(desk, true, false), Ok(Framework::IBus));
-            assert_eq!(framework(desk, false, true), Ok(Framework::Fcitx5));
-            assert!(framework(desk, true, true).is_err());
+            assert_eq!(framework(desk, Some(":1.2"), None), Ok(Framework::IBus));
+            assert_eq!(framework(desk, None, Some(":1.3")), Ok(Framework::Fcitx5));
+            assert!(framework(desk, Some(":1.2"), Some(":1.3")).is_err());
+            // Fcitx5 兼容前端同时持有 IBus 名字时不是两个框架。
+            assert_eq!(
+                framework(desk, Some(":1.3"), Some(":1.3")),
+                Ok(Framework::Fcitx5)
+            );
         }
-        assert_eq!(framework(Desktop::Gnome, false, false), Ok(Framework::IBus));
+        assert_eq!(framework(Desktop::Gnome, None, None), Ok(Framework::IBus));
         assert_eq!(
-            framework(Desktop::Plasma, false, false),
+            framework(Desktop::Plasma, None, None),
             Ok(Framework::Fcitx5)
         );
     }

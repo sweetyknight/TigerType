@@ -55,6 +55,7 @@ pub fn css(p: Palette) -> String {
 {r} text.tt {{ background: none; color: {text}; caret-color: {accent}; border: none; box-shadow: none; outline: none; padding: 0; margin: 0; min-height: 0; font-size: 14px; }}
 {r} text.tt.mono {{ font-family: \"Cascadia Mono\", monospace; font-size: 13px; }}
 {r} text.tt selection {{ background-color: {selection}; color: {text}; }}
+{r} text.tt cursor-handle {{ color: {accent}; }}
 {r} text.tt placeholder {{ color: {muted}; }}
 {r} label.tt {{ color: {text}; }}
 {r} label.tt.label {{ color: {label}; }}

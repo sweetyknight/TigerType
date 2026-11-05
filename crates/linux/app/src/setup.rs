@@ -34,13 +34,69 @@ fn elevate(exe: &Path) -> Command {
         std::io::stdin().is_terminal(),
         Path::new("/usr/bin/sudo").is_file(),
     ));
-    command.arg("--").arg(exe);
+    // exe 是绝对路径，不会被当成选项；pkexec 不认 `--`，会把它当作程序名。
+    command.arg(exe);
     command
 }
 pub fn main() -> std::result::Result<(), String> {
-    execute().map_err(|error| error.to_string())
+    let args: Vec<String> = std::env::args().collect();
+    // 维护脚本与提权阶段没有用户会话；只有普通用户入口在无终端（双击）时补发桌面通知。
+    let user = !args
+        .first()
+        .is_some_and(|arg| arg.ends_with("tigertype-fonts.postinst"))
+        && args.get(1).map(String::as_str) != Some("--system");
+    let notify_user = user && !std::io::stdin().is_terminal();
+    let result = execute();
+    match &result {
+        Ok(Some(message)) => {
+            println!("{message}");
+            if notify_user {
+                notify("TigerType 已完成", message);
+            }
+        }
+        Err(error) if notify_user => notify("TigerType 未完成", &error.to_string()),
+        _ => {}
+    }
+    result.map(|_| ()).map_err(|error| error.to_string())
 }
-fn execute() -> Result<()> {
+/// stdout 无人可见时用桌面通知告知结果；通知失败不影响安装结论。
+fn notify(summary: &str, body: &str) {
+    let _ = Command::new("/usr/bin/gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.Notifications",
+            "--object-path",
+            "/org/freedesktop/Notifications",
+            "--method",
+            "org.freedesktop.Notifications.Notify",
+            "'TigerType'",
+            "0",
+            "'input-keyboard'",
+        ])
+        .arg(gvariant_string(summary))
+        .arg(gvariant_string(body))
+        .args(["[]", "{}", "-1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+/// GVariant 文本格式的字符串字面量，错误信息中的引号与反斜杠不能破坏参数解析。
+fn gvariant_string(text: &str) -> String {
+    let mut quoted = String::from("'");
+    for c in text.chars() {
+        match c {
+            '\\' => quoted.push_str("\\\\"),
+            '\'' => quoted.push_str("\\'"),
+            '\n' => quoted.push_str("\\n"),
+            _ => quoted.push(c),
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+fn execute() -> Result<Option<String>> {
     let exe = std::env::current_exe()?;
     let invoked = std::env::args_os().next().unwrap_or_default();
     if invoked
@@ -49,11 +105,12 @@ fn execute() -> Result<()> {
     {
         // dpkg 直接执行 Rust ELF 维护程序；测试根不更新宿主字体缓存。
         if std::env::var_os("DPKG_ROOT").is_some_and(|root| !root.is_empty()) {
-            return Ok(());
+            return Ok(None);
         }
         return run(
             Command::new("/usr/bin/fc-cache").args(["-f", "/usr/share/fonts/truetype/tigertype"])
-        );
+        )
+        .map(|()| None);
     }
     let args: Vec<_> = std::env::args().skip(1).collect();
     // SAFETY: 仅查询有效身份；系统事务和用户桌面设置必须分开执行。
@@ -62,7 +119,7 @@ fn execute() -> Result<()> {
         if !root {
             return Err("系统安装阶段必须经提权运行".into());
         }
-        return system(&args[1..]);
+        return system(&args[1..]).map(|()| None);
     }
     if root {
         return Err("请以桌面普通用户运行安装器，由它请求提权".into());
@@ -75,26 +132,20 @@ fn execute() -> Result<()> {
     if args.len() > 1 || !["install", "upgrade", "uninstall"].contains(&command) {
         return Err("用法：tigertype-setup [install|upgrade|uninstall]".into());
     }
-    // 选择在提权前进行，框架诊断由已存在的桌面 gdbus 完成，安装器本身不链接 GTK。
-    let framework = if command == "uninstall" {
-        match installed_framework()? {
-            Some(framework) => framework,
-            None => select_framework()?,
-        }
-    } else {
-        select_framework()?
-    };
     if command == "uninstall" {
+        // 不猜当初装在哪个框架：两种框架都只移除本产品条目，再停后台和卸系统包。
         if Path::new(package::PROGRAM).exists() {
-            run(Command::new(package::PROGRAM).args(["integration", framework, "remove"]))?;
+            run(Command::new(package::PROGRAM).args(["integration", "remove"]))?;
             let _ = Command::new(package::PROGRAM).arg("stop").status();
         }
         run(elevate(&exe).args(["--system", "uninstall"]))?;
-        println!(
+        return Ok(Some(
             "TigerType 已卸载；个人数据和全部字体保留，现用框架无需卸载。请注销重登以释放旧插件。"
-        );
-        return Ok(());
+                .into(),
+        ));
     }
+    // 选择在提权前进行，框架诊断由已存在的桌面 gdbus 完成，安装器本身不链接 GTK。
+    let framework = select_framework()?;
     let bundle = exe.parent().ok_or("安装包目录缺失")?;
     let manifest = package::inspect(bundle)?;
     if manifest.target != target()? {
@@ -109,15 +160,14 @@ fn execute() -> Result<()> {
         .arg(framework))?;
     run(Command::new(package::PROGRAM).args(["integration", framework, "install"]))?;
     let activation = if framework == "ibus" {
-        "IBus 已自动加载新引擎，可在系统输入法菜单选择 TigerType；首次 GNOME 候选适配按上方提示注销一次。"
+        "IBus 已自动加载新引擎，可在系统输入法菜单选择 TigerType；GNOME 候选外观在首次安装或扩展更新后需注销重登一次。"
     } else {
         "Fcitx5 原生插件需注销重登后加载，再选择 TigerType。"
     };
-    println!(
+    Ok(Some(format!(
         "安装文件与会话登记已完成。{activation}无需手改配置。若要卸载，运行 {}/bin/tigertype-setup uninstall。",
         package::PREFIX
-    );
-    Ok(())
+    )))
 }
 
 fn select_framework() -> Result<&'static str> {
@@ -147,41 +197,11 @@ fn select_framework() -> Result<&'static str> {
     let ibus = owner("org.freedesktop.IBus")?;
     let fcitx = owner("org.fcitx.Fcitx5")?;
     Ok(
-        match crate::platform::framework(desktop, ibus.is_some() && ibus != fcitx, fcitx.is_some())?
-        {
+        match crate::platform::framework(desktop, ibus.as_deref(), fcitx.as_deref())? {
             crate::platform::Framework::IBus => "ibus",
             crate::platform::Framework::Fcitx5 => "fcitx",
         },
     )
-}
-fn installed_framework() -> Result<Option<&'static str>> {
-    // 卸载按本产品自启动记录选择，而不是猜测用户后来切换到了哪个框架。
-    let home = std::path::PathBuf::from(std::env::var_os("HOME").ok_or("缺少 HOME")?);
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"));
-    let path = config.join("autostart/tigertype.desktop");
-    let bytes = match storage::read_file(&path, 16 * 1024) {
-        Ok(bytes) => bytes,
-        Err(error)
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-    for (framework, name) in [
-        (crate::platform::Framework::IBus, "ibus"),
-        (crate::platform::Framework::Fcitx5, "fcitx"),
-    ] {
-        if bytes == package::session_entry(framework).as_bytes() {
-            return Ok(Some(name));
-        }
-    }
-    Err("自启动记录已被外部修改，未猜测卸载框架".into())
 }
 fn system(args: &[String]) -> Result<()> {
     if args == ["uninstall"] {
@@ -326,6 +346,13 @@ fn system(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn notification_text_is_a_valid_gvariant_string() {
+        assert_eq!(gvariant_string("plain"), "'plain'");
+        assert_eq!(gvariant_string("a'b"), r"'a\'b'");
+        assert_eq!(gvariant_string(r"c\d"), r"'c\\d'");
+        assert_eq!(gvariant_string("e\nf"), r"'e\nf'");
+    }
     #[test]
     fn terminal_authentication_uses_sudo_only_when_available() {
         assert_eq!(privilege_program(true, true), "/usr/bin/sudo");

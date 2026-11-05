@@ -128,8 +128,9 @@ impl Views {
             loaded: RefCell::default(),
         }))))
     }
-    pub fn show(&self, panel: Panel) {
-        show(&self.0, panel);
+    /// startup 为桌面启动器的激活令牌（可空），Wayland 下据此合法前置已存在的窗口。
+    pub fn show(&self, panel: Panel, startup: &str) {
+        show(&self.0, panel, startup);
     }
     pub fn close(&self) {
         let (lookup, settings) = {
@@ -182,7 +183,7 @@ fn act(shared: &Shared, action: Action) {
     // 共用状态机处理草稿与查询；剪贴板、打开文件与唤起设置窗留在 GTK。
     let task = shared.borrow_mut().editor.act(action);
     match &task {
-        Some(Task::ShowSettings) => return show(shared, Panel::Settings),
+        Some(Task::ShowSettings) => return show(shared, Panel::Settings, ""),
         Some(Task::OpenConfig) => open_config(shared),
         Some(Task::Copy(text)) => shared.borrow().display.clipboard().set_text(text),
         _ => {}
@@ -242,7 +243,7 @@ fn refresh(shared: &Shared) {
         view.update(&s);
     }
 }
-fn show(shared: &Shared, panel: Panel) {
+fn show(shared: &Shared, panel: Panel, startup: &str) {
     let window = {
         let mut s = shared.borrow_mut();
         let missing = match panel {
@@ -274,6 +275,10 @@ fn show(shared: &Shared, panel: Panel) {
     refresh(shared);
     // 只在用户主动打开工具时前置；Wayland 下是否夺取焦点由合成器决定。
     if let Some(window) = window {
+        // 有启动器令牌时交给 xdg-activation，合成器才会前置已在后台的窗口。
+        if !startup.is_empty() {
+            window.set_startup_id(startup);
+        }
         window.present();
     }
 }
@@ -441,8 +446,8 @@ pub mod tests {
         )
         .unwrap();
         assert!(Views::new(Options::default(), "settings.toml".into(), |_, _| {}).is_err());
-        views.show(Panel::Lookup);
-        views.show(Panel::Settings);
+        views.show(Panel::Lookup, "");
+        views.show(Panel::Settings, "");
         settle();
         for theme in Theme::ALL {
             for page in 0..4 {
@@ -545,7 +550,7 @@ pub mod tests {
             views.0.borrow().editor.swatch.is_none(),
             "关闭不能留下旧色板状态"
         );
-        views.show(Panel::Settings);
+        views.show(Panel::Settings, "");
         reply.finish(Reply::Saved(Ok(expected)));
         drain(|| !views.0.borrow().editor.model.busy);
         assert_eq!(views.0.borrow().editor.model.options.page_size, 7);

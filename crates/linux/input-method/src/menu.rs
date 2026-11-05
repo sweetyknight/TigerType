@@ -8,6 +8,30 @@ pub enum Action {
     Key(Key),
     Show(Panel),
 }
+/// 五项基础菜单使用固定键：不提交文字、不绑定展示快照。GNOME 缓存首次注册的属性对象，
+/// Fcitx5 的托盘菜单在焦点回到应用后才激活，两者都不能依赖每次重绘都变的名字。
+pub const BASE: [(&str, Action); 5] = [
+    ("tigertype-ascii", Action::Key(Key::ToggleAscii)),
+    ("tigertype-shape", Action::Key(Key::ToggleFullShape)),
+    ("tigertype-punctuation", Action::Key(Key::TogglePunctuation)),
+    ("tigertype-lookup", Action::Show(Panel::Lookup)),
+    ("tigertype-settings", Action::Show(Panel::Settings)),
+];
+/// 页脚说明（拼音反查标签与多页页码），两种框架共用同一文案。
+pub fn caption(state: &InputState) -> String {
+    tigertype_input_client::footer(state)
+        .map(|footer| {
+            format!(
+                "{}{}",
+                if footer.pinyin { "拼音 " } else { "" },
+                footer
+                    .pager
+                    .map(|page| format!("第 {} 页", page.page))
+                    .unwrap_or_default()
+            )
+        })
+        .unwrap_or_default()
+}
 pub struct Menu {
     namespace: String,
     serial: u64,

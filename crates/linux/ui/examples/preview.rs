@@ -67,8 +67,8 @@ fn main() -> std::process::ExitCode {
         },
     )
     .unwrap();
-    views.show(Panel::Lookup);
-    views.show(Panel::Settings);
+    views.show(Panel::Lookup, "");
+    views.show(Panel::Settings, "");
     let windows = gtk4::Window::toplevels();
     // 顶层窗口列表的元素类型是 GObject，逐个转换。
     let all = windows.iter::<glib::Object>().flatten();

@@ -3,5 +3,5 @@
   "name": "TigerType 候选外观",
   "description": "仅为虎码候选同步字体和配色，不修改其他输入法或全局主题。",
   "shell-version": ["46", "48", "50"],
-  "version": 1
+  "version": 2
 }

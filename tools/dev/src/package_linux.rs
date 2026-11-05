@@ -56,6 +56,32 @@ fn artifact(path: &Path) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+/// 安装器在补齐依赖之前运行（兼作字体包维护程序），只允许基础 C 运行库；
+/// 若链接到 GTK/GLib，缺界面库的新系统上安装器本身就无法启动。
+fn base_runtime_only(binary: &Path) -> Result<()> {
+    let text = output(
+        Command::new("readelf")
+            .arg("-d")
+            .arg(binary)
+            .env("LC_ALL", "C"),
+    )?;
+    let needed: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("(NEEDED)"))
+        .filter_map(|line| line.split_once('[')?.1.split_once(']'))
+        .map(|(library, _)| library)
+        .collect();
+    let allowed = [
+        "libc.so.6",
+        "libgcc_s.so.1",
+        "libm.so.6",
+        "ld-linux-x86-64.so.2",
+    ];
+    if needed.is_empty() || needed.iter().any(|library| !allowed.contains(library)) {
+        return Err(format!("安装器依赖了基础 C 运行库以外的库：{needed:?}").into());
+    }
+    Ok(())
+}
 pub fn main() -> std::process::ExitCode {
     match assemble() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -95,7 +121,9 @@ fn assemble() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("target"));
     let binary = artifact(&target_dir.join(&profile).join("tigertype-linux-app"))?;
-    let setup = artifact(&target_dir.join(&profile).join("tigertype-linux-deploy"))?;
+    let setup_path = target_dir.join(&profile).join("tigertype-linux-deploy");
+    base_runtime_only(&setup_path)?;
+    let setup = artifact(&setup_path)?;
     let parent = target_dir.join("package");
     fs::create_dir_all(&parent)?;
     let stage = resources::new_directory(&parent.canonicalize()?, "TigerType-linux")?;

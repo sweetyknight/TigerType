@@ -1,5 +1,5 @@
 //! Linux 主线程组装：GApplication 只转发窗口动作，真实查询和配置事务留在固定工作线程。
-use crate::{platform, runtime::Runtime};
+use crate::runtime::Runtime;
 use gio::{glib, prelude::*};
 use glib::variant::ToVariant;
 use std::{
@@ -27,7 +27,8 @@ struct Running {
     views: Option<Views>,
 }
 impl Running {
-    fn show(&mut self, panel: Panel) -> Result<(), String> {
+    /// startup 为桌面启动器转来的激活令牌（可空）；框架菜单没有令牌，前置与否由合成器决定。
+    fn show(&mut self, panel: Panel, startup: &str) -> Result<(), String> {
         if self.views.is_none() {
             let worker = self.runtime.worker.clone();
             self.views = Some(Views::new(
@@ -38,7 +39,7 @@ impl Running {
                 },
             )?);
         }
-        self.views.as_ref().unwrap().show(panel);
+        self.views.as_ref().unwrap().show(panel, startup);
         Ok(())
     }
 }
@@ -48,51 +49,22 @@ pub fn main() -> Result<(), String> {
     if unsafe { libc::geteuid() } == 0 {
         return Err("后台必须以普通用户身份运行".into());
     }
-    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    let mut args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.into_string().map_err(|_| "参数不是 UTF-8"))
+        .collect::<Result<_, _>>()?;
     if args.first().is_some_and(|arg| arg == "integration") {
-        if args.len() != 3 {
-            return Err("登记参数不符".into());
-        }
-        let framework = crate::integration::parse(args[1].to_str().ok_or("框架名非法")?)
-            .map_err(|e| e.to_string())?;
-        return match args[2].to_str() {
-            Some("remove") => {
-                crate::integration::shell_appearance(true).map_err(|e| e.to_string())?;
-                crate::integration::configure(framework, true).map_err(|e| e.to_string())
-            }
-            Some("install") => {
-                crate::integration::prepare_login(framework).map_err(|e| e.to_string())?;
-                if framework == platform::Framework::IBus {
-                    crate::integration::shell_appearance(false).map_err(|e| e.to_string())?;
-                    // IBus 不热重读引擎注册表；仅刷新输入框架，不注销桌面或关闭用户应用。
-                    crate::integration::refresh_ibus().map_err(|e| e.to_string())?;
-                    return crate::integration::configure(framework, false)
-                        .map_err(|e| e.to_string());
-                }
-                // Fcitx5 原生插件仍由框架加载，不能把仅复制文件当成插件已经生效。
-                if let Err(error) = crate::integration::configure(framework, false) {
-                    eprintln!("文件已安装，注销重登后自动完成框架登记：{error}");
-                }
-                Ok(())
-            }
-            _ => Err("未知登记动作".into()),
-        };
+        return crate::integration::command(&args[1..]).map_err(|e| e.to_string());
     }
-    let login = if args.first().is_some_and(|arg| arg == "login") {
-        if args.len() != 2 {
+    // 只有 Fcitx5 待登记的自启动走 login：启动后台并在框架出现后登记一次。
+    let login = args.first().is_some_and(|arg| arg == "login");
+    if login {
+        if args.len() != 2 || args[1] != "fcitx" {
             return Err("登录参数不符".into());
         }
-        let framework = crate::integration::parse(args[1].to_str().ok_or("框架名非法")?)
-            .map_err(|e| e.to_string())?;
-        if framework == platform::Framework::IBus {
-            return crate::integration::configure(framework, false).map_err(|e| e.to_string());
-        }
         args = vec!["fcitx".into()];
-        Some(framework)
-    } else {
-        None
-    };
-    let command = args.first().and_then(|s| s.to_str()).unwrap_or("settings");
+    }
+    let command = args.first().map(String::as_str).unwrap_or("settings");
     if command == "diagnose" && args.len() == 1 {
         return diagnose();
     }
@@ -129,12 +101,10 @@ pub fn main() -> Result<(), String> {
         return Err("码表和数据路径必须为绝对路径".into());
     }
     storage::reject_links(data.parent().ok_or("数据目录没有父级")?).map_err(|e| e.to_string())?;
-    // 会话与隔离数据目录分别进入名字，开发验证不会把动作发给正式后台。
-    let session = std::env::var("WAYLAND_DISPLAY")
-        .or_else(|_| std::env::var("DISPLAY"))
-        .or_else(|_| std::env::var("XDG_SESSION_ID"))
-        .map_err(|_| "缺少图形登录会话")?;
-    let identity = resources::sha256_bytes(format!("{}\n{session}", data.display()).as_bytes());
+    // 名字只取数据目录：同一用户的会话总线与数据租约已限定一个后台；不掺显示变量，
+    // 免得 IBus 拉起的进程与桌面启动器/SSH 环境不同而另起后台、停机找不到现用后台。
+    // 隔离验证使用新建数据目录与私有总线，动作不会发给正式后台。
+    let identity = resources::sha256_bytes(data.display().to_string().as_bytes());
     let app = gio::Application::new(
         Some(&format!("local.tigertype.Session.s{}", &identity[..24])),
         gio::ApplicationFlags::FLAGS_NONE,
@@ -146,13 +116,24 @@ pub fn main() -> Result<(), String> {
         ("settings", Some(Panel::Settings)),
         ("stop", None),
     ] {
-        let action = gio::SimpleAction::new(name, None);
+        // 窗口动作携带启动器的激活令牌（可为空串），让已在后台的窗口在 Wayland 下合法前置。
+        let action = gio::SimpleAction::new(name, panel.map(|_| glib::VariantTy::STRING));
         let state = running.clone();
         let quit = main.clone();
-        action.connect_activate(move |_, _| {
+        action.connect_activate(move |_, parameter| {
             let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
                 match panel {
-                    Some(panel) => state.borrow_mut().as_mut().ok_or("后台未就绪")?.show(panel),
+                    Some(panel) => {
+                        let token = parameter.and_then(|p| p.str()).unwrap_or_default();
+                        if token.len() > 4096 {
+                            return Err("激活令牌过长".into());
+                        }
+                        state
+                            .borrow_mut()
+                            .as_mut()
+                            .ok_or("后台未就绪")?
+                            .show(panel, token)
+                    }
                     None => {
                         quit.quit();
                         Ok(())
@@ -178,8 +159,12 @@ pub fn main() -> Result<(), String> {
                 "当前数据目录已有后台；请先停止再以 ibus 启动，不能假称已登记输入法".into(),
             );
         }
-        if !matches!(command, "serve" | "ibus") {
-            app.activate_action(command, None);
+        match command {
+            "stop" => app.activate_action(command, None),
+            "lookup" | "settings" => {
+                app.activate_action(command, Some(&launch_token().to_variant()));
+            }
+            _ => {}
         }
         if let Some(bus) = app.dbus_connection() {
             bus.flush_sync(gio::Cancellable::NONE)
@@ -190,6 +175,11 @@ pub fn main() -> Result<(), String> {
     if command == "stop" {
         return Err("当前会话没有运行的后台".into());
     }
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
+        return Err("缺少图形登录会话".into());
+    }
+    // GTK4 不从 argv 取程序名，未设置时 Wayland app_id 退为“GTK Application”；与启动项 tigertype.desktop 对齐。
+    glib::set_prgname(Some("tigertype"));
     gtk::initialize()?;
     let config = data.join("config/settings.toml");
     let runtime = Runtime::start(tables, data).map_err(|e| e.to_string())?;
@@ -215,7 +205,7 @@ pub fn main() -> Result<(), String> {
         views: None,
     });
     let result = (|| {
-        let _watch = login.map(crate::integration::watch);
+        let _watch = login.then(crate::integration::watch);
         let _fcitx = if service_mode == "fcitx" {
             let state = running.clone();
             let connector = connector.clone();
@@ -224,7 +214,7 @@ pub fn main() -> Result<(), String> {
                 move || Box::new(connector.link()),
                 move |panel| {
                     if let Some(running) = state.borrow_mut().as_mut()
-                        && let Err(error) = running.show(panel)
+                        && let Err(error) = running.show(panel, "")
                     {
                         eprintln!("{error}");
                     }
@@ -253,7 +243,7 @@ pub fn main() -> Result<(), String> {
                 move || Box::new(connector.link()),
                 move |panel| {
                     if let Some(running) = state.borrow_mut().as_mut()
-                        && let Err(error) = running.show(panel)
+                        && let Err(error) = running.show(panel, "")
                     {
                         eprintln!("{error}");
                     }
@@ -272,7 +262,8 @@ pub fn main() -> Result<(), String> {
             None
         };
         if matches!(command, "lookup" | "settings") {
-            app.activate_action(command, None);
+            // 本进程首个窗口由 GTK 自取启动器令牌，这里不重复使用同一令牌。
+            app.activate_action(command, Some(&"".to_variant()));
         }
         println!("TigerType Linux 后台就绪（{command}）");
         main.run();
@@ -283,6 +274,24 @@ pub fn main() -> Result<(), String> {
         state.runtime.shutdown();
     }
     result
+}
+/// libgtk-4 的库构造函数在 main 之前暂存并删除启动器令牌变量，std::env 已读不到；
+/// 内核保留的初始环境块不受影响，转发给已有后台前从这里取回。
+fn launch_token() -> String {
+    token_from_environ(&std::fs::read("/proc/self/environ").unwrap_or_default())
+}
+fn token_from_environ(environ: &[u8]) -> String {
+    let find = |key: &[u8]| {
+        environ
+            .split(|&byte| byte == 0)
+            .find_map(|entry| entry.strip_prefix(key))
+            .filter(|value| !value.is_empty())
+    };
+    find(b"XDG_ACTIVATION_TOKEN=")
+        .or_else(|| find(b"DESKTOP_STARTUP_ID="))
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .unwrap_or_default()
+        .to_owned()
 }
 fn bus_call(
     bus: &gio::DBusConnection,
@@ -327,20 +336,27 @@ pub(crate) fn ibus_connection() -> Result<gio::DBusConnection, String> {
     .map_err(|e| e.to_string())
 }
 fn diagnose() -> Result<(), String> {
-    let desktop =
-        platform::desktop(&std::env::var("XDG_CURRENT_DESKTOP").map_err(|_| "缺少桌面标识")?)?;
-    let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)
-        .map_err(|e| e.to_string())?;
-    let owner = |name| {
-        bus_call(&bus, "GetNameOwner", (name,).to_variant())
-            .ok()
-            .and_then(|reply| reply.get::<(String,)>())
-            .map(|tuple| tuple.0)
-    };
-    let ibus = owner("org.freedesktop.IBus");
-    let fcitx = owner("org.fcitx.Fcitx5");
-    // Fcitx5 的 IBus 兼容前端可能持有两个总线名；同一所有者不算两个活动框架。
-    let selected = platform::framework(desktop, ibus.is_some() && ibus != fcitx, fcitx.is_some())?;
-    println!("桌面：{desktop:?}；现有框架优先选择：{selected:?}。未更改系统设置。");
+    let selected = crate::integration::selected().map_err(|e| e.to_string())?;
+    println!("现有框架优先选择：{selected:?}。未更改系统设置。");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::token_from_environ;
+
+    #[test]
+    fn launch_token_prefers_xdg_activation() {
+        assert_eq!(
+            token_from_environ(b"DESKTOP_STARTUP_ID=x11\0XDG_ACTIVATION_TOKEN=wl\0"),
+            "wl"
+        );
+        // 空令牌视同缺失，退用 X11 启动标识；前缀须整段匹配，不误取相似变量。
+        assert_eq!(
+            token_from_environ(b"XDG_ACTIVATION_TOKEN=\0DESKTOP_STARTUP_ID=x11\0"),
+            "x11"
+        );
+        assert_eq!(token_from_environ(b"MY_XDG_ACTIVATION_TOKEN=no\0"), "");
+        assert_eq!(token_from_environ(b""), "");
+    }
 }
