@@ -367,35 +367,118 @@ pub(crate) fn frame(pixels: &mut [u32], width: i32, radius: f32, stroke: f32, bo
         }
     }
 }
-/// 圆角矩形：fill 为 Some 时实心填充，否则只描边。
+/// 覆盖像素 [left, right)×[top, bottom) 的圆角矩形：fill 为 Some 时实心填充，否则沿内侧描 1px 边。
+/// GDI 的 RoundRect 不抗锯齿，小圆角会成台阶：直边像素对齐，直接 FillRect；
+/// 四角取一张 2r×2r 的抗锯齿圆（预乘 ARGB），分四象限混合到四角（与设置界面 drawing::rounded 同法）。
 pub(crate) fn round(dc: HDC, rect: &RECT, radius: i32, fill: Option<COLORREF>, line: COLORREF) {
-    // SAFETY: 只选入库存画刷/画笔，绘制后还原。
+    let RECT {
+        left,
+        top,
+        right,
+        bottom,
+    } = *rect;
+    if right <= left || bottom <= top {
+        return;
+    }
+    let r = radius.clamp(0, (right - left).min(bottom - top) / 2);
+    let band = |left, top, right, bottom| RECT {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    let (color, bands) = match fill {
+        Some(color) => (
+            color,
+            [
+                band(left + r, top, right - r, bottom),
+                band(left, top + r, left + r, bottom - r),
+                band(right - r, top + r, right, bottom - r),
+                RECT::default(),
+            ],
+        ),
+        None => (
+            line,
+            [
+                band(left + r, top, right - r, top + 1),
+                band(left + r, bottom - 1, right - r, bottom),
+                band(left, top + r, left + 1, bottom - r),
+                band(right - 1, top + r, right, bottom - r),
+            ],
+        ),
+    };
+    for part in &bands {
+        // 空矩形（胶囊两端相接、默认占位）FillRect 不画。
+        self::fill(dc, part, color);
+    }
+    if r > 0 {
+        corners(dc, rect, r, color, fill.is_none().then_some(1));
+    }
+}
+/// 把 disc 画好的圆按象限贴到四角；GDI 对象建不出时跳过四角，不影响其余绘制。
+fn corners(dc: HDC, rect: &RECT, r: i32, color: COLORREF, width: Option<i32>) {
+    let side = 2 * r;
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: side,
+            // 负高度为自上而下的行序。
+            biHeight: -side,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+        ..Default::default()
+    };
+    // SAFETY: 内存 DC 与 DIB 均在本函数内新建并配对释放；像素缓冲有 side² 个 32 位像素，
+    // 归 DIB 所有，只在 DIB 存活期间经此切片写入。
     unsafe {
-        let (brush, pen) = match fill {
-            Some(color) => {
-                SetDCBrushColor(dc, color);
-                (GetStockObject(DC_BRUSH), GetStockObject(NULL_PEN))
+        let memory = CreateCompatibleDC(Some(dc));
+        if memory.is_invalid() {
+            return;
+        }
+        let mut bits = std::ptr::null_mut();
+        if let Ok(bitmap) =
+            CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0)
+        {
+            if !bits.is_null() {
+                let pixels =
+                    std::slice::from_raw_parts_mut(bits.cast::<u32>(), (side * side) as usize);
+                disc(pixels, r, color, width);
+                let old = SelectObject(memory, bitmap.into());
+                for (x, y) in [(0, 0), (r, 0), (0, r), (r, r)] {
+                    let to_x = if x == 0 { rect.left } else { rect.right - r };
+                    let to_y = if y == 0 { rect.top } else { rect.bottom - r };
+                    let _ = GdiAlphaBlend(dc, to_x, to_y, r, r, memory, x, y, r, r, blend);
+                }
+                SelectObject(memory, old);
             }
-            None => {
-                SetDCPenColor(dc, line);
-                (GetStockObject(NULL_BRUSH), GetStockObject(DC_PEN))
-            }
-        };
-        let old_brush = SelectObject(dc, brush);
-        let old_pen = SelectObject(dc, pen);
-        // 无画笔时 GDI 填充少画右/下一像素，补齐。
-        let extra = fill.is_some() as i32;
-        let _ = RoundRect(
-            dc,
-            rect.left,
-            rect.top,
-            rect.right + extra,
-            rect.bottom + extra,
-            radius * 2,
-            radius * 2,
-        );
-        SelectObject(dc, old_pen);
-        SelectObject(dc, old_brush);
+            let _ = DeleteObject(bitmap.into());
+        }
+        let _ = DeleteDC(memory);
+    }
+}
+/// 半径 r 的圆铺满 2r×2r 像素，写成预乘 BGRA（DIB 字节序）；覆盖率按像素中心到圆周的
+/// 有符号距离在 ±0.5px 内线性过渡。描边为外圆减去同心内圆，与直边宽度一致、接缝连续。
+pub(crate) fn disc(pixels: &mut [u32], r: i32, color: COLORREF, width: Option<i32>) {
+    let side = 2 * r;
+    let [red, green, blue, _] = color.0.to_le_bytes();
+    let cover = |distance: f32| (0.5 - distance).clamp(0.0, 1.0);
+    for (index, pixel) in pixels.iter_mut().enumerate() {
+        let x = (index as i32 % side) as f32 + 0.5 - r as f32;
+        let y = (index as i32 / side) as f32 + 0.5 - r as f32;
+        let distance = (x * x + y * y).sqrt() - r as f32;
+        let inner = width.map_or(0.0, |w| cover(distance + w as f32));
+        let alpha = ((cover(distance) - inner) * 255.0).round() as u32;
+        let channel = |value: u8| ((u32::from(value) * alpha + 127) / 255) as u8;
+        *pixel = u32::from_le_bytes([channel(blue), channel(green), channel(red), alpha as u8]);
     }
 }
 pub(crate) fn draw_text(

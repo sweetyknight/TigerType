@@ -382,6 +382,67 @@ fn frame_rounds_corners_without_touching_the_opaque_interior() {
     );
 }
 
+#[test]
+fn round_antialiases_all_four_corners_and_keeps_straight_edges_solid() {
+    let ink = COLORREF(0x00_10_20_30);
+    let r = 8;
+    let at = |pixels: &[u32], x: i32, y: i32| pixels[(y * 2 * r + x) as usize];
+    let mut solid = vec![0; (4 * r * r) as usize];
+    disc(&mut solid, r, ink, None);
+    // 圆外透明、圆心旁不透明（GDI 0x00BBGGRR 转成 DIB 0xAARRGGBB），弧上半透明且为预乘。
+    assert_eq!(at(&solid, 0, 0), 0);
+    assert_eq!(at(&solid, r, r), 0xFF30_2010);
+    assert!(solid.iter().any(|p| (1..255).contains(&(p >> 24))));
+    for pixel in &solid {
+        let [blue, green, red, alpha] = pixel.to_le_bytes();
+        assert!(
+            blue <= alpha && green <= alpha && red <= alpha,
+            "{pixel:#x}"
+        );
+    }
+    // 描边：圆心镂空，外沿与 1px 直边接得上。
+    let mut ring = vec![0; (4 * r * r) as usize];
+    disc(&mut ring, r, ink, Some(1));
+    assert_eq!(at(&ring, r, r) >> 24, 0);
+    assert!(at(&ring, 0, r) >> 24 > 240);
+
+    // 真实 GDI 合成：四个角各自落在对应象限，直边仍是整像素实色。
+    let side = 40;
+    let white = COLORREF(0x00FF_FFFF);
+    let rect = RECT {
+        right: side,
+        bottom: side,
+        ..Default::default()
+    };
+    // SAFETY: 内存 DC 与位图只在本测试内使用，读完像素后还原并删除。
+    unsafe {
+        let screen = GetDC(None);
+        let dc = CreateCompatibleDC(Some(screen));
+        let bitmap = CreateCompatibleBitmap(screen, side, side);
+        ReleaseDC(None, screen);
+        let old = SelectObject(dc, bitmap.into());
+        for outline in [false, true] {
+            fill(dc, &rect, white);
+            round(dc, &rect, 10, (!outline).then_some(ink), ink);
+            let pixel = |x, y| GetPixel(dc, x, y);
+            for (x, y) in [(0, 0), (39, 0), (0, 39), (39, 39)] {
+                assert_eq!(pixel(x, y), white, "角外 ({x},{y})");
+            }
+            for (x, y) in [(20, 0), (0, 20), (39, 20), (20, 39)] {
+                assert_eq!(pixel(x, y), ink, "直边 ({x},{y})");
+            }
+            // (2,3) 离圆心约 r-0.08：四角镜像处都应是混合色，不是台阶的纯色或底色。
+            for (x, y) in [(2, 3), (37, 3), (2, 36), (37, 36)] {
+                assert!(![white, ink].contains(&pixel(x, y)), "弧 ({x},{y})");
+            }
+            assert_eq!(pixel(20, 20), if outline { white } else { ink });
+        }
+        SelectObject(dc, old);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(dc);
+    }
+}
+
 /// 只取出本窗口的点击通知并按系统流程派发，不处理其他消息。
 fn pump(popup: &Popup) {
     let mut message = MSG::default();

@@ -174,6 +174,60 @@ impl Drop for Canvas {
         }
     }
 }
+#[test]
+fn rounded_corners_are_antialiased_in_all_four_quadrants() {
+    let ink = rgb(0x302010);
+    let r = 8;
+    let at = |pixels: &[u32], x: i32, y: i32| pixels[(y * 2 * r + x) as usize];
+    let mut solid = vec![0; (4 * r * r) as usize];
+    disc(&mut solid, r, ink, None);
+    // 圆外透明、圆心旁不透明（GDI 0x00BBGGRR 转成 DIB 0xAARRGGBB），弧上半透明且为预乘。
+    assert_eq!(at(&solid, 0, 0), 0);
+    assert_eq!(at(&solid, r, r), 0xFF30_2010);
+    assert!(solid.iter().any(|p| (1..255).contains(&(p >> 24))));
+    for pixel in &solid {
+        let [blue, green, red, alpha] = pixel.to_le_bytes();
+        assert!(
+            blue <= alpha && green <= alpha && red <= alpha,
+            "{pixel:#x}"
+        );
+    }
+    let mut hollow = vec![0; (4 * r * r) as usize];
+    disc(&mut hollow, r, ink, Some(2));
+    assert_eq!(at(&hollow, r, r) >> 24, 0);
+    assert!(at(&hollow, 0, r) >> 24 > 240 && at(&hollow, 1, r) >> 24 > 240);
+
+    // 真实 GDI 合成：四个角各自落在对应象限，直边仍是整像素实色；描边一次画完，中间不漏底。
+    let canvas = Canvas::new(40, 40);
+    let white = 0x00FF_FFFF;
+    let rect = RECT {
+        left: 0,
+        top: 0,
+        right: 40,
+        bottom: 40,
+    };
+    for width in [None, Some(2)] {
+        fill(canvas.0, &rect, white);
+        rounded(canvas.0, &rect, 10, ink, width);
+        for (x, y) in [(0, 0), (39, 0), (0, 39), (39, 39)] {
+            assert_eq!(canvas.pixel(x, y), white, "角外 ({x},{y})");
+        }
+        for (x, y) in [(20, 0), (20, 1), (0, 20), (39, 20), (20, 38), (20, 39)] {
+            assert_eq!(canvas.pixel(x, y), ink, "直边 ({x},{y})");
+        }
+        // (2,3) 离圆心约 r-0.08：四角镜像处都应是混合色，不是台阶的纯色或底色。
+        for (x, y) in [(2, 3), (37, 3), (2, 36), (37, 36)] {
+            assert!(![white, ink].contains(&canvas.pixel(x, y)), "弧 ({x},{y})");
+        }
+        // (3,3) 离圆心约 r-0.81，落在 2px 描边内侧那道上：一次画完是实色；
+        // 拆成两道 1px 同心描边分别混合时这里只有约 79% 覆盖，会漏出底色。
+        assert_eq!(canvas.pixel(3, 3), ink, "圆角中段");
+        assert_eq!(
+            canvas.pixel(20, 20),
+            if width.is_some() { white } else { ink }
+        );
+    }
+}
 fn client(window: &Window, id: usize) -> RECT {
     let mut rect = RECT::default();
     // SAFETY: 只读本测试窗口控件的客户区。

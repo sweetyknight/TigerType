@@ -365,8 +365,7 @@ pub(super) fn draw_button(hwnd: HWND, dc: HDC) {
                 };
                 round(dc, &knob, s(7), Some(c.on_accent), c.on_accent);
             } else {
-                round(dc, &track, s(11), None, color(c.field));
-                round(dc, &inset(&track, 1), s(10), None, color(c.field));
+                rounded(dc, &track, s(11), color(c.field), Some(2));
                 let knob = RECT {
                     left: track.left + s(5),
                     top: top + s(6),
