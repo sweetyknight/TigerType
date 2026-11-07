@@ -973,7 +973,16 @@ pub(super) fn set_scroll_offset(hwnd: HWND, offset: i32) {
     // SAFETY: 只写本线程窗口的用户数据整数。
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, offset as _) };
 }
-/// 滚动到 position（逻辑像素）：按滚动条记录的范围夹紧，改了才重新布局。
+/// 按窗口 DPI 放置子控件。滚动的控件先换算布局位置再减去换算后的滚动量，
+/// 与滚动时按设备像素整块平移的结果一致（先相减再换算在 125%/150% 下会差 1px，平移后留下接缝）。
+pub(super) fn place(control: HWND, [x, y, width, height]: Box4, offset: i32) {
+    let s = |value| scale(control, value);
+    // SAFETY: 有效子控件；尺寸按当前窗口 DPI 转换，不传递业务状态。
+    unsafe { MoveWindow(control, s(x), s(y) - s(offset), s(width), s(height), 1) };
+}
+/// 滚动到 position（逻辑像素）：按滚动条记录的范围夹紧，在本次调用内平移并画完。
+/// 不能投递布局消息再排：拖动滚动条时系统模态循环会把它分发给窗口过程丢掉；连续滚轮/触控板输入
+/// 又让 WM_PAINT 一直排不上，控件已挪走而底图未重画，就是快速拖动时的残影。
 pub(super) fn scroll_to(hwnd: HWND, position: i32) {
     let mut info = SCROLLINFO {
         cbSize: size_of::<SCROLLINFO>() as u32,
@@ -986,9 +995,46 @@ pub(super) fn scroll_to(hwnd: HWND, position: i32) {
     }
     let max = (info.nMax - info.nPage as i32 + 1).max(0);
     let position = position.clamp(0, max);
-    if position != scroll_offset(hwnd) {
-        set_scroll_offset(hwnd, position);
-        post(hwnd, LAYOUT, 0);
+    let old = scroll_offset(hwnd);
+    if position == old {
+        return;
+    }
+    set_scroll_offset(hwnd, position);
+    info.fMask = SIF_POS;
+    info.nPos = position;
+    let dpi = scale(hwnd, 96);
+    // SAFETY: 结构与 RECT 为本地值；只平移、放置并重画本线程窗口及其子控件。
+    unsafe {
+        SetScrollInfo(hwnd, SB_VERT, &info, 1);
+        let mut area = RECT::default();
+        GetClientRect(hwnd, &mut area);
+        let lookup = !GetDlgItem(hwnd, QUERY as i32).is_null();
+        // 设置窗侧栏固定，只平移右侧内容区。
+        if !lookup {
+            area.left = scale(hwnd, SIDEBAR);
+        }
+        // 底图与可见控件按设备像素整块平移，只剩露出的一条需要重画。
+        ScrollWindowEx(
+            hwnd,
+            0,
+            scale(hwnd, old) - scale(hwnd, position),
+            &area,
+            &area,
+            null_mut(),
+            null_mut(),
+            SW_SCROLLCHILDREN | SW_INVALIDATE,
+        );
+        // 平移只带动与内容区相交的控件；其余按布局放到位，已在位的不动。
+        let controls = if lookup {
+            lookup_layout(hwnd, area.right * 96 / dpi, area.bottom * 96 / dpi).controls
+        } else {
+            settings_spec(current_page(hwnd), checked_in(hwnd, THEME + 4)).controls
+        };
+        for (id, layout) in controls {
+            place(GetDlgItem(hwnd, id as i32), layout, position);
+        }
+        // 当场画完露出的部分，不等可能被持续输入推迟的 WM_PAINT。
+        RedrawWindow(hwnd, null(), null_mut(), RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
 }
 
@@ -1072,13 +1118,13 @@ fn paint_window(hwnd: HWND) {
         let s = |value: i32| value * dpi / 96;
         let query = GetDlgItem(hwnd, QUERY as i32);
         if !query.is_null() {
-            // 与控件同按滚动位置上移；卡片高随当前资料而变。
-            let offset = scroll_offset(hwnd);
+            // 与控件同按滚动位置上移（换算方式同 place）；卡片高随当前资料而变。
+            let offset = s(scroll_offset(hwnd));
             let r = |[x, y, w, h]: Box4| RECT {
                 left: s(x),
-                top: s(y - offset),
+                top: s(y) - offset,
                 right: s(x + w),
-                bottom: s(y - offset + h),
+                bottom: s(y + h) - offset,
             };
             let spec = lookup_layout(hwnd, client.right * 96 / dpi, client.bottom * 96 / dpi);
             let card = r(spec.card);
@@ -1109,12 +1155,12 @@ fn paint_window(hwnd: HWND) {
                 ..client
             };
             fill(dc, &sidebar, c.sidebar);
-            let offset = scroll_offset(hwnd);
+            let offset = s(scroll_offset(hwnd));
             let r = |[x, y, w, h]: Box4| RECT {
                 left: s(x),
-                top: s(y - offset),
+                top: s(y) - offset,
                 right: s(x + w),
-                bottom: s(y - offset + h),
+                bottom: s(y + h) - offset,
             };
             let spec = settings_spec(current_page(hwnd), checked_in(hwnd, THEME + 4));
             for card in &spec.cards {
@@ -1250,7 +1296,7 @@ pub(super) unsafe extern "system" fn procedure(
                 unblock(hwnd);
                 0
             }
-            // 设置窗内容超出时纵向滚动；滚动条与滚轮都只改滚动位置，再交给事件循环重新布局。
+            // 内容超出时纵向滚动；滚动条与滚轮都在此当场平移（拖动滑块时本过程运行在系统模态循环里）。
             WM_VSCROLL => {
                 let mut info = SCROLLINFO {
                     cbSize: size_of::<SCROLLINFO>() as u32,

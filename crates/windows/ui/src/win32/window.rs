@@ -183,20 +183,6 @@ impl Window {
         // SAFETY: 本模块只发送已匹配控件类型的同步消息；字符串参数在调用方保持存活。
         unsafe { SendMessageW(self.control(id), message, w, l) }
     }
-    pub(super) fn place(&self, id: usize, [x, y, width, height]: Box4) {
-        let scale = |value| value * self.dpi as i32 / 96;
-        // SAFETY: 有效子控件；尺寸按当前窗口 DPI 转换，不传递业务状态。
-        unsafe {
-            MoveWindow(
-                self.control(id),
-                scale(x),
-                scale(y),
-                scale(width),
-                scale(height),
-                1,
-            );
-        }
-    }
     /// 字体随 DPI 与候选字体变化重建，控件全部换上新字体后才释放旧字体。
     pub(super) fn ensure_fonts(&mut self, face: CandidateFont) -> Result<(), String> {
         // SAFETY: 查询本线程拥有窗口的当前 DPI。
@@ -307,8 +293,8 @@ impl Window {
         let view = rect.bottom * 96 / dpi;
         let spec = lookup_layout(self.handle, rect.right * 96 / dpi, view);
         let offset = self.scroll_range(spec.height, view);
-        for (id, [x, y, width, height]) in spec.controls {
-            self.place(id, [x, y - offset, width, height]);
+        for (id, layout) in spec.controls {
+            place(self.control(id), layout, offset);
         }
         self.redraw();
     }
@@ -336,11 +322,11 @@ impl Window {
             checked_in(self.handle, THEME + 4),
         );
         let offset = self.scroll_range(spec.height, view);
-        for (id, place) in &spec.fixed {
-            self.place(*id, *place);
+        for (id, layout) in &spec.fixed {
+            place(self.control(*id), *layout, 0);
         }
-        for (id, [x, y, width, height]) in &spec.controls {
-            self.place(*id, [*x, y - offset, *width, *height]);
+        for (id, layout) in &spec.controls {
+            place(self.control(*id), *layout, offset);
         }
         for (id, _) in &self.controls {
             let visible = spec

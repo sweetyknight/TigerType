@@ -686,6 +686,52 @@ fn hidden_native_controls_roundtrip_unicode_settings_and_cleanup() {
         check(&settings, THEME + 4, true);
         settings.layout(defaults.candidate_font).unwrap();
         assert!(on(&settings, CUSTOM) && on(&settings, SWATCH + 3));
+        // 滚动在窗口过程里当场平移到位：拖动滚动条的系统模态循环会丢弃投递的布局消息，
+        // 连续滚轮又会推迟 WM_PAINT（控件已挪、底图未重画即残影），不能再靠事件循环补排。
+        let handle = settings.handle;
+        let top = |id: usize| {
+            let mut rect = RECT::default();
+            // SAFETY: 只读本测试窗口控件位置并换算到设置窗客户区，输出为本地值。
+            unsafe {
+                GetWindowRect(GetDlgItem(handle, id as i32), &mut rect);
+                MapWindowPoints(null_mut(), handle, (&mut rect as *mut RECT).cast(), 2);
+            }
+            rect.top
+        };
+        let mut message = MSG::default();
+        // SAFETY: 只取走本测试窗口先前排队的布局消息；MSG 为栈上值。
+        while unsafe { PeekMessageW(&mut message, settings.handle, LAYOUT, LAYOUT, PM_REMOVE) } != 0
+        {
+        }
+        // 行滚动 40 加触控板小步 28×48/120=11：奇数偏移在 125%/150% 下检验换算接缝。
+        // SAFETY: 同步发给本测试窗口，值类型参数。
+        unsafe {
+            SendMessageW(settings.handle, WM_VSCROLL, SB_LINEDOWN as usize, 0);
+            SendMessageW(
+                settings.handle,
+                WM_MOUSEWHEEL,
+                (-28i16 as u16 as usize) << 16,
+                0,
+            );
+        }
+        let offset = scroll_offset(settings.handle);
+        assert_eq!(offset, 51);
+        // SAFETY: 只查看本测试窗口队列。
+        let queued =
+            unsafe { PeekMessageW(&mut message, settings.handle, LAYOUT, LAYOUT, PM_NOREMOVE) };
+        assert_eq!(queued, 0, "滚动不能依赖投递的布局消息");
+        let s = |value| scale(handle, value);
+        let spec = settings_spec(1, true);
+        for _ in 0..2 {
+            for (id, [_, y, ..]) in &spec.controls {
+                assert_eq!(top(*id), s(*y) - s(offset), "控件 {id}");
+            }
+            for (id, [_, y, ..]) in &spec.fixed {
+                assert_eq!(top(*id), s(*y), "侧栏控件 {id} 不随内容滚动");
+            }
+            // 完整重排与平移结果一致，不再挪动任何控件。
+            settings.layout(defaults.candidate_font).unwrap();
+        }
         select_page(&mut settings, 0, defaults.candidate_font).unwrap();
         assert!(on(&settings, AUTO) && !on(&settings, CUSTOM) && !on(&settings, PREVIEW));
         show_options(&settings, defaults);
