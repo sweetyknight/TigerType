@@ -118,8 +118,6 @@ sudo '/Library/Input Methods/TigerType.app/Contents/MacOS/tigertype' uninstall
 - TigerType 不读取个人词库，不删除其他输入法及其数据
 - 码表取自虎码官网盘的“虎码秃版 小狼毫（Win）”方案包（2026.08.14），字体来源见 [`resources/fonts.lock.json`](resources/fonts.lock.json)
 
-码表与字体的授权尚未确认，仅供个人使用，安装包不公开发布。
-
 ## 项目文档
 
 - [实施方案](docs/implementation-plan.md)：产品范围、架构、验收和开发命令
