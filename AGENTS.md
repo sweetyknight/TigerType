@@ -4,7 +4,7 @@
 
 ## 产品与架构
 - 源码一级按 shared/windows/macos/linux，二级按职责；input-client 是宿主侧共享逻辑，input-method 是平台系统适配，ui/ui-model 只指查字/设置。产品不得反向依赖 tools/dev（含 dev/build），各平台产品不互相引用；具体允许边与目录归属由方案和架构测试同步维护，不保留旧包转发壳。
-- Windows 10/11 x64、x86 宿主；macOS 13+ 本机架构按方案分阶段实施（IMK 输入法进程，管理员安装到 `/Library/Input Methods`，仅个人使用、不做代码签名）；Linux 按方案的明确发行版/桌面矩阵实施，一个安装入口自动适配 IBus/Fcitx5，不要求用户另找工具或手改配置。专用 Rust 虎码单字/词引擎，不依赖 librime、Lua、OpenCC 运行库或 Rime 配置生态。
+- Windows 10/11 x64、x86 宿主；macOS 13+ 本机架构（IMK 输入法进程，管理员安装到 `/Library/Input Methods`，仅个人使用、不做代码签名）；Linux 按方案的明确发行版/桌面矩阵实施，一个安装入口自动适配 IBus/Fcitx5，不要求用户另找工具或手改配置。专用 Rust 虎码单字/词引擎，不依赖 librime、Lua、OpenCC 运行库或 Rime 配置生态。
 - 正式代码、开发工具和测试使用 Rust。Linux GNOME 经批准仅允许 `crates/linux/input-method/gnome/` 中的必要 GJS 候选显示适配（不放引擎、存储或提交逻辑），测试由 Rust 驱动实际 GJS 执行；不得使用 Shell 不安全模式/任意代码求值绕过扩展加载限制。Linux Fcitx5 经批准仅允许系统插件接口所必需的少量 C++ 胶水，不放引擎、存储或业务逻辑；框架原生候选面板允许使用系统主题，自有查字/设置仍遵守无蓝色约束。Windows 安装包经用户批准由 Inno Setup 编译，`.iss` 只含声明与停后台、登记/改名/清理占用旧文件的少量 Pascal，打包驱动仍为 Rust。macOS 打包、安装、升级与卸载全由 Rust 完成，不用 pkgbuild/productbuild/codesign/lipo/iconutil，链接后不改写可执行文件。
 - 资源占用从低：不引入异步运行时、通用界面框架（例外：Linux 查字/设置经批准用 GTK4，仅限 linux-ui）；空闲零定时唤醒。热点先剖析，确需时依次用 `core::arch`、`asm!`，只放在允许 unsafe 的平台边界，并有与安全实现的对照测试。
 - 只建立有实现的 crate。依赖边界由 Rust 架构测试检查；新增成员/依赖须同步方案、调用方与测试，不增加通配豁免。
@@ -21,7 +21,7 @@
 - 原件锁定只读；导入验证来源、大小/hash、格式、路径。失败不覆盖旧文件；拒绝越界、链接/目录联接。
 - Cargo/资源锁定；下载使用官方 HTTPS 并验证 hash。递归删除/移动先验证绝对目标；不得修改防护软件、全局 Git 配置或个人数据权限。
 - 锁定码表、字体与安装语言文件以原始字节入库（`resources/`、`installer/`，`.gitattributes` 禁止换行转换），换机克隆即可打包；`vendor/`、`.cache/`、`artifacts/`、`target/`、日志和数据库不入 Git。
-- 各平台安装器默认安装 `resources/fonts.lock.json` 中的全部字体，生僻字覆盖按完整码表检查，并单列候选窗/宿主实际回退验收；后续 Linux 同样执行，不只复制主字体。
+- 各平台安装器默认安装 `resources/fonts.lock.json` 中的全部字体，生僻字覆盖按完整码表检查；Windows/Linux 单列候选窗/宿主实际回退验收，不只复制主字体。
 - Linux 交付按发行版/版本分别构建，Rust 驱动使用系统 APT/dpkg 处理依赖和包事务；字体包与程序包分离，卸载不 autoremove、不删除个人数据。普通用户做会话登记，提权阶段只处理系统包；不在测试宿主根运行安装脚本来冒充隔离验收。
 
 ## 变更与文档
@@ -38,6 +38,6 @@ cargo run --locked --offline -p tigertype-dev --example check
 ```
 统一执行架构/文档、fmt、Clippy、x64/x86 常规测试；每批结束必须实际运行，失败不得标记完成。架构/文档检查也纳入普通 cargo test。
 - 非平凡逻辑有测试，检查器包含反例。缺缓存按方案“开发命令”准备，不跳过验证。
-- 完整资源、真实应用、预期故障和长时验收单列；ignored 不算 passed。
-- 统计后台和宿主 TSF 增量；微基准不代表端到端，短循环不替代两小时压力/八小时使用。
+- 完整资源检查单列；Windows/Linux 的真实输入与预期故障验收单列；ignored 不算 passed。
+- Windows 统计后台和宿主 TSF 增量；微基准不代表端到端，短循环不替代两小时压力/八小时使用。
 - 回复末尾说明未验证项和风险，不以代码量或测试数量代替实际完成。

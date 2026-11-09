@@ -5,7 +5,7 @@
 ## 产品范围
 - 产品名统一为 TigerType，crate 使用 `tigertype-*`、程序为 `tigertype.exe`，工作区目录为 `TigerType`，正式数据目录为 `%APPDATA%\TigerType`。窗口、IPC 管道/帧标识及目录所有权标记同步使用新名称；开发期不兼容旧名称的程序或受管目录，不迁移或改写已有数据。
 - Windows 10/11 x64、x86 宿主，含管理员和 UWP/AppContainer（沉浸式）宿主；Rust 专用单字/词引擎，不兼容 Rime。LPAC 宿主、UILess 模式和触摸键盘避让暂不支持；连不上后台时放行原键。
-- macOS 13+（构建机本机架构）按下文“macOS 端”分阶段实施，输入、查字、设置与外观功能同 Windows，入口、安装与系统集成按平台习惯；Linux 已批准 GTK4 查字/设置、IBus/Fcitx5 自动适配、组装、存储与统一安装入口，明确支持范围和验收见“多平台架构”的 Linux 一节。
+- macOS 13+（构建机本机架构）的输入、查字、设置与外观功能同 Windows，入口、安装与系统集成按平台习惯，详见“macOS 端”；Linux 已批准 GTK4 查字/设置、IBus/Fcitx5 自动适配、组装、存储与统一安装入口，明确支持范围和验收见“多平台架构”的 Linux 一节。
 - 单字模式用 tiger 单字表；词模式同官方词版，字词都能打：tigress 单字表与 tigress_ci、tigress_simp_ci 同桶，同码按官方权重降序，同权重保持“单字表、词表、简词表”原始行序（librime 的稳定排序）后按文本去重。两张单字表字码相同、权重不同，不能互换；不造词、不调频。常用字过滤同官方 core2022_filter，词中每个汉字都须在字集内，范围外的标点不参与。
 - 默认四码待选、下一码顶屏；可开启四码唯一自动上屏，唯一性在过滤/转换/去重后判定。
 - 空格选字、数字选重、分号次选、引号三选、翻页、退格、清屏、中英文切换；空码不误上屏；满四码空码时下一码顶上清屏（同小狼毫 `auto_clear: max_length`），无对应候选的选重、越界翻页等静默忽略，不弹文字提示（主流输入法均不弹）。
@@ -207,8 +207,9 @@ DLL 传输采用显式进程期驻留：默认 `Runtime::new` 仍拒绝 DLL，�
 查字/设置窗（ui 的 appkit 视图）：
 - 信息结构与交互同 Windows（查字窗为查询框、字块行与详情卡；设置窗为输入/外观/快捷键/高级四区、即时保存、重新载入、自定义四色与无蓝色板），共用 `tigertype_ui_model::model`。像素按 Windows 自绘规则逐项还原（开关行、分段、侧栏、主题卡、键帽、查询框与字块），派生色（侧栏/标题栏、轨道、选中底）与文案取自 ui-model，两端同源；只把字体换成系统字体与随包 Cascadia Mono、图标换成 SF Symbols，标题栏透明并按主题着色、外观随深浅；快捷键键帽写 Mac 键名（Control、Return、fn ↑/fn ↓），鼠标点击不夺焦点，焦点环只在键盘操作时出现。
 - 不出现蓝色：用户选了“多色”以外的系统强调色时，系统开关、分段控件、复选框、默认按钮与焦点环都改用用户强调色（默认蓝），应用的 `NSAccentColorName` 不生效。因此这些控件全部自绘；`focusRingType` 设为 none 后自画主题色焦点环，保留键盘可见焦点；字段编辑器显式设置选中文字背景与插入光标颜色（macOS 14 起光标随强调色）；滚动条用覆盖样式。
-- 窗口不用模态会话（`runModal`、模态表单），色板为自绘浮层而非同步弹出菜单，避免主线程进入跟踪循环时延迟其他应用的按键处理；M1 探针确认运行循环模式后再决定能否放宽。
+- 窗口不用模态会话（`runModal`、模态表单），色板为自绘浮层而非同步弹出菜单，避免主线程进入跟踪循环时延迟其他应用的按键处理。
 - 关闭窗口即释放视图与绘制缓存，只保留模型状态，再次打开时重建；“打开配置文件”经 `NSWorkspace` 交给默认编辑器。
+- 输入法不设应用编辑菜单，查询和色值框在编辑期间将 ⌘A/⌘C/⌘X/⌘V 交给系统字段编辑器；其他快捷键沿用原生响应链。单选互斥由共用模型负责，原生无障碍角色和值须与绘制结果一致。
 - 设置保存后，工作线程把新设置作为热重载消息交给引擎线程并回复主线程，生效时机同 Windows。
 
 数据：
@@ -234,9 +235,9 @@ DLL 传输采用显式进程期驻留：默认 `Runtime::new` 仍拒绝 DLL，�
 - 统一入口按宿主选目标：Windows 上照旧运行全部检查，另加 Apple 目标的 Clippy（只做类型检查、不链接）；Mac 上运行架构/文档、fmt、本机 Clippy、本机 lib/bin/集成与文档测试，另加两个 Windows 目标的 Clippy。两者都编译并测试 linux-ui 的样式表，GTK 部分不编译、原生测试报告未运行；Linux 目标须在 Linux 图形会话按“开发命令”检查。
 - 测试：平台无关层（含 backend 的进程内通道、截止时间、迟到回复丢弃与热重载）在两种宿主上都运行；macOS input-method 用合成客户端对象（实现 `IMKTextInput` 所需方法）验证标记文本、上屏、故障撤回与位置退路，不安装或激活输入法；候选面板与查字/设置窗做离屏渲染和隐藏窗口事件测试；安装器测试只操作新建临时目录、不触碰 `/Library`，覆盖链接拒绝、冲突副本与失败恢复。
 
-分阶段（每阶段统一入口通过并更新状态后再进入下一阶段）：
+边界约定：
 
-Windows 上可做纯逻辑测试和 Apple 目标类型检查，系统加载、实际输入及安装须在 Mac 验证，不能以交叉检查代替。不能在 Windows 执行的结果在项目状态保留待验收清单，不创建假 IMK 控制器、成功返回的假实现或占位空 crate。原生测试只在临时目录/合成客户端执行，实际安装、结束现用进程与启用输入法须另行授权。原生组件与真实输入法验收分别记录，Mac 原生执行与视觉/VoiceOver 验收未通过前，不宣称 Mac 输入法或阶段验收完成。
+Windows 上只执行纯逻辑测试和 Apple 目标类型检查，不创建假 IMK 控制器、成功返回的假实现或占位空 crate。原生测试只在临时目录/合成客户端执行，实际安装、结束现用进程与启用输入法须另行授权。
 
 - 按键边界区分普通输入动作与单击 Shift；Shift 即使产生切中英动作，原修饰键事件也始终放行。失焦/激活/故障清空半次 Shift，双 Shift 重叠或其他键/修饰键介入取消单击。未映射的 AppKit 功能键私用字符不作为文字发送。
 - 标记文本先校验长度及 UTF-8 光标/选区边界，再转换 UTF-16 折叠光标并构造整段单下划线；实际 `setMarkedText`/`insertText` 仍由 IMK 控制器执行，不把准备好的字符串当作上屏结果。
@@ -245,14 +246,6 @@ Windows 上可做纯逻辑测试和 Apple 目标类型检查，系统加载、�
 - `tigertype_macos_input_method::appkit::CandidatePanel` 每进程一份，`Location` 每控制器一份；输入展示只接收拥有所有权的快照与坐标，点击输出控制器/展示/快照/索引，不上屏。组装方须在焦点/连接改变时作废旧身份，并经 `accepts` 和 `tigertype_input_client::Host::select` 再验证。`Menu` 只返回带身份的语义动作，不依赖 ui；真正菜单创建与模式提示由 IMK 控制器回调驱动。
 - `tigertype_macos_ui::appkit::Views` 通过非阻塞的请求闭包和不可克隆 `Completion` 接工作线程。回复由主队列一次唤醒；不读盘、查询引擎、创建工作线程或轮询。工作线程必须在事务保存并提交热重载之后才返回 Saved；保存中后续编辑合并，失败回退，错配永久禁用。关闭释放原生视图，模型和在途操作继续存活。
 - Mac 合成预览仍只用内存资料，不启动正式后台或读取用户目录。统一 Windows 入口检查两个 Apple 目标的全部共享/Mac 产品和开发工具（含打包器）；Mac 入口实际执行共享/Mac 测试并交叉检查两个 Windows 目标，原生隐藏窗口/图标测试在主线程运行，不把交叉编译算作执行。
-
-1. M1 macOS 骨架与探针：引入并锁定 objc2 系列与 libc；macOS input-method 控制器、按键映射、标记文本与上屏、进程内通道、三线程组装、纯文字候选面板、最小 Info.plist、安装命令。探针三项：只有链接器签名的输入法能否从 `/Library/Input Methods` 被系统列出并加载；objc2 能否子类化 `IMKInputController`（类须在创建 IMKServer 前注册，全部回调 `catch_unwind`）；主线程进入菜单或窗口拖动跟踪循环时 IMK 消息是否被延迟。验收：TextEdit 中打字、选重、翻页、退格、单击 Shift、⌃.。
-2. M2 候选面板完整：主题、字体、视图模型、点击、位置退路、多显示器、全屏 Space、增强对比度、VoiceOver。
-3. M3 输入法菜单与查字/设置窗（appkit 视图、自绘控件、热重载、重新载入）。
-4. M4 打包与安装：图标现画、完整 Info.plist、安装/升级/卸载与冲突检测。
-5. M5 验收：TextEdit、备忘录、Safari、Chrome、VS Code（Electron）、终端、iTerm2、微信、Pages、Microsoft Office、JetBrains、Spotlight、密码框、全屏与多显示器、VoiceOver；按键处理预热 P95≤10ms、P99≤25ms、主动等待≤50ms；空闲 CPU 为零，常驻内存以 M1 实测为基线、长期使用不增长；两小时压力与八小时使用。
-
-Mac 验收须记录实际系统版本、Kaiti SC 是否可用、随包与系统字体的罕见字覆盖，以及只带链接器签名的输入法能否被系统发现、加载并正常输入（M1 探针）；实际结果只维护在项目状态。
 
 ## 数据与配置
 - Rust 工具只解析锁定的两张单字表、tigress 词码、常用字集、拼音单字/读音、词表内词的拼音、官方词读音（PYPhrases）、拆分和简繁映射（含短语）；不导入小狼毫外观配置（候选窗配色与字体由设置给出）。复用数据不是兼容运行时。
@@ -277,7 +270,7 @@ tools/dev 的 Rust 架构测试检查组件目录归属及 metadata 中 normal/b
 ```powershell
 cargo run --locked --offline -p tigertype-dev --example check
 ```
-统一运行架构/文档、fmt、Clippy、x64/x86；架构/文档也在普通 cargo test 中运行。统一入口按宿主选目标，另一平台至少做 Clippy 类型检查，见“macOS 端”的开发与检查。完整资源、真实应用、长时验收单列。无远程 CI、自动提交、后台监控；本地检查不等于不可绕过的提交保护。
+统一运行架构/文档、fmt、Clippy、x64/x86；架构/文档也在普通 cargo test 中运行。统一入口按宿主选目标，另一平台至少做 Clippy 类型检查，见“macOS 端”的开发与检查。完整资源检查单列；Windows/Linux 的真实输入验收另列。无远程 CI、自动提交、后台监控；本地检查不等于不可绕过的提交保护。
 
 统一入口对 x64/x86 显式选择 `--lib --bins --tests` 并分别执行 `--doc`，不让 Cargo 顺带重链接 Windows 上正在运行的检查器示例；本机 `--workspace --all-targets` Clippy 检查整个工作区（含异平台入口的条件声明及所有示例），与编辑器默认检查范围一致。Mac 仍只执行共享/Mac 原生测试，Windows 原生测试不能记为已在 Mac 通过；DLL 探针由其集成测试显式构建执行，不跳过单元/集成/文档测试。
 
@@ -313,7 +306,7 @@ cargo run --locked --offline -p tigertype-dev --example package
 
 码表、字体与语言文件都随仓库保存，每台打包机只需另装一次 Inno Setup 6.7.3：取自官方 <https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe>，SHA256 `9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732`，以 `/CURRENTUSER` 为当前用户安装（`%LOCALAPPDATA%\Programs\Inno Setup 6`，打包驱动只在此处查找）。`installer/windows/ChineseSimplified.isl` 取自同一标签的 <https://raw.githubusercontent.com/jrsoftware/issrc/is-6_7_3/Files/Languages/Unofficial/ChineseSimplified.isl>，SHA256 `7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278`。
 
-单列验收（ignored 项，不计入普通测试）：
+单列资源检查与 Windows 专项验收（ignored 项，不计入普通测试）：
 
 ```powershell
 # 完整码表与全部字体。
@@ -340,7 +333,7 @@ Mac 须在有图形登录会话的本机运行，以下均不注册或启用输�
 cargo test --locked --offline -p tigertype-macos-ui -p tigertype-macos-input-method --test appkit
 # 原生图标、全码表字体覆盖与缺字回退检查，输出 icns/PNG 到新建临时目录。
 cargo test --locked --offline -p tigertype-macos-app --test native
-# 人工视觉/交互对照：只用合成资料，保存与载入仅在内存，用 ⌘Q 退出。
+# 合成预览：只用合成资料，保存与载入仅在内存，用 ⌘Q 退出。
 cargo run --locked --offline -p tigertype-dev --example macos_views
 # 只构建本机 ARM64 包。
 cargo run --locked --offline -p tigertype-dev --example package
@@ -368,14 +361,14 @@ cargo run --locked --offline -p tigertype-linux-ui --example preview
 
 GTK 原生测试与预览以子进程让 fontconfig 另读 `resources/fonts`（缓存写临时目录），不安装字体，也不读写用户数据。输入法私有 D-Bus 测试不注册、启用或切换现用输入源；实际系统安装、字体缓存、APT 依赖、登录登记/卸载、框架启动和真实宿主输入另行授权验收。`cargo run --locked --offline -p tigertype-linux-app -- diagnose` 只读诊断当前桌面和框架，不更改系统。
 
-## 验收
-1. 每批运行完整统一入口；打包映射、锁定资源、真实宿主与长时验收按风险单列。输入法安装、注册、切换另须授权。
-2. 后续 macOS 按 M1–M5 验收；Linux 每批在 Linux 图形会话按“开发命令”执行统一检查并核对界面。发布前逐项验收目标发行版/桌面/显示协议、双框架输入链路、一键安装升级卸载与字体实际回退，不能把单个 Ubuntu 环境通过推广到全部目标。
+## 检查与 Windows/Linux 验收
+1. 每批运行完整统一入口；打包映射、锁定资源检查及 Windows/Linux 专项验收按风险单列。输入法安装、注册、切换另须授权。
+2. Linux 每批在 Linux 图形会话按“开发命令”执行统一检查并核对界面。发布前逐项验收目标发行版/桌面/显示协议、双框架输入链路、一键安装升级卸载与字体实际回退，不能把单个 Ubuntu 环境通过推广到全部目标。
 
 验收覆盖：简/全码、稳定顺序、两种四码模式、空码/翻页/退格/清屏、非 BMP；多音字、ü/v、多编码、缺资料、简繁一对多与去重、实际字形与码对应；查询不改变会话；超时/卡死/断连/迟到/旧快照不重复上屏；坏包/配置失败/路径攻击保留旧数据；故意架构违规失败。
 
 传输与宿主接入另覆盖：AppContainer 和低完整性子进程可连接、Untrusted 级被拒，沙箱与普通客户端都不能抢建实例；其他用户抢注管道名被宿主拒绝；第 17 个宿主触发回收，被回收宿主不丢键、不重放；编辑锁被拒时放行原键，过期点击不上屏。
 
-UI 验收覆盖配色、字体、布局、DPI、边缘定位、无障碍及常用应用/x86/管理员/UWP 宿主（开始菜单搜索、设置搜索框）；候选窗 UIA 约定和 IME WinEvent 用读屏器实测。性能目标：预热 P95≤10ms、P99≤25ms、主动等待≤50ms；统计后台+宿主增量，两小时压力和八小时使用。微基准、历史数据、测试数量不替代验收。
+Windows UI 验收覆盖配色、字体、布局、DPI、边缘定位、无障碍及常用应用/x86/管理员/UWP 宿主（开始菜单搜索、设置搜索框）；候选窗 UIA 约定和 IME WinEvent 用读屏器实测。Windows 性能目标：预热 P95≤10ms、P99≤25ms、主动等待≤50ms；统计后台+宿主增量，两小时压力和八小时使用。微基准、历史数据、测试数量不替代验收。
 
 旧故障因组件退役退出当前范围，不宣称修复。

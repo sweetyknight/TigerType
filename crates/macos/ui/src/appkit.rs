@@ -393,6 +393,48 @@ pub mod tests {
     use super::*;
     use objc2_foundation::{NSDate, NSDictionary, NSRunLoop};
     use tigertype_ui_model::editor::Setting;
+    fn editing_shortcuts(mtm: MainThreadMarker) {
+        let field = Field::new(
+            mtm,
+            "快捷键合成文本",
+            rect(0.0, 0.0, 200.0, 30.0),
+            Options::default().palette(),
+            |_| {},
+            |_| {},
+        );
+        // SAFETY: 独立隐藏窗口只承载合成字段编辑器，不改变用户剪贴板或真实应用。
+        let window = unsafe {
+            let window = NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(0.0, 0.0, 200.0, 30.0),
+                NSWindowStyleMask::Titled,
+                NSBackingStoreType::Buffered,
+                false,
+            );
+            window.setReleasedWhenClosed(false);
+            window
+        };
+        window.setContentView(Some(&field));
+        field.setStringValue(&NSString::from_str("合成abc"));
+        assert!(window.makeFirstResponder(Some(&field)));
+        let editor = field.currentEditor().unwrap();
+        editor.setSelectedRange(objc2_foundation::NSRange::new(5, 0));
+        let text = NSString::from_str("a");
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown, NSPoint::ZERO, NSEventModifierFlags::Command,
+            0.0, window.windowNumber(), None, &text, &text, false, 0,
+        ).unwrap();
+        assert!(
+            window.performKeyEquivalent(&event),
+            "无编辑菜单的输入法窗口也须处理 Command-A"
+        );
+        assert_eq!(editor.selectedRange(), objc2_foundation::NSRange::new(0, 5));
+        window.makeFirstResponder(None);
+        assert!(
+            !field.performKeyEquivalent(&event),
+            "未编辑的字段不得截获快捷键"
+        );
+    }
     fn drain(done: impl Fn() -> bool) {
         let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !done() {
@@ -415,6 +457,23 @@ pub mod tests {
         .expect("PNG 编码失败");
         assert!(png.len() > 100);
         std::fs::write(path, png.to_vec()).unwrap();
+    }
+    fn selected(view: &NSView, title: &str) -> Option<bool> {
+        for child in view.subviews() {
+            if let Some(button) = child.downcast_ref::<Button>()
+                && button.title().to_string() == title
+            {
+                assert_eq!(
+                    button.accessibilityRole().unwrap().to_string(),
+                    "AXRadioButton"
+                );
+                return Some(button.state() == NSControlStateValueOn);
+            }
+            if let Some(value) = selected(&child, title) {
+                return Some(value);
+            }
+        }
+        None
     }
     // 原生组件测试不启动产品进程；显式私有注册仓库字体，不要求用户安装系统字体。
     fn test_font() -> impl Drop {
@@ -462,6 +521,7 @@ pub mod tests {
         let _font = test_font();
         let mtm = MainThreadMarker::new().expect("AppKit 检查必须在主线程");
         let _app = NSApplication::sharedApplication(mtm);
+        editing_shortcuts(mtm);
         // 深浅主题都使用自己的次要色作占位文字，不依赖当前系统外观。
         let field = Field::new(
             mtm,
@@ -548,6 +608,14 @@ pub mod tests {
                 let window = &s.settings.as_ref().unwrap().native.window;
                 assert!(!window.isVisible());
                 let content = window.contentView().unwrap();
+                // 同一页的不同单选组均须保留原生选中状态，否则读屏器与绘制结果不一致。
+                for title in match page {
+                    0 => &["单字", "原字"][..],
+                    1 => &["霞鹜文楷", "5"][..],
+                    _ => &[],
+                } {
+                    assert_eq!(selected(&content, title), Some(true), "{title}");
+                }
                 render(
                     &content,
                     &root.join(format!("settings-{theme:?}-{page}.png")),

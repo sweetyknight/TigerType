@@ -187,7 +187,10 @@ impl Button {
         .iter()
         .any(|(start, count)| (*start..*start + count).contains(&id))
         {
-            self.setButtonType(NSButtonType::Radio);
+            // 单选互斥由共享模型负责，避免 AppKit 把同一父视图的不同分组一起清空。
+            self.setButtonType(NSButtonType::Switch);
+            // SAFETY: AppKit 导出的只读角色常量；保留读屏器的单选语义。
+            self.setAccessibilityRole(Some(unsafe { NSAccessibilityRadioButtonRole }));
         }
     }
     pub fn set_swatch(&self, value: Option<u32>) {
@@ -448,6 +451,23 @@ define_class!(
     // SAFETY: NSTextFieldDelegate 沿用 NSControlTextEditingDelegate 的约定。
     unsafe impl NSTextFieldDelegate for Field {}
     impl Field {
+        #[unsafe(method(performKeyEquivalent:))]
+        fn equivalent(&self,event:&NSEvent)->bool {callback(||{
+            // 输入法没有应用编辑菜单；只把当前文本框的标准快捷键交给系统字段编辑器。
+            let modifiers=event.modifierFlags() & (NSEventModifierFlags::Command|NSEventModifierFlags::Control|NSEventModifierFlags::Option|NSEventModifierFlags::Shift);
+            if modifiers==NSEventModifierFlags::Command && let Some(editor)=self.currentEditor() {
+                let action=match event.charactersIgnoringModifiers().as_ref().map(|s|s.to_string()).as_deref() {
+                    Some("a")=>Some(sel!(selectAll:)), Some("c")=>Some(sel!(copy:)),
+                    Some("x")=>Some(sel!(cut:)), Some("v")=>Some(sel!(paste:)), _=>None,
+                };
+                if let Some(action)=action {
+                    // SAFETY: 四个固定 selector 都是系统文本编辑器的单参数标准动作。
+                    return unsafe { editor.tryToPerform_with(action,Some(self)) };
+                }
+            }
+            // SAFETY: 其他按键继续走 NSTextField 原生响应链，不影响输入法或应用快捷键。
+            unsafe { msg_send![super(self),performKeyEquivalent:event] }
+        }).unwrap_or(false)}
         #[unsafe(method(becomeFirstResponder))]
         fn focus(&self)->bool{
             // SAFETY: 先交原生实现装入字段编辑器，再通知外框与选区配色。
